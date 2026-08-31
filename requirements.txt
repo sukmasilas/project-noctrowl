@@ -1,0 +1,7 @@
+# Milestone 2 — core ledger engine.
+# Kept deliberately minimal: no web framework yet (that's milestone 4),
+# no Google Drive / OCR libraries yet (milestone 3).
+SQLAlchemy==2.0.52
+psycopg2-binary==2.9.12
+python-dotenv==1.2.3
+pytest==9.1.1
