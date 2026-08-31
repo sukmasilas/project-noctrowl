@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Noctrowl — UI/UX Mockup (Milestone 1, static, no backend)</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --border: #e2e5ea;
+    --text: #1d2330;
+    --text-dim: #6b7280;
+    --navy: #1f3a5f;
+    --navy-dark: #16293f;
+    --accent: #3b6fd6;
+    --amber-bg: #fff4e0;
+    --amber-text: #92600a;
+    --amber-border: #f0c775;
+    --green-bg: #e7f6ec;
+    --green-text: #1c7a3d;
+    --green-border: #a9dfba;
+    --red-text: #b5342b;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+  }
+  .app { display: flex; height: 100vh; }
+
+  /* Sidebar */
+  .sidebar {
+    width: 200px;
+    background: var(--navy-dark);
+    color: #dfe6f0;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 18px 0;
+  }
+  .brand {
+    font-weight: 700;
+    font-size: 16px;
+    color: #fff;
+    padding: 0 18px 18px 18px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    margin-bottom: 10px;
+  }
+  .brand span { color: #7fa4e8; }
+  .nav-item {
+    padding: 10px 18px;
+    cursor: pointer;
+    color: #b9c4d6;
+    font-weight: 500;
+  }
+  .nav-item:hover { background: rgba(255,255,255,0.05); color: #fff; }
+  .nav-item.active { background: var(--navy); color: #fff; border-left: 3px solid var(--accent); }
+  .nav-sub { padding: 7px 18px 7px 34px; cursor: pointer; color: #97a4bb; font-size: 13px; }
+  .nav-sub:hover { color: #fff; }
+  .nav-sub.active { color: #fff; font-weight: 600; }
+  .nav-note {
+    margin-top: auto;
+    padding: 12px 18px;
+    font-size: 11px;
+    color: #6d7891;
+    border-top: 1px solid rgba(255,255,255,0.08);
+  }
+
+  /* Main */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .topbar {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .selector {
+    font-size: 13px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--text);
+  }
+  .status-badge {
+    margin-left: auto;
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid;
+  }
+  .status-badge.provisional { background: var(--amber-bg); color: var(--amber-text); border-color: var(--amber-border); }
+  .status-badge.final { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
+
+  .content { flex: 1; overflow-y: auto; padding: 22px 26px; }
+  .page { display: none; }
+  .page.active { display: block; }
+
+  h1 { font-size: 19px; margin: 0 0 4px 0; }
+  .subtitle { color: var(--text-dim); font-size: 13px; margin-bottom: 18px; }
+
+  .summary-bar {
+    display: flex;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+  .summary-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 18px;
+    min-width: 150px;
+  }
+  .summary-card .num { font-size: 22px; font-weight: 700; }
+  .summary-card .label { font-size: 12px; color: var(--text-dim); }
+  .summary-card.needs-review .num { color: var(--amber-text); }
+  .summary-card.matched .num { color: var(--green-text); }
+
+  .filters { display: flex; gap: 10px; margin-bottom: 14px; }
+  .filters select { font-size: 13px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { background: #fafbfc; color: var(--text-dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:last-child td { border-bottom: none; }
+  tr.row-clickable:hover { background: #f8f9fb; cursor: pointer; }
+
+  .badge { padding: 3px 9px; border-radius: 12px; font-size: 12px; font-weight: 600; display: inline-block; }
+  .badge.needs-review { background: var(--amber-bg); color: var(--amber-text); border: 1px solid var(--amber-border); }
+  .badge.needs-confirmation { background: #eef2fb; color: #3b5aa6; border: 1px solid #c8d6f0; }
+  .badge.matched { background: var(--green-bg); color: var(--green-text); border: 1px solid var(--green-border); }
+  .badge.posted { background: #eef1f6; color: var(--text-dim); border: 1px solid var(--border); }
+
+  .row-editor {
+    display: none;
+    background: #f8f9fc;
+    border: 1px dashed var(--border);
+    padding: 12px 16px;
+    margin: -1px 0 8px 0;
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
+  .row-editor.open { display: block; }
+  .row-editor label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+  .row-editor select, .row-editor input { width: 260px; padding: 6px 8px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 6px; }
+  .row-editor .save-btn { background: var(--accent); color: #fff; border: none; padding: 7px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+  .queued-note { font-size: 12px; color: var(--text-dim); margin-left: 10px; font-style: italic; }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+  .tab { padding: 9px 16px; cursor: pointer; color: var(--text-dim); font-weight: 600; font-size: 13.5px; border-bottom: 2px solid transparent; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .statement { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; max-width: 640px; }
+  .statement .line { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f1f4; }
+  .statement .line.clickable { cursor: pointer; }
+  .statement .line.clickable:hover .amount { text-decoration: underline; text-decoration-style: dotted; }
+  .statement .line.total { font-weight: 700; border-top: 2px solid var(--border); border-bottom: none; margin-top: 4px; padding-top: 10px; }
+  .statement .line.subtotal { font-weight: 600; }
+  .statement .line.indent { padding-left: 16px; color: var(--text-dim); }
+  .statement .section-label { font-weight: 700; margin-top: 14px; margin-bottom: 2px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
+  .elimination-note { font-size: 12px; color: var(--text-dim); background: #f8f9fc; border: 1px dashed var(--border); border-radius: 6px; padding: 8px 12px; margin-top: 10px; }
+
+  .modal-overlay {
+    display: none;
+    position: fixed; inset: 0; background: rgba(20,25,35,0.4);
+    align-items: center; justify-content: center; z-index: 50;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: #fff; border-radius: 10px; padding: 22px 26px; width: 460px; max-height: 70vh; overflow-y: auto;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.2);
+  }
+  .modal h3 { margin: 0 0 4px 0; font-size: 15px; }
+  .modal .modal-sub { color: var(--text-dim); font-size: 12.5px; margin-bottom: 14px; }
+  .modal table { border: none; }
+  .modal th, .modal td { font-size: 12.5px; padding: 7px 8px; }
+  .modal-close { float: right; background: none; border: none; font-size: 18px; cursor: pointer; color: var(--text-dim); }
+  .traceable-hint { font-size: 11px; color: var(--accent); margin-top: 12px; }
+
+  .banner {
+    background: #eef3fc; border: 1px solid #cfe0f7; color: #234a86;
+    padding: 8px 14px; border-radius: 6px; font-size: 12.5px; margin-bottom: 16px;
+  }
+  .empty-state { text-align: center; padding: 40px 20px; color: var(--text-dim); background: var(--panel); border: 1px dashed var(--border); border-radius: var(--radius); }
+
+  .doc-cards { display: flex; gap: 14px; margin-bottom: 22px; }
+  .doc-card { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+  .doc-card .doc-title { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+  .doc-card .doc-count { font-size: 20px; font-weight: 700; }
+  .doc-card .doc-meta { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .doc-card .doc-meta.empty { color: var(--amber-text); }
+  .doc-card a.drive-link { display: inline-block; margin-top: 10px; font-size: 12px; color: var(--accent); text-decoration: none; font-weight: 600; }
+  .doc-card a.drive-link:hover { text-decoration: underline; }
+  .section-heading { font-weight: 700; font-size: 14px; margin: 22px 0 10px 0; }
+
+  .doc-card.missing { border-color: #f3c1bb; background: #fdf3f1; }
+  .doc-card.not-yet { border-color: #cfe0f7; background: #f6f9fe; }
+  .doc-meta.missing-text { color: var(--red-text); font-weight: 600; }
+  .doc-meta.not-yet-text { color: #3b6fd6; }
+
+  .sync-btn {
+    background: var(--accent); color: #fff; border: none; padding: 8px 16px;
+    border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px;
+  }
+  .sync-btn:disabled { background: #a9bde3; cursor: not-allowed; }
+  .sync-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .sync-status-text { font-size: 12.5px; color: var(--text-dim); }
+  .topbar-sync { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); cursor: pointer; }
+  .topbar-sync:hover { color: var(--accent); }
+
+  .callout {
+    background: var(--amber-bg); border: 1px solid var(--amber-border); border-radius: var(--radius);
+    padding: 10px 14px; font-size: 13px; color: var(--amber-text); margin-top: 16px;
+  }
+  .callout a { color: var(--amber-text); font-weight: 600; text-decoration: underline; }
+
+  .shared-banner {
+    background: #eef3fc; border: 1px solid #cfe0f7; color: #234a86;
+    padding: 9px 14px; border-radius: 6px; font-size: 12.5px; margin: 10px 0 4px 0;
+  }
+
+  .login-overlay {
+    position: fixed; inset: 0; background: var(--navy-dark);
+    display: flex; align-items: center; justify-content: center; z-index: 100;
+  }
+  .login-card {
+    background: #fff; border-radius: 10px; padding: 32px 36px; width: 320px;
+    box-shadow: 0 16px 40px rgba(0,0,0,0.3); text-align: center;
+  }
+  .login-card .brand { color: var(--navy-dark); font-size: 20px; margin-bottom: 4px; padding: 0; border: none; }
+  .login-card .brand span { color: var(--accent); }
+  .login-card .login-sub { color: var(--text-dim); font-size: 12.5px; margin-bottom: 20px; }
+  .login-card input { width: 100%; padding: 9px 10px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+  .login-card button { width: 100%; background: var(--accent); color: #fff; border: none; padding: 10px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13.5px; }
+  .login-error { color: var(--red-text); font-size: 12px; margin-bottom: 10px; display: none; }
+
+  .settings-table { width: 100%; max-width: 460px; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .settings-table th, .settings-table td { padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 13px; text-align: left; }
+  .settings-table input { width: 70px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; text-align: right; }
+  .settings-note { font-size: 12px; color: var(--text-dim); margin-top: 10px; max-width: 460px; }
+</style>
+</head>
+<body>
+
+<div class="banner" style="margin:12px 24px 0 24px;">Static mockup — Milestone 1 (design pass). No backend, no real data. Sample figures only, for reviewing screens and flow before anything is built.</div>
+
+<div class="login-overlay" id="login-overlay">
+  <div class="login-card">
+    <div class="brand">Noc<span>trowl</span></div>
+    <div class="login-sub">Sign in to continue</div>
+    <div class="login-error" id="login-error">Incorrect username or password.</div>
+    <input type="text" placeholder="Username" id="login-user"/>
+    <input type="password" placeholder="Password" id="login-pass"/>
+    <button onclick="doLogin()">Log In</button>
+  </div>
+</div>
+
+<div class="app">
+  <div class="sidebar">
+    <div class="brand">Noc<span>trowl</span></div>
+    <div class="nav-item" data-page="documents" onclick="showPage('documents', this)">Documents</div>
+    <div class="nav-item" data-page="review-queue" onclick="showPage('review-queue', this)">Review Queue</div>
+    <div class="nav-item active" data-page="reports" onclick="showPage('reports', this)">Reports</div>
+    <div class="nav-sub active" data-tab="revenue" onclick="showReportTab('revenue', this)">Revenue</div>
+    <div class="nav-sub" data-tab="cashflow" onclick="showReportTab('cashflow', this)">Cash Flow</div>
+    <div class="nav-sub" data-tab="pl" onclick="showReportTab('pl', this)">Profit &amp; Loss</div>
+    <div class="nav-sub" data-tab="equity" onclick="showReportTab('equity', this)">Equity</div>
+    <div class="nav-item" data-page="settings" onclick="showPage('settings', this)">Settings</div>
+    <div class="nav-note">Prototype scope: Account 1 only, one month at a time. Other accounts added once online.</div>
+  </div>
+
+  <div class="main">
+    <div class="topbar">
+      <select class="selector" id="account-selector" onchange="onAccountChange()">
+        <option value="account1">Account 1</option>
+        <option value="account2">Account 2</option>
+        <option value="account3">Account 3</option>
+        <option value="consolidated">Consolidated</option>
+      </select>
+      <select class="selector">
+        <option>April 2026</option>
+      </select>
+      <div class="topbar-sync" onclick="showPage('documents', document.querySelector('.nav-item[data-page=documents]'))" title="Go to Documents to sync">⟳ Last synced: 6 min ago</div>
+      <div class="status-badge provisional" onclick="jumpToReviewQueue()">Provisional — 2 items need review, Bank Statement not yet received</div>
+    </div>
+
+    <div class="content">
+
+      <!-- DOCUMENTS PAGE -->
+      <div class="page" id="page-documents">
+        <h1>Documents</h1>
+        <div class="subtitle">Files still only get into the system via Google Drive — no in-app uploader, to keep upload traffic off the droplet. This screen is where you confirm they actually landed, trigger a check on demand, and see invoice data.</div>
+
+        <div class="sync-row">
+          <span class="sync-status-text" id="sync-status-text">Last synced: 6 min ago</span>
+          <button class="sync-btn" id="sync-btn" onclick="runSync()">Sync Now</button>
+        </div>
+
+        <div class="doc-cards">
+          <div class="doc-card">
+            <div class="doc-title">eBay Sales Export (CSV)</div>
+            <div class="doc-count">1 file</div>
+            <div class="doc-meta">Uploaded — last synced today, 6:12 AM</div>
+            <a class="drive-link" href="#" onclick="return false;">Open in Drive ↗</a>
+          </div>
+          <div class="doc-card missing">
+            <div class="doc-title">Bank Statements (PDF)</div>
+            <div class="doc-count">0 files</div>
+            <div class="doc-meta missing-text">Missing — expected by Aug 7</div>
+            <a class="drive-link" href="#" onclick="return false;">Open in Drive ↗</a>
+          </div>
+          <div class="doc-card">
+            <div class="doc-title">Payoneer Exports (CSV)</div>
+            <div class="doc-count">1 file</div>
+            <div class="doc-meta">Uploaded — last synced today, 6:12 AM</div>
+            <a class="drive-link" href="#" onclick="return false;">Open in Drive ↗</a>
+          </div>
+          <div class="doc-card">
+            <div class="doc-title">Invoices &amp; Proof of Purchase</div>
+            <div class="doc-count">3 files</div>
+            <div class="doc-meta">Not a fixed expectation — count varies</div>
+            <a class="drive-link" href="#" onclick="return false;">Open in Drive ↗</a>
+          </div>
+        </div>
+
+        <div class="callout">2 transactions labeled COGS/Consignment Payout in the Review Queue have no matching invoice record. <a href="#" onclick="jumpToReviewQueue(); return false;">View in Review Queue</a></div>
+
+        <div class="section-heading">Invoices &amp; Proof of Purchase — All Accounts (Consolidated), April 2026</div>
+        <div class="subtitle" style="margin-top:-6px;">Not filtered by the account selector above — COGS purchases are funded from the shared BCA Main account and don't trace to one eBay account, so invoices live at the consolidated level.</div>
+        <table>
+          <thead>
+            <tr><th>Date</th><th>Vendor / Description</th><th>Amount</th><th>Purpose</th><th>Source File</th><th>Status</th><th>Matched</th></tr>
+          </thead>
+          <tbody>
+            <tr class="row-clickable" onclick="toggleRow('inv1')">
+              <td>Apr 2</td><td>Tokopedia — TCG lot (structured receipt)</td><td>Rp 18,200,000</td><td>COGS Purchase</td>
+              <td><a href="#" onclick="event.stopPropagation(); return false;">tokopedia-order-4471.pdf</a></td>
+              <td><span class="badge matched">Parsed</span></td><td>✓ Matched to bank line, Apr 2</td>
+            </tr>
+            <tr><td colspan="7" style="border:none; padding:0;"></td></tr>
+
+            <tr class="row-clickable" onclick="toggleRow('inv2')">
+              <td>Apr 14</td><td>[unclear] — watch parts, handwritten receipt</td><td>Rp ??? (read as 9,4??,000)</td><td>—</td>
+              <td><a href="#" onclick="event.stopPropagation(); return false;">shop-receipt-scan-0414.jpg</a></td>
+              <td><span class="badge needs-confirmation">Needs Confirmation</span></td><td>Awaiting confirmation</td>
+            </tr>
+            <tr id="editor-inv2-row"><td colspan="7" style="padding:0; border:none;">
+              <div class="row-editor" id="editor-inv2">
+                <label>Date</label>
+                <input type="text" value="Apr 14"/><br/>
+                <label>Vendor / Description</label>
+                <input type="text" value="watch parts (confirm vendor name)"/><br/>
+                <label>Amount (IDR)</label>
+                <input type="text" value="9,400,000"/><br/>
+                <label>Purpose</label>
+                <select>
+                  <option selected>COGS Purchase</option>
+                  <option>Consignment Purchase</option>
+                </select><br/>
+                <button class="save-btn" onclick="saveRow('inv2')">Save</button>
+                <span class="queued-note" id="queued-inv2"></span>
+              </div>
+            </td></tr>
+
+            <tr class="row-clickable" onclick="toggleRow('inv3')">
+              <td>Apr 18</td><td>BCA Transfer Confirmation — screenshot</td><td>Rp 15,660,000</td><td>—</td>
+              <td><a href="#" onclick="event.stopPropagation(); return false;">bca-transfer-0418.png</a></td>
+              <td><span class="badge needs-confirmation">Needs Confirmation</span></td><td>Awaiting confirmation</td>
+            </tr>
+            <tr id="editor-inv3-row"><td colspan="7" style="padding:0; border:none;">
+              <div class="row-editor" id="editor-inv3">
+                <label>Date</label>
+                <input type="text" value="Apr 18"/><br/>
+                <label>Vendor / Description</label>
+                <input type="text" value="BCA transfer — confirm this is a proof-of-transfer, not a duplicate of the Payoneer withdrawal"/><br/>
+                <label>Amount (IDR)</label>
+                <input type="text" value="15,660,000"/><br/>
+                <label>Purpose</label>
+                <select>
+                  <option>COGS Purchase</option>
+                  <option>Consignment Purchase</option>
+                  <option selected>— Select —</option>
+                </select><br/>
+                <button class="save-btn" onclick="saveRow('inv3')">Save</button>
+                <span class="queued-note" id="queued-inv3"></span>
+              </div>
+            </td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- REVIEW QUEUE PAGE -->
+      <div class="page" id="page-review-queue">
+        <h1>Review Queue</h1>
+        <div class="subtitle">The one screen you edit transaction-level data on. Everything else is read-only, computed from what's posted here.</div>
+
+        <div class="summary-bar">
+          <div class="summary-card needs-review"><div class="num">2</div><div class="label">Needs review — Account 1, Apr 2026</div></div>
+          <div class="summary-card matched"><div class="num">6</div><div class="label">Matched (auto-posted)</div></div>
+          <div class="summary-card"><div class="num">8</div><div class="label">Total lines this period</div></div>
+        </div>
+
+        <div class="filters">
+          <select><option>Account: Account 1</option></select>
+          <select><option>Month: April 2026</option></select>
+          <select><option>Status: All</option><option>Needs Review</option><option>Matched</option></select>
+          <select><option>Source: All</option><option>Payoneer CSV</option><option>Bank PDF</option></select>
+        </div>
+
+        <table>
+          <thead>
+            <tr><th>Date</th><th>Description</th><th>Amount</th><th>Source</th><th>Status</th><th>Category</th><th>Posted</th></tr>
+          </thead>
+          <tbody id="rq-body">
+            <tr class="row-clickable" onclick="toggleRow('r1')">
+              <td>Apr 3</td><td>PAYONEER WITHDRAWAL REF#88213</td><td>Rp 14,820,000 <span style="color:var(--text-dim); font-size:11px;">(~$920 USD)</span></td><td>Payoneer CSV</td>
+              <td><span class="badge matched">Matched</span></td><td>Revenue Settlement</td><td><span class="badge posted">✓ Apr 4</span></td>
+            </tr>
+            <tr id="editor-r1-row"><td colspan="7" style="padding:0; border:none;">
+              <div class="row-editor" id="editor-r1"></div>
+            </td></tr>
+
+            <tr class="row-clickable" onclick="toggleRow('r2')">
+              <td>Apr 5</td><td>TRSF E-BANKING CR 0405/... 22,000,000</td><td>Rp 22,000,000</td><td>Bank PDF</td>
+              <td><span class="badge needs-review">Needs Review</span></td><td>—</td><td>—</td>
+            </tr>
+            <tr id="editor-r2-row"><td colspan="7" style="padding:0; border:none;">
+              <div class="row-editor" id="editor-r2">
+                <label>Category</label>
+                <select id="cat-r2">
+                  <option>— Select —</option>
+                  <option>Revenue Settlement</option>
+                  <option>COGS</option>
+                  <option>Internal Transfer</option>
+                  <option>Consignment Payout</option>
+                  <option>Operating Expense</option>
+                  <option>Owner's Draw</option>
+                  <option>Other</option>
+                </select><br/>
+                <button class="save-btn" onclick="saveRow('r2')">Save</button>
+                <span class="queued-note" id="queued-r2"></span>
+              </div>
+            </td></tr>
+
+            <tr class="row-clickable" onclick="toggleRow('r3')">
+              <td>Apr 6</td><td>DB CONSIGNOR PAYOUT - M.RAHMAN</td><td>Rp 3,120,000</td><td>Bank PDF</td>
+              <td><span class="badge needs-review">Needs Review</span></td><td>—</td><td>—</td>
+            </tr>
+            <tr id="editor-r3-row"><td colspan="7" style="padding:0; border:none;">
+              <div class="row-editor" id="editor-r3">
+                <label>Category</label>
+                <select id="cat-r3" onchange="toggleConsignorField()">
+                  <option>— Select —</option>
+                  <option>Revenue Settlement</option>
+                  <option>COGS</option>
+                  <option>Internal Transfer</option>
+                  <option selected>Consignment Payout</option>
+                  <option>Operating Expense</option>
+                  <option>Owner's Draw</option>
+                  <option>Other</option>
+                </select><br/>
+                <label>Consignor / Item Reference</label>
+                <input type="text" value="M. Rahman — CONSIGN-0231 (Rolex Datejust)"/><br/>
+                <button class="save-btn" onclick="saveRow('r3')">Save</button>
+                <span class="queued-note" id="queued-r3"></span>
+              </div>
+            </td></tr>
+
+            <tr class="row-clickable" onclick="toggleRow('r4')">
+              <td>Apr 8</td><td>PAYONEER FEE - WITHDRAWAL</td><td>Rp 234,000</td><td>Payoneer CSV</td>
+              <td><span class="badge matched">Matched</span></td><td>Payout Fee</td><td><span class="badge posted">✓ Apr 9</span></td>
+            </tr>
+            <tr><td colspan="7" style="border:none; padding:0;"></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- REPORTS PAGE -->
+      <div class="page active" id="page-reports">
+
+        <div class="tabs">
+          <div class="tab active" data-tab="revenue" onclick="showReportTab('revenue', this)">Revenue</div>
+          <div class="tab" data-tab="cashflow" onclick="showReportTab('cashflow', this)">Cash Flow</div>
+          <div class="tab" data-tab="pl" onclick="showReportTab('pl', this)">Profit &amp; Loss</div>
+          <div class="tab" data-tab="equity" onclick="showReportTab('equity', this)">Equity</div>
+        </div>
+
+        <!-- Revenue -->
+        <div class="report-view active" id="report-revenue">
+          <h1>Revenue — Account 1, April 2026</h1>
+          <div class="subtitle">Every number below is clickable — click any line to see the source transactions it's built from.</div>
+          <div class="statement">
+            <div class="line clickable" onclick="openDrill('Sales Revenue', 'Gross sale price of every stock/pre-order order this period, before eBay fees.', [['Apr 2','Order #40218 — Charizard VMAX PSA10','Rp 4,850,000'],['Apr 5','Order #40255 — Blue-Eyes lot (3x)','Rp 2,100,000'],['Apr 11','Order #40310 — Rolex Datejust (consignment, excl.)','—'],['…','12 more orders','…']])">
+              <span>Sales Revenue</span><span class="amount">Rp 61,400,000</span>
+            </div>
+            <div class="line indent clickable" onclick="openDrill('Sales Returns & Allowances', 'Refunds/discounts eBay deducted at the Wallet or Payoneer stage. Contra-revenue — never netted silently into Sales Revenue.', [['Apr 9','Refund — Order #40240 (buyer return)','(Rp 890,000)']])">
+              <span>Less: Sales Returns &amp; Allowances</span><span class="amount">(Rp 890,000)</span>
+            </div>
+            <div class="line clickable" onclick="openDrill('Consignment Commission Income', 'Seller\'s commission only — the rest of each consignment sale passes through to the consignor and is never revenue.', [['Apr 11','Commission — Order #40310 (Rolex Datejust)','Rp 468,000']])">
+              <span>Consignment Commission Income</span><span class="amount">Rp 468,000</span>
+            </div>
+            <div class="line total"><span>Net Revenue</span><span class="amount">Rp 60,978,000</span></div>
+          </div>
+        </div>
+
+        <!-- Cash Flow -->
+        <div class="report-view" id="report-cashflow" style="display:none;">
+          <h1>Cash Flow — <span id="cf-scope">Account 1</span>, April 2026</h1>
+          <div class="subtitle">Switch accounts above: Account 1 and Account 2 share one Payoneer wallet, so their figures diverge at the eBay Wallet stage but read identically from Payoneer onward. Account 3 is fully independent. Consolidated shows both the shared-pool dedupe and the inter-account transfer elimination.</div>
+          <div class="statement">
+            <div class="section-label">Operating Activities</div>
+            <div class="line clickable" onclick="openDrill('eBay Wallet inflow', 'Gross settlements landing in this account\'s own eBay Wallet before Payoneer. This figure is always account-specific, even when the Payoneer wallet downstream is shared.', [['Apr 1–30','Settlements for this account','see amount']])"><span>eBay Wallet inflow</span><span class="amount" id="cf-ebay-wallet">Rp 62,300,000</span></div>
+            <div class="line indent">Less: eBay Wallet clawbacks (refunds)</div>
+            <div class="shared-banner" id="cf-shared-banner" style="display:none;"></div>
+            <div class="line clickable" onclick="openDrill('Payoneer Wallet inflow', 'Net amount landing in Payoneer after eBay Wallet-stage clawbacks. If this Payoneer wallet is shared, this is the pooled total across both accounts, not a per-account split.', [['Apr 1–30','Settlements into this Payoneer wallet','see amount']])"><span>→ Payoneer Wallet inflow</span><span class="amount" id="cf-payoneer-inflow">Rp 61,410,000</span></div>
+            <div class="line clickable" onclick="openDrill('Payoneer withdrawal to BCA Bridging', 'USD→IDR conversion at withdrawal. Payout fee and FX spread booked as two separate lines, not blended.', [['Apr 4','Withdrawal — fee Rp 234,000, FX spread +Rp 118,000','Rp 14,820,000'],['Apr 18','Withdrawal — fee Rp 210,000, FX spread –Rp 42,000','Rp 15,660,000']])"><span>→ Withdrawn to BCA Bridging (IDR)</span><span class="amount" id="cf-withdrawn">Rp 30,480,000</span></div>
+            <div class="section-label">Inter-Account Transfer</div>
+            <div class="line" id="cf-transfer-line"><span>Transfer out to BCA Main</span><span class="amount" id="cf-transfer">(Rp 30,480,000)</span></div>
+            <div class="elimination-note" id="cf-elimination-note" style="display:none;">Consolidated view: this transfer is the seller's own money moving between their own accounts — eliminated here so it doesn't inflate or deflate real external cash flow, the same way intercompany transfers are eliminated in consolidated accounting. The Payoneer-onward figures above are also deduped here, not summed from each account's displayed number — Account 1 and Account 2 show the same shared-pool total, so naively adding all three accounts' Payoneer figures would double-count that pool.</div>
+          </div>
+        </div>
+
+        <!-- P&L -->
+        <div class="report-view" id="report-pl" style="display:none;">
+          <h1>Profit &amp; Loss — Consolidated, April 2026</h1>
+          <div class="subtitle">Consolidated only — COGS, payroll and opex don't reliably trace to one eBay account, so this statement is never split per account.</div>
+          <div class="statement">
+            <div class="line clickable" onclick="openDrill('Net Revenue', 'See the Revenue statement for the full breakdown.', [['—','See Revenue tab','Rp 60,978,000']])"><span>Net Revenue</span><span class="amount">Rp 60,978,000</span></div>
+            <div class="line clickable" onclick="openDrill('Cost of Goods Sold', 'Recognized at time of purchase/shipment for both stock and pre-order models — not held as an Inventory asset.', [['Apr 2','Invoice — TCG lot purchase (Tokopedia)','Rp 18,200,000'],['Apr 14','Invoice — watch parts (proof of transfer)','Rp 9,400,000']])"><span>Cost of Goods Sold</span><span class="amount">(Rp 27,600,000)</span></div>
+            <div class="line subtotal total"><span>Gross Profit</span><span class="amount">Rp 33,378,000</span></div>
+            <div class="section-label">Operating Expenses</div>
+            <div class="line indent">eBay Selling Fees</div><div class="line indent" style="margin-top:-8px;"><span></span><span class="amount">(Rp 6,140,000)</span></div>
+            <div class="line indent">Payout Fee</div><div class="line indent" style="margin-top:-8px;"><span></span><span class="amount">(Rp 444,000)</span></div>
+            <div class="line indent">Payroll</div><div class="line indent" style="margin-top:-8px;"><span></span><span class="amount">(Rp 8,000,000)</span></div>
+            <div class="line indent">General Operating Expenses</div><div class="line indent" style="margin-top:-8px;"><span></span><span class="amount">(Rp 2,150,000)</span></div>
+            <div class="line subtotal total"><span>Operating Income</span><span class="amount">Rp 16,644,000</span></div>
+            <div class="section-label">Other Income / Expense</div>
+            <div class="line indent">Realized FX Gain/Loss</div><div class="line indent" style="margin-top:-8px;"><span></span><span class="amount">Rp 76,000</span></div>
+            <div class="line indent">Unrealized FX Gain/Loss</div><div class="line indent" style="margin-top:-8px;"><span></span><span class="amount">(Rp 31,000)</span></div>
+            <div class="line total"><span>Net Income</span><span class="amount">Rp 16,689,000</span></div>
+          </div>
+        </div>
+
+        <!-- Equity -->
+        <div class="report-view" id="report-equity" style="display:none;">
+          <h1>Statement of Equity — Consolidated, April 2026</h1>
+          <div class="subtitle">Consolidated only — capital and draws are owner-level, business-wide concepts.</div>
+          <div class="statement">
+            <div class="line"><span>Owner's Capital (beginning + contributions)</span><span class="amount">Rp 250,000,000</span></div>
+            <div class="line"><span>Retained Earnings, beginning</span><span class="amount">Rp 41,200,000</span></div>
+            <div class="line"><span>Net Income (this period)</span><span class="amount">Rp 16,689,000</span></div>
+            <div class="line"><span>Owner's Draw</span><span class="amount">(Rp 5,000,000)</span></div>
+            <div class="line total"><span>Ending Equity</span><span class="amount">Rp 302,889,000</span></div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- SETTINGS PAGE -->
+      <div class="page" id="page-settings">
+        <h1>Settings</h1>
+        <div class="subtitle">Consignor Payout Tiers — replaces the old Google Sheet. Editing a rate here only affects consignment sales processed after the change; already-posted sales aren't touched (corrections to posted rows aren't supported yet).</div>
+
+        <table class="settings-table">
+          <thead>
+            <tr><th>Price Range (USD)</th><th>Rate</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>$0.99 – $14.99</td><td><input type="text" value="72"/> %</td></tr>
+            <tr><td>$15.00 – $49.99</td><td><input type="text" value="78"/> %</td></tr>
+            <tr><td>$50.00 – $99.99</td><td><input type="text" value="80"/> %</td></tr>
+            <tr><td>$100.00 – $2,499.99</td><td><input type="text" value="82"/> %</td></tr>
+            <tr><td>$2,500.00 – $4,999.99</td><td><input type="text" value="83"/> %</td></tr>
+            <tr><td>$5,000.00 – $7,499.99</td><td><input type="text" value="85"/> %</td></tr>
+            <tr><td>$7,500.00+</td><td style="color:var(--text-dim); font-style:italic;">No fixed rate — manual contact required</td></tr>
+          </tbody>
+        </table>
+        <div class="settings-note">The $7,500+ tier is never auto-applied, per CLAUDE.md — it always requires manual contact with the consignor.</div>
+        <button class="sync-btn" style="margin-top:16px;" onclick="this.innerText='Saved'">Save Changes</button>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-overlay" onclick="if(event.target===this) closeModal()">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal()">×</button>
+    <h3 id="modal-title"></h3>
+    <div class="modal-sub" id="modal-sub"></div>
+    <table><tbody id="modal-body"></tbody></table>
+    <div class="traceable-hint">This drill-down is why every report figure has to trace back to real ledger transactions — no black-box totals.</div>
+  </div>
+</div>
+
+<script>
+  function showPage(page, el) {
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('.nav-sub').forEach(n => n.classList.remove('active'));
+    el.classList.add('active');
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById('page-' + page).classList.add('active');
+  }
+
+  function showReportTab(tab, el) {
+    showPage('reports', document.querySelector('.nav-item[data-page="reports"]'));
+    document.querySelectorAll('.nav-sub').forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('[data-tab="' + tab + '"]').forEach(n => n.classList.add('active'));
+    document.querySelectorAll('.report-view').forEach(r => r.style.display = 'none');
+    document.getElementById('report-' + tab).style.display = 'block';
+  }
+
+  function toggleRow(id) {
+    const editor = document.getElementById('editor-' + id);
+    if (!editor) return;
+    editor.classList.toggle('open');
+  }
+
+  function toggleConsignorField() {}
+
+  function saveRow(id) {
+    document.getElementById('queued-' + id).innerText = 'Saved — queued for next sync';
+  }
+
+  function jumpToReviewQueue() {
+    showPage('review-queue', document.querySelector('.nav-item[data-page="review-queue"]'));
+  }
+
+  function runSync() {
+    const btn = document.getElementById('sync-btn');
+    const statusText = document.getElementById('sync-status-text');
+    btn.disabled = true;
+    btn.innerText = 'Syncing…';
+    statusText.innerText = 'Running: Drive check, eBay sync, matching, report recompute…';
+    setTimeout(() => {
+      statusText.innerText = 'Synced just now — no new files found since last run';
+      btn.innerText = 'Sync Now (cooldown 2:00)';
+      let secondsLeft = 120;
+      const cooldown = setInterval(() => {
+        secondsLeft -= 1;
+        const m = Math.floor(secondsLeft / 60), s = String(secondsLeft % 60).padStart(2, '0');
+        btn.innerText = 'Sync Now (cooldown ' + m + ':' + s + ')';
+        if (secondsLeft <= 0) {
+          clearInterval(cooldown);
+          btn.innerText = 'Sync Now';
+          btn.disabled = false;
+        }
+      }, 1000);
+    }, 1400);
+  }
+
+  const cashFlowData = {
+    account1:     { scope: 'Account 1',   ebayWallet: 'Rp 62,300,000',  payoneerInflow: 'Rp 61,410,000', withdrawn: 'Rp 30,480,000', transfer: '(Rp 30,480,000)', sharedWith: 'Account 2' },
+    account2:     { scope: 'Account 2',   ebayWallet: 'Rp 38,900,000',  payoneerInflow: 'Rp 61,410,000', withdrawn: 'Rp 30,480,000', transfer: '(Rp 30,480,000)', sharedWith: 'Account 1' },
+    account3:     { scope: 'Account 3',   ebayWallet: 'Rp 21,150,000',  payoneerInflow: 'Rp 20,760,000', withdrawn: 'Rp 20,300,000', transfer: '(Rp 20,300,000)', sharedWith: null },
+    consolidated: { scope: 'Consolidated', ebayWallet: 'Rp 122,350,000', payoneerInflow: 'Rp 82,170,000', withdrawn: 'Rp 50,780,000', transfer: '(Rp 50,780,000)', sharedWith: null, consolidated: true }
+  };
+
+  function onAccountChange() {
+    const val = document.getElementById('account-selector').value;
+    const d = cashFlowData[val];
+    document.getElementById('cf-scope').innerText = d.scope;
+    document.getElementById('cf-ebay-wallet').innerText = d.ebayWallet;
+    document.getElementById('cf-payoneer-inflow').innerText = d.payoneerInflow;
+    document.getElementById('cf-withdrawn').innerText = d.withdrawn;
+    document.getElementById('cf-transfer').innerText = d.transfer;
+
+    const banner = document.getElementById('cf-shared-banner');
+    if (d.sharedWith) {
+      banner.style.display = 'block';
+      banner.innerText = 'This Payoneer wallet is shared with ' + d.sharedWith + '. Everything from here down is the pooled total for both accounts — not split between them, since there\'s no non-arbitrary way to divide commingled cash.';
+    } else {
+      banner.style.display = 'none';
+    }
+
+    document.getElementById('cf-elimination-note').style.display = d.consolidated ? 'block' : 'none';
+    document.getElementById('cf-transfer-line').style.opacity = d.consolidated ? '0.35' : '1';
+  }
+
+  function openDrill(title, sub, rows) {
+    document.getElementById('modal-title').innerText = title;
+    document.getElementById('modal-sub').innerText = sub;
+    const body = document.getElementById('modal-body');
+    body.innerHTML = rows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td><td style="text-align:right;">' + r[2] + '</td></tr>').join('');
+    document.getElementById('modal-overlay').classList.add('open');
+  }
+  function closeModal() {
+    document.getElementById('modal-overlay').classList.remove('open');
+  }
+
+  function doLogin() {
+    const user = document.getElementById('login-user').value.trim();
+    const pass = document.getElementById('login-pass').value.trim();
+    if (user.length > 0 && pass.length > 0) {
+      document.getElementById('login-overlay').style.display = 'none';
+    } else {
+      document.getElementById('login-error').style.display = 'block';
+    }
+  }
+
+  onAccountChange();
+</script>
+
+</body>
+</html>

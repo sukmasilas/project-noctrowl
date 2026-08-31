@@ -1,0 +1,30 @@
+# Secrets — never commit real credentials
+.env
+.env.*
+!.env.example
+secrets/*
+!secrets/README.md
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Local throwaway SQLite DB (fallback when DATABASE_URL isn't set — never real data)
+*.db
+*.sqlite
+*.sqlite3
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

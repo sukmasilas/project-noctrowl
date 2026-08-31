@@ -1,0 +1,267 @@
+# Project-Noctrowl
+
+## What this is
+Bookkeeping & financial reporting system for a multi-category eBay reselling business based in Indonesia (books kept in IDR). Built for one business's specific workflow, not a general accounting SaaS.
+
+**Fresh start (2026-08-27):** this replaces the earlier `project-noctrowl` folder, which was built around a Google Sheets/Sheets-API interface. That approach was scrapped as too much integration hassle for too little payoff — this project is now a **standalone, self-hosted web app**, built step by step in verifiable layers (see Build milestones below). All of the business/accounting rules below carried over unchanged from the earlier version — only the architecture and build process are new.
+
+## Business model
+- Seller operates 3 eBay accounts. Categories sold are TCG cards, luxury watches, and automotive parts — but accounts do **not** map 1:1 to categories. At least one account carries two categories, and the system should assume any account could mix categories (don't hardcode a single-category-per-account rule anywhere).
+- Each account has its own eBay Wallet (an eBay-internal USD holding balance, before Payoneer) and its own eBay API credentials — this part is genuinely 1:1 per eBay account.
+- **Payoneer wallets are NOT 1:1 with eBay accounts (clarified 2026-08-31).** Two of the three eBay accounts share one Payoneer wallet; the third has its own independent Payoneer wallet. This is a specific known fact about this business's actual setup, not a general many-to-many pattern to design for — but the data model must treat "Payoneer wallet" and "BCA bridging account" as their own entities that an eBay account *references* (many-to-one where it applies), never hardcode a strict one-Payoneer-wallet-per-eBay-account assumption. The downstream **BCA bridging account is shared the same way**: the shared Payoneer wallet withdraws to one shared local bank account, not two — so for this business there are **2 wallet-groups** (Payoneer + BCA bridging pairs), not 3, even though there are 3 eBay accounts and 3 eBay Wallets.
+- Money flow: eBay account (USD sale) → that account's own **eBay Wallet** (USD, held inside eBay itself) → its **Payoneer wallet** (USD — shared with another eBay account for two of the three) → payout/withdrawal request converts USD → IDR and disburses to that wallet-group's local bank — the **BCA bridging account** in practice, IDR, pure pass-through with no real operational activity — → periodically transferred/consolidated into the master bank account — the centralized **BCA main account**, where actual operations happen (buying inventory, payroll, etc.). The USD→IDR conversion happens specifically at the Payoneer withdrawal step — this is where realized FX gain/loss actually crystallizes (see FX rules below). See `docs/flowcharts.md` for a visual of this flow.
+  - **Refund/discount clawbacks:** eBay can deduct money for refunds or discounts at two points before it ever reaches IDR — directly from the eBay Wallet, and again from the Payoneer wallet. Don't assume the amount landing in Payoneer equals the gross sale price. These deductions post to a **Sales Returns & Allowances** contra-revenue account (see Chart of accounts), never silently netted into revenue.
+  - **Cash flow attribution stops being per-eBay-account at the Payoneer stage for the two accounts that share a wallet.** Each account's eBay Wallet activity (inflows, refund clawbacks) is genuinely distinct and attributable per account. Once money lands in the shared Payoneer wallet, it's commingled — there is no non-arbitrary way to say "this withdrawal was Account 1's dollars vs. Account 2's," the same category of problem already avoided for shared-shipping category P&L. See Accounting scope below for how per-account Cash Flow reporting handles this honestly instead of forcing a fake split.
+  - The inter-account transfers into the BCA main account are internal movements of the seller's own money, not revenue or expense, and must never be double-counted:
+  - Per-account cash flow shows money leaving a wallet-group's bank as a transfer-out (for the shared pair, this transfer-out is attributed to the wallet-group, not split further between its two eBay accounts — see above).
+  - Consolidated cash flow must eliminate the transfer (it nets to zero across accounts) and only show the true external inflows/outflows — same logic as intercompany eliminations in consolidated accounting.
+  - The ledger needs an explicit "inter-account transfer" transaction type from day one so Builder doesn't accidentally book these as income or misc expense.
+- Three sales models running concurrently, sometimes within the same account:
+  a. Stock model: buys inventory up front, lists it, sells it. COGS is recognized **at time of purchase**, not held as an Inventory asset and matched to the later sale — inventory documentation isn't mature enough yet to reliably tie a specific purchase to the specific item that eventually sells, and purchases are often consolidated (shared shipping/costs across multiple items), so specific-item costing isn't feasible right now. This means stock and pre-order models share the same COGS timing (expensed when purchased) — the only difference between them is whether the purchase happens before or after the sale. Revisit specific-item costing once inventory tracking matures — a phase 2+ candidate, not built speculatively.
+  b. Pre-order/dropship model: lists item before owning it; buys and ships only after it sells. COGS is incurred after the sale, not before.
+  c. Consignment model: lists items owned by a third party (consignor), stored in seller's warehouse. On sale, seller ships to buyer, collects payment, then reimburses the consignor (minus commission/fee) after payment clears. Until reimbursed, the amount owed to the consignor is a liability, not revenue.
+- Single sales channel: eBay only (no Etsy/Shopify etc. to reconcile).
+
+## Category tagging (revenue analytics only — not a P&L dimension)
+- Every transaction should be tagged with its product category (TCG / Watches / Auto parts), pulled automatically from eBay's own category ID / item specifics on the listing or order.
+- This tag exists for **revenue-side analytics** (phase 2 sales report: revenue by category, sell-through, etc.) — it is explicitly **not** used to produce category-level P&L in phase 1.
+- Reason: when one account mixes categories, a single eBay order can bundle items from different categories under one shared shipment charge. There's no clean, non-arbitrary way to allocate that shared cost by category, so a category P&L would rely on a made-up allocation rule. Revenue is directly attributable per line item; cost often isn't, once shipping is shared across categories in the same order.
+- If category-level profitability is wanted later, the honest approach is an explicit, documented allocation rule (e.g. by weight or item value) — flagged as an approximation, not book fact. Do not build this speculatively; revisit only if the user asks for it.
+
+## Accounting scope
+Phase 1 deliverables — **not uniformly organized by account**. Whether something is per-account or consolidated-only depends on whether the underlying data actually traces to one account without guessing:
+- **Revenue reporting**: per eBay account + consolidated. Every sale is unambiguously tied to the account it sold through.
+- **Cash Flow statement**: per eBay account + consolidated (with inter-account transfers eliminated in the consolidated view — see Money flow above). For the third account (independent Payoneer wallet), the full chain (eBay Wallet → Payoneer → BCA bridging) is genuinely distinct and traceable per account. **For the two accounts sharing a Payoneer wallet (clarified 2026-08-31), per-account cash flow is only real through the eBay Wallet stage** — Payoneer inflow, withdrawal, and the transfer-out to BCA Main are reported at the **wallet-group level** (both accounts show the identical shared-pool figures for that portion, clearly labeled as shared), not force-split per account. This is the same honesty principle already applied to shared-shipping category costs: no arbitrary allocation rule invented just to make a per-account number exist.
+- **Profit & Loss statement**: **consolidated only.** COGS, Payroll, and General Operating Expenses are paid from the shared BCA main account and don't reliably trace back to one specific eBay account (COGS especially, given inventory purchases aren't documented item-by-item — see Business model). Splitting P&L per account would need an arbitrary allocation rule — the same problem already avoided for category-level P&L, so it isn't done here either.
+- **Statement of Equity/Owner's equity**: **consolidated only.** Capital and draws are business-wide, owner-level concepts — one owner, one pool of capital, not one per eBay storefront.
+
+Per-account Revenue and Cash Flow reports are a **reversible presentation choice**, not a data-model commitment: every transaction is tagged by account regardless (already required for cash flow accuracy and consolidated-transfer elimination), so per-account reporting is just a view on top of data the ledger tracks either way. If per-account reporting turns out not to be useful or practical once this is running for real, Builder can simply stop generating those views and work from the Consolidated view only — no ledger or tagging changes required, and nothing to treat as a breaking change.
+
+Phase 2 (not built yet — flag and suggest, don't build): Sales report/analytics layer using the category tag (best-sellers, category performance, sell-through rate). Other future candidates to propose as the build progresses: specific-item COGS / inventory valuation (once inventory tracking matures), PPh Final UMKM tax estimate, per-SKU profitability, category-level revenue (not full P&L) breakdown.
+
+**Confirmed 2026-08-31**: the user already manually estimates per-transaction COGS today, informally and outside the formal books, by allocating a bundled purchase's cost across the items it covers (by weight/value/estimate — not a fixed rule). This stays **out of scope for now** — the formal ledger keeps expensing COGS in aggregate at time of purchase (see Business model, Stock model) — but it's a useful reference point for whenever specific-item COGS is actually built as a phase 2+ feature: an allocation-based approach is already the user's own practiced method, not a hypothetical.
+
+Core accounting rules:
+- Double-entry, accrual basis.
+- Consignment: record consignor payable as a liability at the moment the item sells; clear the liability when reimbursement is actually paid out.
+  - Liability is tracked as **one aggregate "Consignor Payable" account**, not per individual consignor — a separate system (not this one) will handle consignor-level relationship/operational tracking; Project-Noctrowl is accounting only. This has no effect on the correctness of P&L, cash flow, or equity (the liability never touches P&L, reimbursement is a plain cash outflow, and it never touches equity) — it only affects internal visibility into who's owed what.
+  - Even though liability is aggregate, retain a consignor/item reference field on each individual consignment transaction (same pattern as category tagging: not used for statement rollups, but preserved for traceability and so a future consignment system can reconcile against this ledger without re-architecting it).
+  - Consignment items are identified via a dedicated SKU/code convention on the eBay listing: a **`CONSIGN-` prefix**. Any listing/order without that prefix defaults to **normal (stock/pre-order) sale treatment** — full revenue recognized, no consignment liability booked. This is a deliberate default, not a gap to fix: it means historical or uncoded listings won't retroactively get consignment treatment even if they actually were consignment — accuracy on this only starts once coding is applied going forward.
+  - Consignment commission income is booked to its own **Consignment Commission Income** revenue line, separate from Sales Revenue (see Chart of accounts) — only the commission is revenue; the rest passing through to the consignor is never revenue.
+  - **Payout formula**: Consignor payout = **item price × tier rate**, where item price excludes shipping and tier rate comes from a price-tiered schedule (the user's "Pasal 3" table: $0.99–14.99→72%, $15–49.99→78%, $50–99.99→80%, $100–2,499.99→82%, $2,500–4,999.99→83%, $5,000–7,499.99→85%, $7,500+→no fixed rate, requires manual contact — never auto-applied). The consignor is fully insulated from eBay's selling fees and from shipping — both stay entirely with the seller (shipping is a deliberate margin safeguard on cheap items; fees always book to `eBay Selling Fees` regardless of consignment). Sales tax collected by eBay is a pure pass-through and is never booked in the ledger at all. The tier table itself lives in a **simple admin-editable table in the app** (decided 2026-08-31 — see the Consignor Payout Tiers screen in Architecture), not hardcoded and not a spreadsheet. Manual per-transaction rate overrides (e.g. promotions) are meant to flow through the review queue once that exists; until then, every consignment sale uses the tier lookup with no override path.
+- Pre-order/dropship: recognize COGS when the seller actually purchases/ships the item, not at listing time.
+- Inter-account bank transfers (see Money flow above) are a distinct non-P&L, non-revenue transaction type.
+- Reporting currency is IDR. eBay proceeds settle in USD in each account's Payoneer wallet, then convert to IDR when the user requests a payout to that account's local bank.
+  - Book each sale using Indonesia's official weekly tax exchange rate (Kurs Pajak, published by the Ministry of Finance / Kemenkeu at fiskal.kemenkeu.go.id/informasi-publik/kurs-pajak) as the booking-date reference rate. This is explicitly not the same as the rate actually realized — it's a consistent, authoritative reference for the initial accrual entry only.
+  - The realized FX gain/loss crystallizes specifically at the Payoneer payout/withdrawal step (USD wallet balance → IDR landing in the local bank). At that point, split the total difference into two distinct line items — never one blended number:
+    - **Payout fee** (Payoneer's flat USD fee on the withdrawal) — post as an operating expense, not FX gain/loss.
+    - **FX spread** — the difference between the booking-rate-implied IDR amount and Payoneer's actual "exchange rate (excluding fee)" applied to the net USD converted — post as realized FX gain/loss.
+    - Payoneer's withdrawal confirmation states both the fee and the "exchange rate (excluding fee)" explicitly — use those stated figures directly rather than inferring them.
+  - At each reporting period close (month-end), revalue any USD balance still sitting unwithdrawn in a Payoneer wallet using Kemenkeu's end-of-month Kurs Pajak rate — not Payoneer's, since there's no actual Payoneer conversion event to reference for a balance that hasn't been withdrawn. This produces an **unrealized FX gain/loss** at period-end, distinct from the realized FX gain/loss recognized at actual withdrawal. Do not conflate the two.
+  - Keep the original USD amount as a reference field on every transaction (not a full parallel USD ledger) so margins can be sanity-checked without FX noise. IDR is the single source of truth for all statements.
+- eBay selling fees (final value fee, etc.) are booked as a separate **eBay Selling Fees** operating expense — revenue is recognized **gross** (full sale price), never net of eBay's fees. Requires eBay's sync data to report the gross sale price and fees as separate figures, not just a blended net payout amount.
+- Indonesia-specific tax compliance (SAK EMKM/UMKM norms, PPh Final UMKM 0.5%) is a phase 2+ concern. Don't hardcode tax logic yet, but don't design the ledger in a way that makes adding it later painful.
+
+## Chart of accounts
+Draft chart of accounts, grouped by statement section. **eBay Wallet is per eBay account (3 of these — genuinely 1:1). Payoneer Wallet and BCA Bridging Account are per wallet-group, not per eBay account (clarified 2026-08-31) — this business has 2 wallet-groups: one shared by two eBay accounts, one belonging to the third alone. So there are 3 eBay Wallets but only 2 Payoneer Wallets and 2 BCA Bridging Accounts.** Everything else is shared/consolidated. Treat this as the starting structure — Builder should flag to Main-agent if implementation reveals a needed account not listed here, rather than inventing one silently.
+
+**Assets**
+- eBay Wallet (USD, per eBay account — 3 total)
+- Payoneer Wallet (USD, per wallet-group — 2 total; one wallet-group is shared by two eBay accounts)
+- BCA Bridging Account (IDR, per wallet-group — 2 total, same grouping as Payoneer Wallet above)
+- BCA Main Account (IDR, centralized)
+
+**Liabilities**
+- Consignor Payable (aggregate)
+
+**Equity**
+- Owner's Capital
+- Owner's Draw
+- Retained Earnings
+
+**Revenue**
+- Sales Revenue (stock + pre-order sales, gross of eBay fees)
+- Consignment Commission Income (seller's commission on consignment sales only)
+- Sales Returns & Allowances (contra-revenue: refunds/discounts deducted by eBay at the eBay Wallet or Payoneer stage)
+
+**Cost of Goods Sold**
+- Cost of Goods Sold (stock and pre-order models both: recognized at time of purchase/shipment — see Business model for why specific-item/Inventory costing isn't used yet)
+
+**Operating Expenses**
+- eBay Selling Fees
+- Payout Fee (Payoneer withdrawal fee)
+- Payroll
+- General Operating Expenses
+
+**Other Income / Expense**
+- Realized FX Gain/Loss
+- Unrealized FX Gain/Loss
+
+## Data sources & inputs
+**Scope change (2026-08-31): eBay API sync is deferred.** The prototype now runs fully manual — every data source, including eBay sales data, comes in via file upload through Google Drive. API sync (for eBay, or anything else) is a future step, designed on its own once the manual pipeline is proven end-to-end (see Build milestones). This section describes the manual-only state; do not build API integration ahead of that decision.
+
+- **eBay sales data: manual CSV export upload, per account, per month** (not API sync, for now). Same Drive-upload pattern as everything else below. Category tag (see Category tagging above) should be pulled from this same export **if the export includes it** — open question, since the exact eBay export format (which columns/fields are present — gross price vs. net, fees broken out, category/item specifics) hasn't been confirmed yet. Don't assume; confirm against a real sample export before building parsing logic (same rule already applied to bank/invoice samples below).
+- Payoneer wallet activity (**per wallet-group, not per eBay account** — clarified 2026-08-31, see Business model — one wallet-group's export can contain settlements from two different eBay accounts), USD: manual upload for now. Payoneer supports CSV export (Transactions page or Reports & Statements), which includes Source, Target, Reference ID, Store Name, and Additional Description columns — structured data, not OCR. Prefer this as the primary source for matching eBay payouts, since Reference ID/Store Name can match directly against eBay order data.
+- Local bank statements (**per wallet-group, same grouping as Payoneer above**, IDR) and the master consolidated bank statement (IDR): manual upload only, no bank API. **Format is PDF only** for these — expect noisier parsing than a structured export; text/OCR extraction is required before any matching logic runs.
+- All four document types (eBay sales CSV, Payoneer CSV, local bank PDF, master bank PDF) are uploaded roughly monthly, in batches.
+- Purchase invoices / proof-of-transfer (for COGS and consignment purchases): manual upload only for now, at the **consolidated (Master Account) level, not per eBay account** (corrected 2026-08-31 — inventory purchases are funded from the shared BCA Main account and don't trace back to one specific eBay account, same reasoning as the consolidated-only P&L). Unlike bank/Payoneer data, invoices were originally only referenced implicitly (as something the auto-match logic checks against) — clarified 2026-08-31: invoices get the same OCR-extraction-plus-human-confirmation treatment as bank statement PDFs (see below), not silent best-effort parsing. The confirmed sample set (a structured Tokopedia receipt, a handwritten shop receipt, and a screenshot-style BCA transfer confirmation) is intentionally mixed reliability, so this can't be OCR-only.
+- All manual uploads go through Google Drive; the system should watch/import from designated Drive folders rather than requiring a custom upload UI. Drive is **plain file storage only** here — no Sheets API, no automation beyond reading files out of the folders (see Architecture).
+
+## Invoice & proof-of-purchase capture
+Clarified 2026-08-31, alongside the Documents screen design (see `docs/design/ui-ux-design.md`): invoices/proof-of-transfer are extracted into their own structured records — Date, Vendor/Description, Amount, Purpose (COGS Purchase / Consignment Purchase), linked source file — not left as opaque files the auto-match logic blindly checks against.
+- Each extracted invoice gets a status: **Parsed** (high-confidence OCR) or **Needs Review** (low-confidence or a format the system isn't sure it read correctly — expect this often on handwritten receipts).
+- A Needs Review invoice record is human-correctable (Date/Vendor/Amount/Purpose fields, editable in the Documents screen), same interaction pattern as a Needs Review bank line in the review queue.
+- This does **not** introduce a new accounting-safety mechanism — the bank transaction classification rule in the next section already guarantees an unlabeled bank line never silently posts as COGS. What invoice capture adds is **traceability**: a correctly-labeled COGS line should be able to trace back to the actual invoice document, not just to the bank transaction that paid it. A COGS figure that can't be traced to an invoice record fails the "numbers are traceable" rule in Definition of done even if the amount itself happens to be right.
+- Invoice records are visible/correctable in the app (Documents screen); the files themselves still only enter the system via Google Drive, same as bank statements and Payoneer exports.
+
+## Bank transaction classification (review queue)
+Two source types feed the review queue, with different reliability: Payoneer CSV exports are structured data with a Reference ID/Store Name, so they can usually auto-match an eBay payout with high confidence. Local/master bank PDFs only give a date, an amount, and a raw description after OCR — often not enough on their own to know if a line is an inter-account transfer, a consignment reimbursement, an operating expense, or an owner's draw. Because the local/master bank side is PDF-only (noisier extraction) and the user explicitly does not want to hand-edit the final reports, classification happens through a dedicated **review queue screen in the app**, separate from the read-only report views:
+
+1. After OCR/text extraction, each bank line is run against auto-match logic in priority order: (a) match to an expected eBay payout by account/date/amount from the eBay sync data → classify as revenue settlement, (b) match to an uploaded invoice amount → classify as COGS, (c) match to a known/expected inter-account transfer amount → classify as internal transfer, (d) match to a consignment reimbursement owed (per the accrual liability) → classify as consignment payout, (e) recurring-description keyword rules (e.g. eBay/Payoneer fee line items) for anything else confidently recognizable.
+2. Every line gets a status: **Matched** (auto-classified, high confidence) or **Needs review** (no confident match — including OCR extractions the system isn't sure it read correctly).
+3. Matched and Needs-review lines are both stored (Postgres) and visible in the review queue so the user can see everything, but only **Needs review** rows require action — the user fills in / corrects the category directly on that row in the app.
+4. Once a Needs-review row has a category filled in, the backend picks it up on the next sync and posts it to the ledger. Matched rows post automatically without waiting on the user.
+5. A review-queue row must never be posted to the ledger silently guessed — if it's unmatched and unlabeled, it stays flagged and simply doesn't post yet (no forced best-guess classification, no auto-posting of an unlabeled line as a default category).
+6. The backend must track which review-queue rows have already been posted (e.g. a "posted" marker/timestamp column in Postgres) so re-running the sync never double-posts a transaction the user already labeled.
+7. **Corrections to a posted row are out of scope for the prototype (decided 2026-08-31).** Once a row posts, it's final — there's no reopen/reverse flow yet. This is a deliberate, acknowledged gap, not an oversight: revisit before real production use, since a real bookkeeping workflow will eventually need to fix a mislabeled row after the fact. Don't build a workaround for this speculatively.
+
+This review queue is the **one place** the user interacts with transaction-level data. The final P&L / cash flow / equity report views remain read-only, computed output — the user never edits those directly. See Report finalization status below for how outstanding Needs-review rows gate a report from being marked Final.
+
+## Architecture
+- **Standalone, self-hosted web app** (backend + UI), running on the existing DigitalOcean droplet. No Google Sheets anywhere in the interface or backing store:
+  - **Login gate (decided 2026-08-31)** — a basic username/password screen gates access to everything below. Financial data shouldn't sit behind nothing but "hope the droplet's URL stays obscure," so this is in scope for milestone 4 itself, not a later hardening pass. Single shared login is sufficient for the prototype (one owner/user) — no roles/permissions system needed yet.
+  - **Documents screen** — ingestion status + invoice records (see Bank transaction classification and Invoice & proof-of-purchase capture above).
+  - **Review queue screen** — where the user labels bank transactions the system couldn't confidently auto-match (see Bank transaction classification above). The only screen the user edits transaction-level data on.
+  - **Consignor Payout Tiers screen (decided 2026-08-31)** — a simple admin-editable table for the price-tiered consignor payout rates (the "Pasal 3" schedule — see Core accounting rules). Replaces the old Google Sheet mechanism; edits here take effect on the next consignment sale lookup, no code change needed when rates change.
+  - **Report views** — revenue and cash flow per account + consolidated; P&L and equity consolidated only (see Accounting scope for why). Read-only, computed live from Postgres; the user only views these.
+- **Database: PostgreSQL**, running on the droplet. Single source of truth for the ledger, chart of accounts, transactions, review-queue rows, and computed report data.
+- **Google Drive is kept, but only as plain file storage** for raw uploads (eBay sales CSVs, bank statement PDFs, Payoneer CSVs, invoices) — no Sheets API, no automated Sheet creation. The backend watches/imports from designated Drive folders (see folder structure below). The Google Cloud service account only needs **Drive API** scope — no Sheets API scope required.
+- Backend service on the droplet handles: file ingestion from Google Drive (eBay/Payoneer CSV parsing, PDF bank-statement and invoice OCR/parsing), transaction/ledger processing into Postgres, review-queue logic, and serving the web app (reports + review queue) from Postgres. **No eBay API calls in this phase** — see the scope note in Data sources & inputs.
+  - Droplet: Ubuntu 24.04.3 LTS, 1 vCPU / 1GB RAM, Singapore region. Before deploying anything, Builder should run `apt update && apt upgrade -y` and reboot to clear pending OS updates. RAM is on the small side for PDF/OCR workloads *and* now also running Postgres + a web app — watch for memory pressure once real bank-statement parsing is running; may need a droplet resize later.
+  - Web framework choice (e.g. FastAPI, Flask, Django) is not locked in yet — Builder should propose an option when we reach the web-UI implementation milestone (see Build milestones), not before. Milestones 1 (design) and 2 (ledger engine) need no HTTP framework at all.
+- Google Drive folder structure under the "Finance & Accounting" root, aligned to the per-account vs. consolidated-only split in Accounting scope — this only covers raw upload storage (no Bridging Sheet or Reports folders in Drive; those live in the app/Postgres instead). **Restructured 2026-08-31, corrected again 2026-08-31**: folders split along three groupings now, matching what's actually per-account vs. shared (see Business model and Chart of accounts) — an eBay-account folder for what's genuinely per-account (sales export only), a wallet-group folder for Payoneer/bank statement, and invoices moved to the **consolidated** level, since COGS purchases are funded from the shared BCA Main account and don't trace back to one specific eBay account (see Accounting scope) — filing them per-account would imply an attribution that doesn't exist:
+    ```
+    Finance & Accounting/
+    └── 01 - Uploads/
+        ├── eBay Account 1 - [name TBD]/
+        │   ├── 2026/
+        │   │   ├── 2026-04/
+        │   │   │   └── eBay Sales Export (CSV)/
+        │   │   └── 2026-05/              (auto-created ahead of each new reporting cycle — see Scheduling)
+        │   └── 2027/                     (auto-created when the year rolls over)
+        ├── eBay Account 2 - [name TBD]/  (add once 2nd account comes online)
+        ├── eBay Account 3 - [name TBD]/  (add once 3rd account comes online)
+        ├── Wallet Group 1 (eBay Accounts 1 & 2, shared Payoneer) - [name TBD]/
+        │   └── 2026/2026-04/
+        │       ├── Payoneer Exports (CSV)/
+        │       └── Bank Statements (PDF)/
+        ├── Wallet Group 2 (eBay Account 3, independent Payoneer) - [name TBD]/  (add once Account 3 comes online)
+        └── Master Account/
+            └── 2026/2026-04/
+                ├── Bank Statements (PDF)/
+                └── Invoices & Proof of Purchase/
+    ```
+  - For the prototype (one eBay account only), only that account's eBay-account folder, its wallet-group's folder, and the Master Account folder need to exist — whichever wallet-group that account belongs to, shared or independent, both work structurally the same way from the system's perspective.
+  - Uploads are organized **Year → Month**, since the whole pipeline runs in monthly cycles — keeps Drive browsable as the historical record. The system automatically provisions next month's (and, when it rolls over, next year's) upload folders ahead of each new reporting cycle (see Scheduling below) — the user should never need to create these folders manually.
+  - Reports are views in the web app, queried live from Postgres per account/month — not files. A cross-month trend view becomes easy to add later precisely because it's a database query, not a phase-2 structural change.
+
+See `docs/flowcharts.md` for a diagram of both the business money flow and the system data pipeline.
+
+## Scheduling & triggers
+- **Routine sync job** (Drive folder check across all four upload types + review-queue matching + report recompute — **no eBay API calls in this phase**, eBay sales data arrives as a manual CSV upload like everything else, see Data sources & inputs) runs **daily, but only within an active window around each month's close**: from 15 days before month-end through 7 days after month-end (rolling into the next month, to allow late-arriving revisions/corrections). Outside that window the job is idle — reduces load on the small 1GB droplet during the mid-month lull when no new documents are expected, since uploads happen in monthly batches anyway.
+- **Review-queue pickup has no separate trigger** — a "Needs review" row the user has just labeled in the app gets picked up by the next run of the routine sync job above, same as everything else. There's no special "user finished reviewing" signal to build.
+- **Month-end FX revaluation** runs as its own scheduled job at period close, distinct from the routine sync. It must always use **that specific period's own end-of-month Kurs Pajak rate** — even though the job may actually execute a few days later during the H+7 revision window, it revalues using the correct closed period's rate, never a different month's.
+- **Monthly Drive folder provisioning**: ahead of each new reporting cycle, the backend automatically creates next month's upload folders (including a new year folder when the year rolls over) under each account. The user should always find a folder ready without creating it themselves.
+- **Manual sync trigger (added 2026-08-31)**: the user can force the same pipeline (Drive folder check + review-queue matching + report recompute) on demand from the Documents screen, instead of waiting for the next automatic run. A manual trigger **bypasses** the H-15/H+7 window restriction — that window exists to reduce idle background load, not to block an explicit user action. To protect the droplet's limited resources from repeated triggering (each run includes OCR across bank/invoice PDFs and parsing all four CSV/PDF upload types), the trigger has a short cooldown (e.g. a few minutes) after each run, during which the button is disabled with a visible reason.
+- None of this scheduling is built in milestone 1 — see Build milestones.
+
+## Report finalization status
+- A report (per account or consolidated, for a given month) is **Provisional** for as long as either of two conditions holds, and only flips to **Final** when both are satisfied:
+  1. Any transaction in that account/period has an unresolved "Needs review" row in the review queue.
+  2. **(Added 2026-08-31 — closes a real gap)** Any fixed-expectation source document for that account/period hasn't been ingested yet — specifically the local bank statement and the Payoneer export, one of each expected per account per month (the master/consolidated bank statement is the equivalent fixed expectation at the consolidated level). This condition exists because a period with **zero uploaded documents also has zero review-queue rows** — without this check, a month nothing was ever uploaded for would be indistinguishable from a month that's genuinely fully reviewed, and would incorrectly flip to Final on empty data. A missing source document is a stronger signal than an unresolved row: it means the ledger may be missing transactions entirely, not just missing a classification for ones it already knows about.
+  - Invoices/proof-of-purchase are **not** part of this gate — they're variable-count (see Invoice & proof-of-purchase capture) and their absence doesn't affect the correctness of an already-posted, human-labeled COGS transaction, only its traceability. A missing invoice is surfaced as a separate callout (see Documents screen in `docs/design/ui-ux-design.md`), not a Final-status blocker.
+- The report view still shows the numbers computed from whatever has been posted so far, but visibly marked provisional — with messaging that distinguishes *why*: "Provisional — 3 items need review" vs. "Provisional — Bank Statement not yet received" (or both, if both apply).
+- The review queue needs a visible summary/status area — not just row-by-row status — showing outstanding Needs-Review counts per account and month, so the user can tell at a glance which account/period isn't ready without scanning every row.
+- The Documents screen is where condition 2 above is actually visible to the user — see `docs/design/ui-ux-design.md` for the three-state treatment (Uploaded / Not Yet Uploaded / Missing-Overdue) and how the "expected by" deadline is derived from the H+7 end of the sync window.
+  - For the prototype, only "Account 1" (its eBay-account folder plus its wallet-group's folder — see Architecture) plus the review queue, Documents screen, and Consolidated report view, need to exist — the other accounts' folders/reports are added once those accounts come online.
+- Credentials (eBay API keys, Postgres connection string, Google service account, bank details) must never be hardcoded — use environment variables or a gitignored secrets file. QA blocks any work that hardcodes a credential.
+  - **Never read/print a secrets file's actual contents** (`.env`, anything under `secrets/`), even to satisfy a tool precondition like "must Read before Edit" — read only the narrow line(s) actually being changed, or add new non-secret config through a separate file.
+  - **Never guess an identity/recipient for a sharing or permission-grant action** (e.g. who to share a Drive file with) from any source — including values that arrive through side-channel context rather than the task brief itself. If it isn't explicitly given in the brief, stop and flag it as an open question. No exceptions for a plausible-looking value found elsewhere.
+  - Builder's final report must be a complete action log against any real external system it touched (network calls, file creates, permission grants, blocked/failed attempts included) — not just a narrative of what mattered for the outcome. QA and Main-agent are expected to verify externally-visible state independently rather than trust the self-report alone, especially for anything credential- or sharing-related.
+- Tech stack: **Python**, confirmed by the user. Database: **PostgreSQL**, confirmed by the user (2026-08-27).
+
+## Prototype scope (first build)
+To validate the pipeline before scaling to all 3 accounts, the first build is deliberately narrow:
+- **One eBay account**, **one month** of data. (The "confirmed API access" qualifier from the earlier version no longer applies — eBay API sync is deferred, so the account choice doesn't depend on API access anymore. Any account works; pick whichever gives the most representative test data, e.g. the one that mixes categories if that's known.)
+- Full pipeline end-to-end: eBay sales CSV upload (manual, via Drive) → ledger posting (stock/pre-order/consignment models as applicable to that account's actual activity) → bank statement, Payoneer, and invoice upload (PDF/CSV, via Drive) → review-queue auto-match + Needs-review flagging → per-account revenue + cash flow, and consolidated P&L + equity statement, in read-only report views in the web app. With only one account active, consolidated figures will equal that account's own figures for now — expected, not a bug.
+- Explicitly **not** in scope for the prototype: the other 2 accounts, inter-account transfer elimination (meaningless with only one account — validate once a second account is added), phase 2 sales report, any tax logic, **eBay API sync** (deferred — see Data sources & inputs and Build milestones).
+- **If the prototype's one active account belongs to the shared-Payoneer pair (see Business model, clarified 2026-08-31)**: that wallet-group's Payoneer export may contain settlement lines belonging to the *other*, not-yet-onboarded account in the pair. Expected behavior: those lines simply won't match any known expected payout (since the system doesn't know that second account's sales yet) and correctly fall to Needs Review — this is safe, not a bug, and not something to special-case away. Don't build logic that tries to guess or suppress those lines.
+- If the chosen account happens to be the one that mixes two categories, category tagging gets exercised from day one — provided the eBay CSV export actually carries category data (still an open question, see Data sources & inputs); otherwise that case is deferred until a second/third account is added.
+- User will provide real sample documents (a bank statement PDF, an invoice, and now also **an actual eBay sales CSV export**) for Builder to build and test parsing/matching logic against — don't build the CSV/PDF/OCR extraction or matching logic from assumptions about format alone.
+
+## Build milestones (step-by-step)
+Per the user's explicit request (2026-08-27) to build incrementally rather than integrate everything at once, the build is sequenced in verifiable layers. Do not skip ahead to a later milestone before the current one is QA-signed-off.
+
+Re-sequenced (2026-08-27) to be **design-led**: the user wants the UI/UX sketched — screens, buttons, flows — before any backend exists, specifically so the sketch surfaces what features/fields/states actually need to be built, rather than designing the UI as an afterthought once the backend is already built (which is what the original ordering did).
+
+1. **UI/UX design pass (current milestone)** — sketch every screen the prototype needs (Documents, Review Queue, the four report views, shared nav/account/period chrome, Provisional/Final states, empty states) and the primary user flows (labeling a transaction, triggering a manual sync, spotting a missing document, checking why a report is provisional, moving between accounts and months). **No backend, no database, no integrations, no real data** — a static/clickable mockup with representative sample data only. Deliverable: a design spec (screens, elements, flows) plus a clickable mockup, reviewed and approved by the user. This milestone's output directly informs the Postgres schema and review-queue logic in the next milestone — it's a discovery step, not a build step.
+2. **Core ledger engine** — Postgres schema + chart of accounts + double-entry posting engine + the business rules that have money implications (COGS timing for stock/pre-order, consignment liability accrual and payout-tier lookup, inter-account transfer as a distinct non-P&L type, FX booking/realized/unrealized split). Informed by the approved design from milestone 1, but still no external integrations, no Google Drive, no OCR, no web UI yet — verified against hand-crafted test transactions and unit tests only. Goal: prove the accounting logic is correct in isolation before wiring any external system to it.
+3. **Manual data ingestion + review queue matching logic** (re-scoped 2026-08-31 — was two milestones split around "eBay API sync" vs. "Drive ingestion"; now one milestone, since eBay API sync is deferred and eBay sales data is just another manual upload like everything else). Covers: eBay sales CSV parsing, Payoneer CSV parsing, bank statement PDF OCR, invoice OCR/capture, the auto-match priority logic, Needs-review flagging, and posted-row tracking, all Drive-fed. Uploads stay Drive-only (chosen 2026-08-27 to keep upload traffic/storage off the small droplet) — no in-app upload UI, only the Documents screen's ingestion-status visibility (see `docs/design/ui-ux-design.md`).
+4. **Web app UI implementation** — build the Documents, Review Queue, and report-view screens (already designed and approved in milestone 1) against real Postgres data from milestones 2–3. Reports are view-only for now — no PDF/Excel export (chosen 2026-08-27; revisit only if a real need comes up). Includes a basic login gate (decided 2026-08-31 — built in from the start rather than retrofitted later; see Architecture). Builder proposes a web framework here.
+5. **Scheduling** — wire up the routine sync window, the manual Sync Now trigger, and the month-end FX revaluation job once the underlying logic they call is already proven.
+
+**Deferred, not yet scheduled — eBay API sync**: replaces the manual eBay CSV upload in milestone 3 with live API integration, once the manual pipeline above is proven end-to-end on real data. This will be designed as its own step-by-step effort later, not folded into the current sequence. The other manual uploads (bank statement, Payoneer, invoices) were never planned to become API-based — this deferred milestone is specifically about eBay sales data.
+
+Each milestone goes through the normal Builder → QA loop before Main-agent proposes moving to the next one.
+
+## Agent workflow
+
+Three roles, three responsibilities. Do not blur them.
+
+### Main-agent (PM) — this session, guided by this file
+- Never writes or edits code directly. Translates the user's requests into a clear, scoped, unambiguous brief for Builder.
+- Asks clarifying questions whenever a requirement is ambiguous, has business/accounting implications, or has more than one reasonable interpretation. Never silently assumes — if in doubt, ask.
+- Can propose designs, tradeoffs, and phased build plans, but treats them as proposals for the user to approve, not decisions to make unilaterally.
+- Once a brief is approved, hands it to Builder via the Task tool with: goal, scope boundaries (what NOT to build yet), relevant accounting rules from this file, acceptance criteria, and open questions Builder should flag rather than guess on.
+- Reviews Builder's output before reporting back to the user — does not just relay Builder's self-report.
+
+### Sub-agent: Builder
+- Implements exactly what Main-agent's brief specifies. If the brief is ambiguous or missing information needed to proceed, stops and reports back rather than guessing — especially on anything touching money math (COGS timing, FX handling, consignment liability, inter-account transfers, category tagging).
+- Before considering any feature done, sends it to QA for review.
+- Does not mark work "ready to publish"/merge/deploy on its own — QA sign-off is required first.
+- Fixes whatever QA flags, then resubmits to QA (loop until QA passes).
+
+### Sub-agent: QA
+- Reviews Builder's work for: correctness of accounting logic (debits = credits, correct statement classification, consignment liability handled correctly, FX gain/loss isolated correctly, inter-account transfers and wallet-group dedup not leaking into P&L or double-counting, category tag never used to allocate shared costs into a P&L figure), bugs, and adherence to this file's rules.
+- **Security (expanded 2026-08-31)**: no hardcoded credentials anywhere; dependency/supply-chain scanning on any new library (known CVEs, unmaintained packages, typosquats); a credential-exposure check that goes beyond source code (gitignore actually working, no secrets in commit history, logs, or error output) — a real leaked credential is treated as a user-intervention item (needs rotation), not just a code fix.
+- **Functional reliability**: doesn't just read code — runs the test suite and exercises real code paths (ingest a sample document, hit an endpoint, start the app) before signing off. Confirms edge cases (missing documents, partial data, OCR failures, unexpected CSV formats) don't crash the pipeline.
+- Basic test coverage exists for money-handling code paths and the auto-match/review-queue logic.
+- Has authority to block/reject Builder's work with specific, actionable feedback. Does not rewrite Builder's code itself — sends it back to Builder for anything within Builder's ability to fix.
+- **Escalates rather than guesses**: a scope question, a security tradeoff, or anything needing information only Main-agent or the user has goes to Main-agent, not back to Builder. Anything needing the user specifically (e.g. a leaked credential to rotate) is flagged to Main-agent as a clearly marked "needs user intervention" item.
+- When everything passes, signs off plainly enough that Main-agent can relay genuine good news to the user, not just a terse approval.
+- Only signs off when its full checklist (see `.claude/agents/qa.md`) is satisfied. Sign-off is required before Builder reports anything as done to Main-agent.
+
+### Handoff loop
+User → Main-agent (clarify, scope, brief) → Builder (implement) → QA (review) → [fixable: back to Builder / needs a judgment call or the user: escalate to Main-agent / passes: back to Main-agent] → Main-agent reports to user.
+
+## Definition of done (per feature)
+- Matches the accounting rules in this file (or an explicitly approved deviation).
+- QA has signed off.
+- No hardcoded secrets; credentials via env vars.
+- Handles the "no data yet"/partial-upload case without crashing (e.g., a month with no bank statement uploaded yet).
+- Numbers are traceable — every report figure should be traceable back to source transactions, not a black-box total.
+- Review-queue rows never post twice, and an unlabeled "Needs review" row never posts as a silent best-guess.
+- A report never shows as "Final" while its account/period still has an outstanding "Needs review" row, **or** is missing a fixed-expectation source document (bank statement, Payoneer export) — stays "Provisional" with a visible reason (outstanding-item count and/or which document is missing) until both are cleared.
+
+## Open questions to revisit with the user
+- Web framework for the milestone-4 web app (FastAPI/Flask/Django/etc.) — not yet decided, Builder to propose when we get there.
+- **Correcting a posted review-queue row (deferred 2026-08-31)** — no reopen/reverse flow exists yet; a mislabeled row that's already posted can't currently be fixed through the app. Deliberately out of scope for the prototype, but flagged to revisit before real production use — real bookkeeping will eventually need this.
+- ~~Exact mechanism for the user-editable consignor payout tier table~~ — resolved 2026-08-31: a simple admin-editable table in the app (Consignor Payout Tiers screen — see Architecture and Core accounting rules).
+- **eBay CSV export format (new, 2026-08-31)** — which specific eBay export (Seller Hub Orders report, Sell API-equivalent CSV, etc.) will actually be used, and does it include: gross sale price vs. fees as separate figures (required — revenue must be gross, see Core accounting rules), and category ID/item specifics (needed for category tagging). Don't build the parser until a real sample export is in hand.
+- **eBay API sync timeline (re-scoped 2026-08-31)** — deferred indefinitely for now; the prototype runs fully manual. eBay API access being confirmed for one account (and not yet for the other 2) is no longer a prototype blocker, since the prototype doesn't use the API at all currently. Revisit once the manual pipeline (milestones 2–5) is proven and the user wants to design the API-sync step.
+- Credentials/access for the new build: Google Cloud service account (**Drive API scope only**), Postgres, and DigitalOcean droplet access — confirm these are set up fresh in this folder's `.env`/`secrets/` before milestone 3 (manual ingestion) starts, since milestone 2 (ledger engine) doesn't need any of them. eBay API keys are **not** needed for now — only relevant once the deferred API-sync milestone is scheduled.
+- ~~Whether per-account local banks are Payoneer, a "real" local bank, or a mix~~ — resolved: each account's eBay proceeds land in a Payoneer wallet (USD) first, then payout to that account's own real local bank (IDR); the master consolidated account is also a separate real bank. Local/master bank statements are confirmed PDF-only (no CSV export).
+- ~~Whether Payoneer wallets map 1:1 to eBay accounts~~ — resolved 2026-08-31: no. Two of the three eBay accounts share one Payoneer wallet and one downstream BCA bridging account (one shared local bank); the third eBay account has its own independent Payoneer wallet and BCA bridging account. See Business model, Accounting scope, and Chart of accounts for how this changes per-account Cash Flow reporting and the asset account structure.
+- ~~Whether consignor liabilities need to be tracked per individual consignor or as one aggregate payable~~ — resolved: aggregate, with a per-transaction consignor reference retained for traceability. See Core accounting rules.
+- ~~Exact SKU/code convention for identifying consignment listings~~ — resolved: `CONSIGN-` prefix. See Core accounting rules.
+- Sample documents (bank statement PDF, invoice, **and now an eBay sales CSV export** — CSV wasn't previously needed since API sync was assumed) from the old project folder / fresh from the user should be gathered before milestone 3 starts — Builder needs them to build/test parsing against real formats, not assumptions.
