@@ -4,6 +4,13 @@
 !.env.example
 secrets/*
 !secrets/README.md
+
+# Real sample documents — contain real account numbers/names, kept local-only.
+# Structure (READMEs) is tracked; actual files are not.
+sample-documents/**
+!sample-documents/**/
+!sample-documents/README.md
+!sample-documents/*/.gitkeep
 *.json
 !package.json
 !package-lock.json
