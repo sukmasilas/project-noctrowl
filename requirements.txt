@@ -1,7 +1,29 @@
 # Milestone 2 — core ledger engine.
-# Kept deliberately minimal: no web framework yet (that's milestone 4),
-# no Google Drive / OCR libraries yet (milestone 3).
 SQLAlchemy==2.0.52
 psycopg2-binary==2.9.12
 python-dotenv==1.2.3
 pytest==9.1.1
+
+# Milestone 3 — manual data ingestion + review queue.
+# Kept deliberately minimal still: no web framework yet (that's milestone 4).
+#
+# PDF text extraction (born-digital PDFs: eBay/bank/Payoneer/Tokopedia
+# samples all extract cleanly via this — no OCR needed for those).
+pdfplumber==0.11.10
+# Image OCR (handwritten receipt, transfer screenshot) — REQUIRES the
+# system `tesseract-ocr` binary to be installed separately via apt on the
+# droplet (not installable via pip); see
+# docs/design/milestone-3-ingestion-design.md §4 for why Tesseract was
+# chosen (lighter than a deep-learning OCR stack, given the droplet's 1GB
+# RAM constraint noted in CLAUDE.md's Architecture section). Confirmed in
+# this dev sandbox that the system binary is NOT installed here (no
+# apt/package-manager access) — ingestion/invoices.py's extract_image_ocr()
+# degrades gracefully (returns None, never raises) when it's missing, and
+# is tested for exactly that behavior.
+pytesseract==0.3.13
+Pillow==12.3.0
+# Google Drive read layer (drive.readonly scope; drive.file/drive scope
+# only requested by find_or_create_folder — see ingestion/drive_client.py).
+google-api-python-client==2.199.0
+google-auth==2.57.0
+google-auth-httplib2==0.4.2

@@ -62,6 +62,13 @@ ACCOUNT_TYPES = [
     # Other Income / Expense
     ("REALIZED_FX", "Realized FX Gain/Loss", "other_income_expense", "credit", "consolidated", False),
     ("UNREALIZED_FX", "Unrealized FX Gain/Loss", "other_income_expense", "credit", "consolidated", False),
+    # Added 2026-08-31 (milestone 3) — bank-credited interest (BUNGA) on the
+    # BCA Main Account, found in the real bank statement sample. Booked NET
+    # of the small withholding tax deducted at source (PAJAK BUNGA) per
+    # Main-agent's decision: both figures are immaterial, and netting avoids
+    # a rounding-level opex line for the tax portion. See
+    # ledger.posting.post_interest_income.
+    ("INTEREST_INCOME", "Interest Income", "other_income_expense", "credit", "consolidated", False),
 ]
 
 # Account types whose currency is USD (eBay/Payoneer wallets); everything

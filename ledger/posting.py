@@ -630,13 +630,30 @@ def post_inter_account_transfer(
     from_wallet_group_id: int | None = None,
     to_ebay_account_id: int | None = None,
     to_wallet_group_id: int | None = None,
+    amount_usd_ref: Decimal | None = None,
+    fx_rate_used: Decimal | None = None,
     memo: str | None = None,
 ) -> int:
     """Move the entity's own money between its own wallet/bank accounts.
     Never touches revenue or expense — both Python (here) and the Postgres
     trg_check_transfer_accounts trigger enforce this account whitelist.
+
+    ``amount_usd_ref``/``fx_rate_used`` (added 2026-08-31, milestone 3,
+    approved by Main-agent as an additive/backward-compatible change) are
+    OPTIONAL and only meaningful for a USD-denominated leg of the transfer
+    graph — specifically the eBay Wallet -> Payoneer Wallet leg (both USD
+    accounts), where CLAUDE.md's ledger design still requires an IDR
+    valuation (IDR is the single ledger currency) even though no actual
+    currency conversion happens at that step. Existing callers (e.g. the
+    IDR-only BCA Bridging -> BCA Main leg) are unaffected — both default to
+    None, same as every other posting function's optional USD-reference
+    kwargs.
     """
     _require_decimal(amount_idr, "amount_idr")
+    if amount_usd_ref is not None:
+        _require_decimal(amount_usd_ref, "amount_usd_ref")
+    if fx_rate_used is not None:
+        _require_decimal(fx_rate_used, "fx_rate_used")
     for code in (from_account_type_code, to_account_type_code):
         if code not in TRANSFERABLE_ACCOUNT_TYPE_CODES:
             raise InvalidTransferError(
@@ -652,7 +669,10 @@ def post_inter_account_transfer(
         conn, to_account_type_code, ebay_account_id=to_ebay_account_id, wallet_group_id=to_wallet_group_id
     )
 
-    lines = [debit(to_id, amount_idr), credit(from_id, amount_idr)]
+    lines = [
+        debit(to_id, amount_idr, amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used),
+        credit(from_id, amount_idr, amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used),
+    ]
     return _insert_journal_entry(
         conn, entry_date=entry_date, source_type="inter_account_transfer", lines=lines, memo=memo
     )
@@ -821,3 +841,151 @@ def post_owner_draw(conn: Connection, *, entry_date: _dt.date, amount_idr: Decim
     bca_main_id = _singleton(conn, "BCA_MAIN")
     lines = [debit(draw_id, amount_idr), credit(bca_main_id, amount_idr)]
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="owner_draw", lines=lines, memo=memo)
+
+
+# ---------------------------------------------------------------------------
+# Milestone 3 additions (2026-08-31) — new functions only, nothing above this
+# line is modified except post_inter_account_transfer's additive optional
+# kwargs (see its docstring). These back the review-queue / eBay-CSV
+# postings designed in docs/design/milestone-3-ingestion-design.md and
+# approved by Main-agent (see that doc's §0 resolutions).
+# ---------------------------------------------------------------------------
+
+def post_operating_expense(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    expense_account_type_code: str,
+    amount_idr: Decimal,
+    paying_account_type_code: str = "BCA_MAIN",
+    paying_ebay_account_id: int | None = None,
+    paying_wallet_group_id: int | None = None,
+    memo: str | None = None,
+) -> int:
+    """Generic "debit an operating-expense account, credit whatever paid it"
+    posting — backs review-queue rule (e) keyword-matched lines (Payroll,
+    General Opex, bank admin fees, etc. — see the design doc's §6). Reuses
+    'bank_other' as source_type, the same catch-all precedent already used
+    by post_shipping_cost_purchase for anything without its own dedicated
+    journal_entries.source_type value.
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    expense_id = _singleton(conn, expense_account_type_code)
+    paying_id = get_account_id(
+        conn,
+        paying_account_type_code,
+        ebay_account_id=paying_ebay_account_id,
+        wallet_group_id=paying_wallet_group_id,
+    )
+    lines = [debit(expense_id, amount_idr), credit(paying_id, amount_idr)]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
+
+
+def post_ebay_wallet_operating_expense(
+    conn: Connection,
+    *,
+    ebay_account_id: int,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    expense_account_type_code: str = "GENERAL_OPEX",
+    amount_usd_ref: Decimal | None = None,
+    fx_rate_used: Decimal | None = None,
+    ebay_order_ref: str | None = None,
+    memo: str | None = None,
+) -> int:
+    """A real debit taken directly from an eBay Wallet balance that isn't the
+    per-sale Final Value Fee (post_ebay_sale already handles that) —
+    specifically eBay's "Other fee" transaction rows (Promoted Listings ad
+    fee, Store subscription fee). Per Main-agent's 2026-08-31 decision (see
+    CLAUDE.md's Chart of accounts, "Other eBay Wallet debits" note), these
+    post to GENERAL_OPEX by default — no dedicated account. Distinct from
+    post_operating_expense above only in which asset account is credited
+    (EBAY_WALLET here, vs. an explicit paying_account_type_code there).
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_usd_ref is not None:
+        _require_decimal(amount_usd_ref, "amount_usd_ref")
+    if fx_rate_used is not None:
+        _require_decimal(fx_rate_used, "fx_rate_used")
+    expense_id = _singleton(conn, expense_account_type_code)
+    ebay_wallet_id = get_account_id(conn, "EBAY_WALLET", ebay_account_id=ebay_account_id)
+    common_kwargs = dict(amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used, ebay_order_ref=ebay_order_ref)
+    lines = [
+        debit(expense_id, amount_idr, **common_kwargs),
+        credit(ebay_wallet_id, amount_idr, **common_kwargs),
+    ]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
+
+
+def post_refund_fee_credit(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    stage: str,  # 'ebay_wallet' | 'payoneer' — same two stages as post_refund
+    ebay_account_id: int | None = None,
+    wallet_group_id: int | None = None,
+    amount_usd_ref: Decimal | None = None,
+    fx_rate_used: Decimal | None = None,
+    ebay_order_ref: str | None = None,
+    memo: str | None = None,
+) -> int:
+    """The Final Value Fee credited back to the seller as part of a refund
+    event — a distinct, separate posting from post_refund's contra-revenue
+    line (see docs/design/milestone-3-ingestion-design.md §2: post_refund's
+    existing 2-line shape has no slot for this, so it's a new function
+    rather than a change to post_refund's signature/behavior). Debits the
+    same cash account the refund itself drew from (eBay Wallet or Payoneer
+    Wallet) and credits EBAY_SELLING_FEES back down, mirroring how the fee
+    was originally debited to that account in post_ebay_sale.
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_usd_ref is not None:
+        _require_decimal(amount_usd_ref, "amount_usd_ref")
+    if fx_rate_used is not None:
+        _require_decimal(fx_rate_used, "fx_rate_used")
+    if stage == "ebay_wallet":
+        if ebay_account_id is None:
+            raise ValueError("stage='ebay_wallet' requires ebay_account_id")
+        cash_account_id = get_account_id(conn, "EBAY_WALLET", ebay_account_id=ebay_account_id)
+    elif stage == "payoneer":
+        if wallet_group_id is None:
+            raise ValueError("stage='payoneer' requires wallet_group_id")
+        cash_account_id = get_account_id(conn, "PAYONEER_WALLET", wallet_group_id=wallet_group_id)
+    else:
+        raise ValueError(f"stage must be 'ebay_wallet' or 'payoneer' (got {stage!r})")
+
+    ebay_fee_id = _singleton(conn, "EBAY_SELLING_FEES")
+    common_kwargs = dict(amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used, ebay_order_ref=ebay_order_ref)
+    lines = [
+        debit(cash_account_id, amount_idr, **common_kwargs),
+        credit(ebay_fee_id, amount_idr, **common_kwargs),
+    ]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="ebay_refund", lines=lines, memo=memo)
+
+
+def post_interest_income(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    gross_interest_idr: Decimal,
+    tax_withheld_idr: Decimal,
+    memo: str | None = None,
+) -> int:
+    """BUNGA (bank-credited interest) on the BCA Main Account, booked NET of
+    the small PAJAK BUNGA withholding tax deducted at source — per
+    Main-agent's 2026-08-31 decision (both figures immaterial; netting
+    avoids a rounding-level opex line for the tax). Debits BCA_MAIN for the
+    net amount actually received, credits INTEREST_INCOME for the same net
+    amount — a plain 2-line entry, no separate tax-expense line.
+    """
+    _require_decimal(gross_interest_idr, "gross_interest_idr")
+    _require_decimal(tax_withheld_idr, "tax_withheld_idr")
+    if tax_withheld_idr > gross_interest_idr:
+        raise ValueError("tax_withheld_idr cannot exceed gross_interest_idr")
+    net_idr = gross_interest_idr - tax_withheld_idr
+
+    bca_main_id = _singleton(conn, "BCA_MAIN")
+    interest_income_id = _singleton(conn, "INTEREST_INCOME")
+    lines = [debit(bca_main_id, net_idr), credit(interest_income_id, net_idr)]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
