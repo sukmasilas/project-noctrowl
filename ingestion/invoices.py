@@ -43,7 +43,14 @@ _PRODUCT_SECTION_RE = re.compile(r"INFO PRODUK.*?TOTAL HARGA\n(.*?)\nSUBTOTAL", 
 _INVENTORY_KEYWORDS = {
     "TCG": ["pokemon", "tcg", "sar", "sir", "card", "kartu", "one piece", "op15", "weiss schwarz"],
     "Watches": ["seiko", "rolex", "arloji", "watch", "jam tangan", "prospex", "diver"],
-    "Auto Parts": ["sparepart", "spare part", "onderdil", "aki", "ban", "oli"],
+    # "bearing"/"switch rem"/"stop switch" added 2026-09 against real August
+    # invoices (sample-documents/Invoice/Item Purchase/August/bearing.pdf,
+    # waterpump.pdf) — real auto-parts item titles ("Bearing Roda Depan...",
+    # "SWITCH REM STOP SWITCH CAMRY...") that the original narrower list
+    # didn't recognize, which would have wrongly left a genuine COGS
+    # purchase's Purpose unset. Deliberately still narrow/specific (not a
+    # bare "switch", which would false-positive on unrelated electronics).
+    "Auto Parts": ["sparepart", "spare part", "onderdil", "aki", "ban", "oli", "bearing", "switch rem", "stop switch"],
     "Toys & Collectibles": ["barbie", "hot wheels", "doll", "mainan", "action figure"],
 }
 
@@ -148,6 +155,269 @@ def extract_tokopedia_pdf(pdf_path_or_file) -> InvoiceExtraction:
     with pdfplumber.open(pdf_path_or_file) as pdf:
         text = "\n".join(page.extract_text() or "" for page in pdf.pages)
     return parse_tokopedia_text(text)
+
+
+# ---------------------------------------------------------------------------
+# Shopee-style born-digital PDF ("Nota Pesanan") — a genuinely different
+# real invoice format discovered 2026-09 in
+# sample-documents/Invoice/Item Purchase/August/ (3 real samples: a
+# single-item order, a two-item order including a free-gift Rp0 line, and an
+# SPayLater-paid order). Label-based extraction, same confidence tier as
+# Tokopedia — every figure is explicitly labeled on its own line/row, not
+# OCR guesswork. NOT forced through the Tokopedia regexes (different labels
+# entirely: "Nama Penjual:"/"Tanggal Transaksi"/"Total Pembayaran" vs.
+# Tokopedia's "Penjual :"/"Tanggal Pembelian :"/"TOTAL TAGIHAN") — a fresh,
+# format-specific parser, same design principle as the Mandiri statement
+# parser needing its own module rather than being squeezed into BCA's shape.
+# ---------------------------------------------------------------------------
+
+_SHOPEE_VENDOR_RE = re.compile(r"Nama Penjual:\s*(.+)")
+_SHOPEE_DATE_RE = re.compile(r"\b(\d{2})/(\d{2})/(\d{4})\b")
+_SHOPEE_TOTAL_RE = re.compile(r"Total Pembayaran\s*Rp([\d.]+)")
+_SHOPEE_ITEMS_RE = re.compile(r"Rincian Pesanan\n(.*?)\nSubtotal Rp", re.DOTALL)
+
+
+def parse_shopee_text(text: str) -> InvoiceExtraction:
+    warnings: list[str] = []
+
+    vendor_m = _SHOPEE_VENDOR_RE.search(text)
+    vendor = vendor_m.group(1).strip() if vendor_m else None
+    if vendor is None:
+        warnings.append("Could not find 'Nama Penjual:' label")
+
+    date_m = _SHOPEE_DATE_RE.search(text)
+    extracted_date = None
+    if date_m:
+        day, month, year = int(date_m.group(1)), int(date_m.group(2)), int(date_m.group(3))
+        try:
+            extracted_date = _dt.date(year, month, day)
+        except ValueError:
+            warnings.append(f"'Tanggal Transaksi' date {date_m.group(0)!r} is not a valid DD/MM/YYYY date")
+    else:
+        warnings.append("Could not find a 'Tanggal Transaksi' (DD/MM/YYYY) date")
+
+    # Total Pembayaran ("what was actually charged", after all vouchers/
+    # promo discounts/service fees) — the Shopee analog of Tokopedia's TOTAL
+    # TAGIHAN: what should reconcile against the actual paying bank
+    # transaction, not the pre-discount Subtotal Pesanan.
+    amount_m = _SHOPEE_TOTAL_RE.search(text)
+    amount = _parse_idr_amount(amount_m.group(1)) if amount_m else None
+    if amount is None:
+        warnings.append("Could not find 'Total Pembayaran' label")
+
+    items_m = _SHOPEE_ITEMS_RE.search(text)
+    item_descriptions = [items_m.group(1).strip()] if items_m else []
+    purpose = classify_purpose(item_descriptions) if item_descriptions else None
+    if purpose is None:
+        warnings.append(
+            "Could not confidently classify Purpose from item content — staying unset "
+            "(never assumed COGS just because it's in the invoices folder)."
+        )
+
+    status = "parsed" if (extracted_date and vendor and amount and not warnings) else "needs_confirmation"
+
+    return InvoiceExtraction(
+        extracted_date=extracted_date,
+        vendor_description=vendor,
+        amount_idr=amount,
+        purpose=purpose,
+        status=status,
+        ocr_raw_text=text,
+        warnings=warnings,
+    )
+
+
+def extract_shopee_pdf(pdf_path_or_file) -> InvoiceExtraction:
+    import pdfplumber  # lazy import, milestone-3-only dependency
+
+    with pdfplumber.open(pdf_path_or_file) as pdf:
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    return parse_shopee_text(text)
+
+
+# ---------------------------------------------------------------------------
+# "Operations" invoices — hosting/subscription vendors (DigitalOcean,
+# Namecheap, and, per Main-agent's brief, whatever the two
+# Invoice-RF0M92EB-*.pdf files turn out to be — confirmed by reading them to
+# be Anthropic/Claude Pro subscription invoices, the same recurring-SaaS-
+# subscription pattern as DigitalOcean/Namecheap, not a one-off). Added
+# 2026-09 alongside Purpose's new 'general_operating_expense' value.
+#
+# **Deliberately does NOT convert the charged amount to IDR.** Every one of
+# these real samples is denominated in a foreign currency (DigitalOcean/
+# Namecheap in USD, Anthropic in SGD — confirmed by reading each PDF, not
+# assumed from the filename), charged to a credit card, not paid via a
+# Payoneer/eBay-USD flow this system already has an FX rate for. The actual
+# IDR amount that lands on the BCA Main statement is set by the card
+# network's own FX rate at settlement, which this system has no way to know
+# from the invoice alone — inventing an IDR figure (e.g. via Kurs Pajak,
+# which CLAUDE.md scopes to eBay sale booking and which the Payoneer
+# ingestion module already reuses for OTHER Payoneer-wallet USD amounts,
+# but NOT for a card-network FX conversion this system has no visibility
+# into) would produce a confident-looking but likely-wrong number that
+# probably wouldn't even match the real bank line within review-queue rule
+# (b)'s tolerance. Left amount_idr=None / status='needs_confirmation'
+# instead — same "never guess a money figure" principle as everywhere else
+# in this pipeline — so a human fills in the real IDR amount from the
+# bank/card statement. Flagged to Main-agent as a design note, not an open
+# blocker: this doesn't change any existing behavior, it only decides how a
+# NEW invoice class degrades safely.
+# ---------------------------------------------------------------------------
+
+_OPERATIONS_VENDOR_PATTERNS: dict[str, dict] = {
+    "DigitalOcean": {
+        "marker": re.compile(r"DigitalOcean", re.IGNORECASE),
+        "date": re.compile(r"Date of issue\s*:?\s*([A-Za-z]+\s+\d{1,2},\s*\d{4})"),
+        "amount": re.compile(r"Total due\s*\$\s*([\d,]+\.\d{2})"),
+        "reference": re.compile(r"Invoice number\s*:?\s*(\S+)"),
+        "currency": "USD",
+    },
+    "Namecheap": {
+        "marker": re.compile(r"Namecheap", re.IGNORECASE),
+        "date": re.compile(r"Transaction Date\s*:?\s*([A-Za-z]+\s+\d{1,2},\s*\d{4})"),
+        "amount": re.compile(r"Charge Amount\s*:?\s*\$\s*([\d,]+\.\d{2})"),
+        "reference": re.compile(r"Transaction Id\s*:?\s*(\S+)"),
+        "currency": "USD",
+    },
+    "Anthropic": {
+        "marker": re.compile(r"Anthropic", re.IGNORECASE),
+        # Anthropic's own PDF generator drops some punctuation glyphs from
+        # the extractable text layer (confirmed against the real samples —
+        # "Invoice number RF0M92EB 0002" and "Date of issue May 23, 2026"
+        # both come out with no colon/dash at all, unlike DigitalOcean's
+        # equivalent labels) — patterns here tolerate that rather than
+        # assuming punctuation will be present.
+        "date": re.compile(r"Date of issue\s*:?\s*([A-Za-z]+\s+\d{1,2},\s*\d{4})"),
+        "amount": re.compile(r"Amount due\s*S\$\s*([\d,]+\.\d{2})"),
+        # Captures to end-of-line rather than "up to 2 tokens" (unlike the
+        # other two vendors' single-token invoice numbers) — confirmed
+        # necessary against the real sample: with the NUL-byte artifact
+        # above stripped, "RF0M92EB 0002" collapses into one token, and a
+        # generic "up to 2 tokens" pattern would then wrongly swallow the
+        # next line's leading word ("Date...") as a phantom second token.
+        "reference": re.compile(r"Invoice number\s*:?\s*([^\n]+)"),
+        "currency": "SGD",
+    },
+}
+
+
+def parse_operations_invoice_text(text: str) -> InvoiceExtraction:
+    warnings: list[str] = []
+
+    # Confirmed against the real Anthropic samples: their PDF generator's
+    # font/cmap maps at least one punctuation glyph (the dash in
+    # "RF0M92EB-0002") to a literal NUL codepoint (U+0000) rather than
+    # dropping it or mapping it to a real dash — pdfplumber faithfully
+    # extracts that NUL byte as-is. Left in place, it defeats \S+/\s+-based
+    # regexes (a NUL is neither whitespace nor a normal token-separator), so
+    # it's stripped here as a generic PDF-extraction-artifact cleanup, not a
+    # content guess — same category of "born-digital but not entirely clean
+    # text" issue as this module already handles for other formats.
+    text = text.replace("\x00", "")
+
+    vendor_key = next((name for name, cfg in _OPERATIONS_VENDOR_PATTERNS.items() if cfg["marker"].search(text)), None)
+    if vendor_key is None:
+        return InvoiceExtraction(
+            extracted_date=None,
+            vendor_description=None,
+            amount_idr=None,
+            purpose=None,
+            status="needs_confirmation",
+            ocr_raw_text=text,
+            warnings=["Unrecognized hosting/subscription vendor — no known Operations-invoice pattern matched."],
+        )
+
+    cfg = _OPERATIONS_VENDOR_PATTERNS[vendor_key]
+
+    extracted_date = None
+    date_m = cfg["date"].search(text)
+    if date_m:
+        raw_date = re.sub(r"\s+", " ", date_m.group(1)).strip()
+        for fmt in ("%B %d, %Y", "%b %d, %Y"):
+            try:
+                extracted_date = _dt.datetime.strptime(raw_date, fmt).date()
+                break
+            except ValueError:
+                continue
+        if extracted_date is None:
+            warnings.append(f"Could not parse {vendor_key} invoice date text {raw_date!r}")
+    else:
+        warnings.append(f"Could not find an invoice date for a {vendor_key} invoice")
+
+    amount_m = cfg["amount"].search(text)
+    native_amount = Decimal(amount_m.group(1).replace(",", "")) if amount_m else None
+    if native_amount is None:
+        warnings.append(f"Could not find the charged amount for a {vendor_key} invoice")
+
+    ref_m = cfg["reference"].search(text)
+    reference = ref_m.group(1).strip() if ref_m else None
+
+    currency = cfg["currency"]
+    vendor_bits = [vendor_key]
+    if reference:
+        vendor_bits.append(reference)
+    if native_amount is not None:
+        vendor_bits.append(f"{native_amount} {currency}")
+    vendor_description = " — ".join(vendor_bits)
+
+    warnings.append(
+        f"Amount is {currency}, not IDR (the card network's own FX rate at settlement is not known to this "
+        "system) — needs manual entry of the actual IDR amount charged, read off the bank/card statement."
+    )
+
+    return InvoiceExtraction(
+        extracted_date=extracted_date,
+        vendor_description=vendor_description,
+        amount_idr=None,
+        purpose="general_operating_expense",
+        status="needs_confirmation",
+        ocr_raw_text=text,
+        warnings=warnings,
+    )
+
+
+def extract_operations_invoice_pdf(pdf_path_or_file) -> InvoiceExtraction:
+    import pdfplumber  # lazy import, milestone-3-only dependency
+
+    with pdfplumber.open(pdf_path_or_file) as pdf:
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    return parse_operations_invoice_text(text)
+
+
+# ---------------------------------------------------------------------------
+# Format-sniffing dispatcher — the single entrypoint ingestion.sync should
+# call for any PDF invoice, so it doesn't need to hardcode an assumption
+# about which of the (now three) known PDF formats a given upload is. Sniffs
+# on content, not filename, since Drive filenames aren't a format
+# guarantee (see e.g. "waterpump.pdf" actually containing an unrelated
+# brake-switch item — a filename that describes the PURCHASE, not the
+# document FORMAT).
+# ---------------------------------------------------------------------------
+
+
+def extract_pdf_invoice(pdf_path_or_file) -> InvoiceExtraction:
+    import pdfplumber  # lazy import, milestone-3-only dependency
+
+    with pdfplumber.open(pdf_path_or_file) as pdf:
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+    lowered = text.lower()
+    if "tokopedia" in lowered:
+        return parse_tokopedia_text(text)
+    if "shopee" in lowered:
+        return parse_shopee_text(text)
+    if any(cfg["marker"].search(text) for cfg in _OPERATIONS_VENDOR_PATTERNS.values()):
+        return parse_operations_invoice_text(text)
+
+    return InvoiceExtraction(
+        extracted_date=None,
+        vendor_description=None,
+        amount_idr=None,
+        purpose=None,
+        status="needs_confirmation",
+        ocr_raw_text=text,
+        warnings=["Unrecognized PDF invoice format — no known marketplace/vendor pattern matched; needs manual entry."],
+    )
 
 
 # ---------------------------------------------------------------------------

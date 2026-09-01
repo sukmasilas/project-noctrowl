@@ -332,15 +332,27 @@ def test_consignment_payout_via_invoice_match_also_writes_traceability_link(ipro
 
 
 # ---------------------------------------------------------------------------
-# rule (c) — internal transfer, including the paired-transfer single-post guard
+# rule (c) — internal transfer.
+#
+# FIX (2026-09-01): CLAUDE.md's Bridging Account correction establishes that
+# the amount that LANDS in Bridging (from a Payoneer withdrawal) and the
+# amount that later SWEEPS OUT to BCA Main are two genuinely separate events,
+# for two genuinely different numbers — never the same net_idr_landed figure
+# (the business keeps a buffer). The tests below replace the old single
+# "paired-transfer" test (which incorrectly assumed landing amount == sweep
+# amount, and so accidentally tested the wrong mechanism) with two, one per
+# genuinely distinct sub-case: c-landing (reconciles, posts nothing new) and
+# c-sweep (a real, separately-amounted transfer, paired directly against its
+# own counterpart line, never against net_idr_landed).
 # ---------------------------------------------------------------------------
 
 
-def test_rule_c_paired_transfer_never_double_posts(iprototype):
-    """A single real Bridging -> Main transfer shows up as an outflow line
-    (Bridging statement) AND an inflow line (Master statement). Both should
-    match rule (c) and both should end up posted_at-set pointing at the SAME
-    journal_entry_id — but only ONE journal entry should ever exist.
+def test_rule_c_landing_echo_reconciles_without_posting_a_second_transfer(iprototype):
+    """The exact real bug this fix addresses: the Bridging Account's own
+    bank-statement line showing a Payoneer withdrawal LANDING is just an
+    echo of an event ALREADY posted (post_realized_fx_withdrawal, called
+    when the Payoneer CSV + confirmation were processed) — it must reconcile
+    for traceability, but never post a second, phantom transfer.
     """
     conn, topo = iprototype
     seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 4, 25), rate_idr=Decimal("17968.32"))
@@ -354,10 +366,96 @@ def test_rule_c_paired_transfer_never_double_posts(iprototype):
         booking_rate_used_idr=Decimal("17968.32"),
     )
     assert withdrawal_entry_id is not None
+    entries_before = conn.execute(select(journal_entries.c.id)).scalars().all()
+    assert len(entries_before) == 1  # just the withdrawal itself so far
+
+    bridging_src = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=bridging_src,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 4, 28),
+                raw_description="Transfer dari PT. BANK DBS INDONESIA / Payoneer HK",
+                amount_idr=Decimal("86247936.00"),  # == net_idr_landed, the landing echo
+                occurrence_index=1,
+            )
+        ],
+    )
+
+    match_result = run_auto_match(conn)
+    assert match_result.matched == 1
+    row = conn.execute(
+        select(review_queue.c.category, review_queue.c.match_rule, review_queue.c.linked_payoneer_withdrawal_id)
+    ).one()
+    assert row.category == "internal_transfer_landing"
+    assert row.match_rule == "c-landing"
+    assert row.linked_payoneer_withdrawal_id is not None
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    posted_entry_id = conn.execute(select(review_queue.c.posted_journal_entry_id)).scalar_one()
+    assert posted_entry_id == withdrawal_entry_id  # links back to the EXISTING entry, nothing new
+
+    # The real fix under test: still exactly ONE journal entry in the whole
+    # ledger — no phantom second inter_account_transfer ever posted.
+    all_entries = conn.execute(select(journal_entries.c.id, journal_entries.c.source_type)).all()
+    assert len(all_entries) == 1
+    assert all_entries[0].source_type == "payoneer_withdrawal"
+    transfer_entries = conn.execute(
+        select(journal_entries.c.id).where(journal_entries.c.source_type == "inter_account_transfer")
+    ).all()
+    assert transfer_entries == []
+
+    # A second, DIFFERENT Bridging inflow line claiming the SAME withdrawal
+    # must not also reconcile against it (already-consumed guard).
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=bridging_src,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 4, 28),
+                raw_description="Duplicate-looking landing line",
+                amount_idr=Decimal("86247936.00"),
+                occurrence_index=2,
+            )
+        ],
+    )
+    run_auto_match(conn)
+    statuses = conn.execute(select(review_queue.c.match_status)).all()
+    assert any(s.match_status == "needs_review" for s in statuses)
+
+
+def test_rule_c_sweep_pairs_directly_and_never_double_posts(iprototype):
+    """The real, later, genuinely separate Bridging -> Main sweep — a
+    rounded amount that does NOT equal net_idr_landed (confirmed against
+    real Mandiri data, see ingestion/mandiri_statement.py's module
+    docstring) — paired directly against its Master-statement counterpart,
+    never against payoneer_withdrawals at all.
+    """
+    conn, topo = iprototype
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 4, 25), rate_idr=Decimal("17968.32"))
+    posting.post_realized_fx_withdrawal(
+        conn,
+        wallet_group_id=topo["wallet_group_id"],
+        entry_date=_dt.date(2026, 4, 28),
+        gross_usd=Decimal("5000.00"),
+        payoneer_fee_usd=Decimal("200.00"),
+        exchange_rate_excl_fee=Decimal("17968.32"),
+        booking_rate_used_idr=Decimal("17968.32"),  # net_idr_landed == 86,247,936.00
+    )
 
     bridging_src = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
     master_src = _make_bank_source(conn)
 
+    # The real, separate sweep — a rounder, DIFFERENT number than
+    # net_idr_landed (86,247,936.00), same as every real sweep in the
+    # Mandiri sample data.
     stage_raw_lines(
         conn,
         source_type="bank_statement",
@@ -366,8 +464,8 @@ def test_rule_c_paired_transfer_never_double_posts(iprototype):
         lines=[
             RawLine(
                 transaction_date=_dt.date(2026, 4, 29),
-                raw_description="Transfer out to BCA Main",
-                amount_idr=Decimal("-86247936.00"),
+                raw_description="Transfer BI Fast / Ke BCA / DENNY WIJAYA 1790345891",
+                amount_idr=Decimal("-86250000.00"),
                 occurrence_index=1,
             )
         ],
@@ -379,8 +477,8 @@ def test_rule_c_paired_transfer_never_double_posts(iprototype):
         lines=[
             RawLine(
                 transaction_date=_dt.date(2026, 4, 30),
-                raw_description="KR OTOMATIS Payoneer HK",
-                amount_idr=Decimal("86247936.00"),
+                raw_description="BI-FAST CR BIF TRANSFER DR / 008 / RICO",
+                amount_idr=Decimal("86250000.00"),
                 occurrence_index=1,
             )
         ],
@@ -389,48 +487,216 @@ def test_rule_c_paired_transfer_never_double_posts(iprototype):
     match_result = run_auto_match(conn)
     assert match_result.matched == 2
     rows = conn.execute(select(review_queue.c.category, review_queue.c.match_rule)).all()
-    assert all(r.category == "internal_transfer" and r.match_rule == "c" for r in rows)
+    assert all(r.category == "internal_transfer" and r.match_rule == "c-sweep" for r in rows)
 
     post_result = post_pending_rows(conn)
     assert post_result.posted == 2
+    assert post_result.skipped_pending_pair == 0
 
-    posted_entry_ids = conn.execute(select(review_queue.c.posted_journal_entry_id)).scalars().all()
+    posted_entry_ids = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.match_rule == "c-sweep")
+    ).scalars().all()
     assert len(posted_entry_ids) == 2
     assert posted_entry_ids[0] == posted_entry_ids[1]  # SAME journal entry, not two
 
     transfer_entries = conn.execute(
         select(journal_entries.c.id).where(journal_entries.c.source_type == "inter_account_transfer")
     ).all()
-    assert len(transfer_entries) == 1  # exactly one transfer posted, never two
+    assert len(transfer_entries) == 1  # exactly one sweep transfer posted, never two
 
-    # Debits still equal credits across everything posted in this test.
-    lines = conn.execute(select(journal_lines.c.debit_amount_idr, journal_lines.c.credit_amount_idr)).all()
-    assert sum(l.debit_amount_idr for l in lines) == sum(l.credit_amount_idr for l in lines)
+    lines = conn.execute(
+        select(journal_lines.c.debit_amount_idr, journal_lines.c.credit_amount_idr).where(
+            journal_lines.c.journal_entry_id == posted_entry_ids[0]
+        )
+    ).all()
+    assert sum(l.debit_amount_idr for l in lines) == sum(l.credit_amount_idr for l in lines) == Decimal("86250000.00")
+
+    # Debits still equal credits across EVERYTHING posted in this test
+    # (the withdrawal entry too).
+    all_lines = conn.execute(select(journal_lines.c.debit_amount_idr, journal_lines.c.credit_amount_idr)).all()
+    assert sum(l.debit_amount_idr for l in all_lines) == sum(l.credit_amount_idr for l in all_lines)
+
+
+def test_rule_c_sweep_ambiguous_candidate_never_double_posts(iprototype):
+    """Adversarial self-review finding (2026-09-01): TWO Bridging outflow
+    lines that both plausibly match the SAME single Master inflow line
+    (same amount, same-day) must never each post their own transfer for
+    it — only ONE journal entry may ever exist, and the row that loses the
+    race must land safely in 'pending its pair' (never a phantom post, and
+    never a crash), regardless of which row post_pending_rows happens to
+    process first. Real-data precedent for this shape of input: a
+    same-amount same-day double transaction is not implausible in a real
+    bank statement (e.g. two failed/retried transfer attempts).
+    """
+    conn, topo = iprototype
+    bridging_src = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    master_src = _make_bank_source(conn)
+
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=bridging_src,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 3),
+                raw_description="Transfer BI Fast / Ke BCA / DENNY WIJAYA 1790345891 (attempt 1)",
+                amount_idr=Decimal("-12000000.00"),
+                occurrence_index=1,
+            ),
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 3),
+                raw_description="Transfer BI Fast / Ke BCA / DENNY WIJAYA 1790345891 (attempt 2)",
+                amount_idr=Decimal("-12000000.00"),
+                occurrence_index=2,
+            ),
+        ],
+    )
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=master_src,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 4),
+                raw_description="BI-FAST CR BIF TRANSFER DR / 008 / RICO",
+                amount_idr=Decimal("12000000.00"),
+                occurrence_index=1,
+            )
+        ],
+    )
+
+    match_result = run_auto_match(conn)
+    assert match_result.matched == 3  # all three classify — evidence exists for each independently
+    post_result = post_pending_rows(conn)
+
+    # Exactly one of the two ambiguous Bridging rows posts (paired with the
+    # single real Master inflow); the other is left safely pending.
+    assert post_result.posted == 2  # the winning pair
+    assert post_result.skipped_pending_pair == 1  # the losing side
+
+    transfer_entries = conn.execute(
+        select(journal_entries.c.id).where(journal_entries.c.source_type == "inter_account_transfer")
+    ).all()
+    assert len(transfer_entries) == 1  # the real proof: never two, no matter the ambiguity
+
+    rows = conn.execute(
+        select(review_queue.c.raw_description, review_queue.c.posted_at, review_queue.c.paired_review_queue_id)
+    ).all()
+    posted_count = sum(1 for r in rows if r.posted_at is not None)
+    pending_count = sum(1 for r in rows if r.posted_at is None)
+    assert posted_count == 2
+    assert pending_count == 1
+
+    # Debits still equal credits across everything actually posted.
+    all_lines = conn.execute(select(journal_lines.c.debit_amount_idr, journal_lines.c.credit_amount_idr)).all()
+    assert sum(l.debit_amount_idr for l in all_lines) == sum(l.credit_amount_idr for l in all_lines)
+
+    # Idempotent: a second sync run doesn't magically resolve the ambiguity
+    # into a phantom second post, and doesn't crash either.
+    run_auto_match(conn)
+    post_result_2 = post_pending_rows(conn)
+    assert post_result_2.posted == 0
+    transfer_entries_2 = conn.execute(
+        select(journal_entries.c.id).where(journal_entries.c.source_type == "inter_account_transfer")
+    ).all()
+    assert len(transfer_entries_2) == 1
+
+
+def test_rule_c_sweep_manual_label_before_pair_exists_does_not_crash(iprototype):
+    """Requirement 3 of the 2026-09-01 fix: a human manually labels a
+    Bridging Account row 'internal_transfer' before its Master-side pair has
+    ever been ingested. Must not crash — leaves it pending, and posts once
+    the pair does show up in a later sync.
+    """
+    conn, topo = iprototype
+    bridging_src = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=bridging_src,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 3),
+                raw_description="Transfer BI Fast / Ke BCA / DENNY WIJAYA 1790345891",
+                amount_idr=Decimal("-65950000.00"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    # A human labels it directly — no counterpart exists anywhere yet.
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .where(review_queue.c.id == row_id)
+        .values(category="internal_transfer", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+    )
+
+    post_result = post_pending_rows(conn)  # must not raise
+    assert post_result.posted == 0
+    assert post_result.skipped_pending_pair == 1
+    still_unposted = conn.execute(select(review_queue.c.posted_at).where(review_queue.c.id == row_id)).scalar_one()
+    assert still_unposted is None
+
+    # A later sync run ingests the real Master-side counterpart.
+    master_src = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=master_src,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 4),
+                raw_description="BI-FAST CR BIF TRANSFER DR / 008 / RICO",
+                amount_idr=Decimal("65950000.00"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    match_result = run_auto_match(conn)  # finds the still-pending human-labeled orphan as its pair
+    assert match_result.matched == 1
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 2  # both rows post now, same journal entry
+    assert post_result2.skipped_pending_pair == 0
+
+    entry_ids = conn.execute(select(review_queue.c.posted_journal_entry_id)).scalars().all()
+    assert len(entry_ids) == 2
+    assert entry_ids[0] == entry_ids[1]
+
+    transfer_entries = conn.execute(
+        select(journal_entries.c.id).where(journal_entries.c.source_type == "inter_account_transfer")
+    ).all()
+    assert len(transfer_entries) == 1
 
 
 def test_posted_rows_never_repost_on_a_second_sync_run(iprototype):
     conn, topo = iprototype
-    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 4, 25), rate_idr=Decimal("17968.32"))
-    posting.post_realized_fx_withdrawal(
-        conn,
-        wallet_group_id=topo["wallet_group_id"],
-        entry_date=_dt.date(2026, 4, 28),
-        gross_usd=Decimal("5000.00"),
-        payoneer_fee_usd=Decimal("200.00"),
-        exchange_rate_excl_fee=Decimal("17968.32"),
-        booking_rate_used_idr=Decimal("17968.32"),
-    )
-    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    bridging_src = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    master_src = _make_bank_source(conn)
     stage_raw_lines(
         conn,
         source_type="bank_statement",
-        source_document_id=src_id,
+        source_document_id=bridging_src,
         wallet_group_id=topo["wallet_group_id"],
         lines=[
             RawLine(
                 transaction_date=_dt.date(2026, 4, 29),
                 raw_description="Transfer out to BCA Main",
-                amount_idr=Decimal("-86247936.00"),
+                amount_idr=Decimal("-86250000.00"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=master_src,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 4, 30),
+                raw_description="BI-FAST CR BIF TRANSFER DR / 008 / RICO",
+                amount_idr=Decimal("86250000.00"),
                 occurrence_index=1,
             )
         ],
@@ -438,9 +704,10 @@ def test_posted_rows_never_repost_on_a_second_sync_run(iprototype):
     run_auto_match(conn)
     r1 = post_pending_rows(conn)
     r2 = post_pending_rows(conn)  # simulate a second sync run finding nothing new
-    assert r1.posted == 1
+    assert r1.posted == 2
     assert r2.posted == 0
-    assert r2.skipped_unclassified == 0  # the row IS classified — just already posted, so not even considered
+    assert r2.skipped_unclassified == 0  # the rows ARE classified — just already posted, so not even considered
+    assert r2.skipped_pending_pair == 0
 
 
 # ---------------------------------------------------------------------------
@@ -604,3 +871,124 @@ def test_never_posts_unlabeled_needs_review_row(iprototype):
     conn.execute(update(review_queue).values(category="operating_expense", labeled_at=_dt.datetime.now(_dt.timezone.utc)).where(review_queue.c.id == row_id))
     post_result2 = post_pending_rows(conn)
     assert post_result2.posted == 1
+
+
+# ---------------------------------------------------------------------------
+# Requirement 4 of the 2026-09-01 Bridging Account fix: a Bridging Account
+# line that ISN'T a landing echo or a sweep leg is just a normal bank line —
+# rules (a)/(b)/(d)/(e) must still fire normally on a wallet_group-scoped
+# row, not just fall through to Needs Review by omission. Every other test
+# in this module that exercises rules (a)/(b)/(d)/(e) uses a Master-scoped
+# (wallet_group_id=None) source; these three prove the SAME rules fire when
+# wallet_group_id IS set, i.e. rule (c)'s redesign didn't accidentally wall
+# off the Bridging Account from the rest of the priority chain.
+# ---------------------------------------------------------------------------
+
+
+def test_rule_b_invoice_match_fires_normally_on_a_bridging_scoped_line(iprototype):
+    conn, topo = iprototype
+    invoice_id = _make_invoice(conn, amount_idr=Decimal("1200000"), extracted_date=_dt.date(2026, 5, 8))
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 9),
+                raw_description="Transfer BI Fast / some vendor",
+                amount_idr=Decimal("-1200000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    match_result = run_auto_match(conn)
+    assert match_result.matched == 1
+    row = conn.execute(select(review_queue.c.category, review_queue.c.match_rule, review_queue.c.linked_invoice_id)).one()
+    assert row.category == "cogs_purchase"
+    assert row.match_rule == "b"
+    assert row.linked_invoice_id == invoice_id
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    entry = conn.execute(select(journal_entries.c.source_type)).scalar_one()
+    assert entry == "bank_other"  # post_operating_expense's paying-account resolves BCA_BRIDGING, not BCA_MAIN
+
+
+def test_rule_d_consignment_reimbursement_fires_normally_on_a_bridging_scoped_line(iprototype):
+    conn, topo = iprototype
+    cs_id = posting.create_consignment_sale(
+        conn,
+        item_price_usd=Decimal("100.00"),
+        payout_model="tier",
+        payout_amount_idr=Decimal("1300000"),
+        consignor_item_ref="CONSIGN-Y:order-9",
+        tier_rate_percent=Decimal("78.00"),
+        confirmed=True,
+    )
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 5, 1), rate_idr=Decimal("16400"))
+    posting.post_consignment_sale(
+        conn,
+        consignment_sale_id=cs_id,
+        ebay_account_id=topo["ebay_account_id"],
+        entry_date=_dt.date(2026, 5, 5),
+        gross_sale_price_usd=Decimal("110.00"),
+        ebay_fee_usd=Decimal("10.00"),
+        kurs_pajak_rate=Decimal("16400"),
+    )
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 10),
+                raw_description="Transfer BI Fast / to consignor",
+                amount_idr=Decimal("-1300000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    match_result = run_auto_match(conn)
+    assert match_result.matched == 1
+    row = conn.execute(select(review_queue.c.category, review_queue.c.match_rule)).one()
+    assert row.category == "consignment_payout"
+    assert row.match_rule == "d"
+
+    post_pending_rows(conn)
+    reimbursed = conn.execute(select(consignment_sales.c.reimbursed_journal_entry_id)).scalar_one()
+    assert reimbursed is not None
+
+
+def test_rule_e_keyword_fires_normally_on_a_bridging_scoped_line(iprototype):
+    conn, topo = iprototype
+    conn.execute(
+        bank_keyword_rules.insert().values(
+            keyword="BIAYA ADMINISTRASI", category="operating_expense", expense_account_type_code="GENERAL_OPEX"
+        )
+    )
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 31),
+                raw_description="Biaya administrasi rekening",
+                amount_idr=Decimal("-6000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    run_auto_match(conn)
+    row = conn.execute(select(review_queue.c.category, review_queue.c.match_rule)).one()
+    assert row.category == "operating_expense"
+    assert row.match_rule == "e"
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1

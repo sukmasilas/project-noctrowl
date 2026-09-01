@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>{% block title %}Noctrowl{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="brand">Noctrow<span>l</span></div>
+    <a class="nav-item {% if request.endpoint == 'documents.index' %}active{% endif %}" href="{{ url_for('documents.index') }}">Documents</a>
+    <a class="nav-item {% if request.endpoint == 'review_queue.index' %}active{% endif %}" href="{{ url_for('review_queue.index') }}">Review Queue</a>
+    <div class="nav-item {% if request.blueprint == 'reports' %}active{% endif %}">Reports</div>
+    <a class="nav-sub {% if request.endpoint == 'reports.revenue' %}active{% endif %}" href="{{ url_for('reports.revenue') }}">Revenue</a>
+    <a class="nav-sub {% if request.endpoint == 'reports.cash_flow' %}active{% endif %}" href="{{ url_for('reports.cash_flow') }}">Cash Flow</a>
+    <a class="nav-sub {% if request.endpoint == 'reports.pnl' %}active{% endif %}" href="{{ url_for('reports.pnl') }}">P&amp;L</a>
+    <a class="nav-sub {% if request.endpoint == 'reports.equity' %}active{% endif %}" href="{{ url_for('reports.equity') }}">Equity</a>
+    <a class="nav-item {% if request.endpoint == 'settings.payout_tiers' %}active{% endif %}" href="{{ url_for('settings.payout_tiers') }}">Settings</a>
+    <form method="post" action="{{ url_for('auth.logout') }}" style="margin-top:auto;padding:12px 18px;">
+      <button type="submit" class="btn-secondary" style="width:100%;">Log out</button>
+    </form>
+  </div>
+  <div class="main">
+    <div class="topbar">
+      {% block topbar %}{% endblock %}
+    </div>
+    <div class="content">
+      {% for category, message in get_flashed_messages(with_categories=true) %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+      {% block content %}{% endblock %}
+    </div>
+  </div>
+</div>
+</body>
+</html>

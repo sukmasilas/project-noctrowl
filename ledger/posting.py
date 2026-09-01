@@ -237,20 +237,12 @@ def post_ebay_sale(
 
     ebay_wallet_id = get_account_id(conn, "EBAY_WALLET", ebay_account_id=ebay_account_id)
     sales_revenue_id = _singleton(conn, "SALES_REVENUE")
-    ebay_fee_id = _singleton(conn, "EBAY_SELLING_FEES")
 
     lines = [
         debit(
             ebay_wallet_id,
             net_wallet_idr,
             amount_usd_ref=gross_sale_price_usd,
-            fx_rate_used=kurs_pajak_rate,
-            ebay_order_ref=ebay_order_ref,
-        ),
-        debit(
-            ebay_fee_id,
-            fee_idr,
-            amount_usd_ref=ebay_fee_usd,
             fx_rate_used=kurs_pajak_rate,
             ebay_order_ref=ebay_order_ref,
         ),
@@ -266,6 +258,29 @@ def post_ebay_sale(
             ebay_order_ref=ebay_order_ref,
         ),
     ]
+    # BUG FIX (2026-09, found running real May 2026 eBay data through the
+    # pipeline): a real order (22-14606-65529) has $0 in every itemized fee
+    # column — no Final Value Fee, no regulatory/international/deposit fee
+    # at all (a real, legitimate zero, not a parsing gap — confirmed against
+    # the CSV's own fee columns). ``debit()``/``credit()`` both reject a
+    # zero/negative amount as meaningless, so unconditionally posting a fee
+    # line here crashed on this real row. Fixed by only posting the fee line
+    # when there actually IS a fee — when there isn't, the wallet debit
+    # equals the full gross (net_wallet_idr == gross_idr) and the entry
+    # still balances with just the two lines above, which is the accounting
+    # -correct representation of "eBay charged no fee this time", not a
+    # workaround.
+    if fee_idr > 0:
+        ebay_fee_id = _singleton(conn, "EBAY_SELLING_FEES")
+        lines.append(
+            debit(
+                ebay_fee_id,
+                fee_idr,
+                amount_usd_ref=ebay_fee_usd,
+                fx_rate_used=kurs_pajak_rate,
+                ebay_order_ref=ebay_order_ref,
+            )
+        )
 
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="ebay_sale", lines=lines, memo=memo)
 

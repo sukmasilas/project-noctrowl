@@ -27,3 +27,11 @@ Pillow==12.3.0
 google-api-python-client==2.199.0
 google-auth==2.57.0
 google-auth-httplib2==0.4.2
+
+# Milestone 4 — web app UI implementation.
+# Flask chosen over FastAPI/Django — see docs/design/milestone-4-web-app-design.md
+# §1 for the full reasoning (droplet RAM footprint, no ORM needed since
+# ledger/ingestion already use SQLAlchemy Core directly, server-rendered
+# templates are enough for a read-only-reports + two-screens-of-editing app).
+# Werkzeug (password hashing, sessions) ships as a Flask dependency already.
+Flask==3.1.3

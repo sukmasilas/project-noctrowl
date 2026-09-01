@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% import "_status_badge.html" as sb %}
+{% import "reports/_chrome.html" as chrome %}
+{% block title %}Equity — Noctrowl{% endblock %}
+{% block topbar %}
+<form method="get" style="display:flex;gap:10px;align-items:center;">
+  <select class="selector" disabled><option>Consolidated</option></select>
+  <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
+</form>
+{{ sb.status_badge(status, url_for('review_queue.index', period=period_month.isoformat()), url_for('documents.index', period=period_month.isoformat())) }}
+{% endblock %}
+{% block content %}
+{{ chrome.report_tabs('equity', period_month) }}
+<h1>Statement of Equity — Consolidated, {{ period_month | period }}</h1>
+<div class="subtitle">Cumulative balances through the end of this period.</div>
+<table>
+  <tbody>
+    <tr class="figure-row" onclick="location.href='{{ url_for('reports.drilldown', figure='owners_capital', period=period_month.isoformat()) }}'"><td>Owner's Capital</td><td class="num">{{ report.owners_capital_idr | idr }}</td></tr>
+    <tr class="figure-row" onclick="location.href='{{ url_for('reports.drilldown', figure='owners_draw', period=period_month.isoformat()) }}'"><td>Owner's Draw</td><td class="num">({{ report.owners_draw_idr | idr }})</td></tr>
+    <tr class="figure-row" onclick="location.href='{{ url_for('reports.drilldown', figure='retained_earnings', period=period_month.isoformat()) }}'"><td>Retained Earnings</td><td class="num">{{ report.retained_earnings_idr | idr }}</td></tr>
+    <tr style="font-weight:700;"><td>Ending Balance</td><td class="num">{{ report.ending_balance_idr | idr }}</td></tr>
+  </tbody>
+</table>
+{% endblock %}

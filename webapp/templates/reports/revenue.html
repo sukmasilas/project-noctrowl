@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% import "_status_badge.html" as sb %}
+{% import "reports/_chrome.html" as chrome %}
+{% block title %}Revenue — Noctrowl{% endblock %}
+{% block topbar %}
+<form method="get" style="display:flex;gap:10px;align-items:center;">
+  <select class="selector" name="account_id" onchange="this.form.submit()">
+    <option value="consolidated" {% if is_consolidated %}selected{% endif %}>Consolidated</option>
+    {% for a in accounts %}
+      <option value="{{ a.id }}" {% if selected_account and a.id == selected_account.id %}selected{% endif %}>{{ a.name }}</option>
+    {% endfor %}
+  </select>
+  <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
+</form>
+{{ sb.status_badge(status, url_for('review_queue.index', period=period_month.isoformat()), url_for('documents.index', period=period_month.isoformat())) }}
+{% endblock %}
+{% block content %}
+{{ chrome.report_tabs('revenue', period_month, selected_account.id if selected_account else 'consolidated') }}
+<h1>Revenue — {{ 'Consolidated' if is_consolidated else selected_account.name }}, {{ period_month | period }}</h1>
+
+{% if report.unattributed_count %}
+<div class="flash error">{{ report.unattributed_count }} revenue-relevant line(s) could not be attributed to this account and were excluded — see webapp/reporting.py's attribution notes.</div>
+{% endif %}
+
+<table>
+  <tbody>
+    <tr class="figure-row" onclick="location.href='{{ url_for('reports.drilldown', figure='sales_revenue', period=period_month.isoformat(), account_id=selected_account.id if selected_account else '') }}'">
+      <td>Sales Revenue</td><td class="num">{{ report.sales_revenue_idr | idr }}</td>
+    </tr>
+    <tr class="figure-row" onclick="location.href='{{ url_for('reports.drilldown', figure='returns_allowances', period=period_month.isoformat(), account_id=selected_account.id if selected_account else '') }}'">
+      <td>Less: Sales Returns &amp; Allowances</td><td class="num">({{ report.returns_allowances_idr | idr }})</td>
+    </tr>
+    <tr class="figure-row" onclick="location.href='{{ url_for('reports.drilldown', figure='consignment_commission', period=period_month.isoformat(), account_id=selected_account.id if selected_account else '') }}'">
+      <td>Consignment Commission Income</td><td class="num">{{ report.consignment_commission_idr | idr }}</td>
+    </tr>
+    <tr style="font-weight:700;"><td>Net Revenue</td><td class="num">{{ report.net_revenue_idr | idr }}</td></tr>
+  </tbody>
+</table>
+{% endblock %}

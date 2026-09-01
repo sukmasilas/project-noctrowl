@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Review Queue — Noctrowl{% endblock %}
+{% block topbar %}
+<form method="get" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+  <select class="selector" name="account_id" onchange="this.form.submit()">
+    <option value="">All accounts</option>
+    {% for a in accounts %}
+      <option value="{{ a.id }}" {% if selected_account_id == a.id %}selected{% endif %}>{{ a.name }}</option>
+    {% endfor %}
+  </select>
+  <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
+  <select class="selector" name="status" onchange="this.form.submit()">
+    <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All statuses</option>
+    <option value="matched" {% if status_filter == 'matched' %}selected{% endif %}>Matched</option>
+    <option value="needs_review" {% if status_filter == 'needs_review' %}selected{% endif %}>Needs Review</option>
+  </select>
+  <select class="selector" name="source" onchange="this.form.submit()">
+    <option value="all" {% if source_filter == 'all' %}selected{% endif %}>All sources</option>
+    <option value="payoneer_csv" {% if source_filter == 'payoneer_csv' %}selected{% endif %}>Payoneer CSV</option>
+    <option value="bank_statement" {% if source_filter == 'bank_statement' %}selected{% endif %}>Bank PDF</option>
+    <option value="ebay_sales_csv" {% if source_filter == 'ebay_sales_csv' %}selected{% endif %}>eBay Sales CSV</option>
+  </select>
+</form>
+{% endblock %}
+{% block content %}
+<h1>Review Queue</h1>
+<div class="subtitle">{{ period_month | period }}</div>
+
+<div class="card-row">
+  <div class="card"><strong>{{ matched_count }}</strong><div class="small">Matched</div></div>
+  <div class="card"><strong>{{ needs_review_count }}</strong><div class="small">Needs Review</div></div>
+</div>
+
+{% if not rows %}
+<div class="empty-state">No bank statement uploaded yet for this account/month.</div>
+{% else %}
+<table>
+  <thead>
+    <tr><th>Date</th><th>Description</th><th class="num">Amount (IDR)</th><th>Source</th><th>Status</th><th>Category</th><th>Posted</th></tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+      <tr class="figure-row" {% if row.match_status == 'needs_review' and not row.posted_at %}onclick="document.getElementById('rq-editor-{{ row.id }}').classList.toggle('hidden-row')"{% endif %}>
+        <td>{{ row.transaction_date }}</td>
+        <td>{{ row.raw_description }}</td>
+        <td class="num">{{ row.amount_idr | idr }}
+          {% if row.amount_usd_ref %}<div class="small">${{ row.amount_usd_ref }}</div>{% endif %}
+        </td>
+        <td>{{ row.source_type }}</td>
+        <td>
+          {% if row.match_status == 'matched' %}<span class="badge green">Matched</span>
+          {% else %}<span class="badge amber">Needs Review</span>{% endif %}
+        </td>
+        <td>{{ row.category or '—' }}</td>
+        <td>
+          {% if row.posted_at %}<span class="badge green">✓ {{ row.posted_at.strftime('%Y-%m-%d %H:%M') }}</span>
+          {% elif row.labeled_at %}<span class="small">Queued for next sync</span>
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+      {% if row.match_status == 'needs_review' and not row.posted_at %}
+      <tr id="rq-editor-{{ row.id }}" class="inline-editor hidden-row">
+        <td colspan="7">
+          <form method="post" action="{{ url_for('review_queue.label_row', row_id=row.id) }}">
+            <input type="hidden" name="period" value="{{ period_month.isoformat() }}">
+            <input type="hidden" name="account_id" value="{{ selected_account_id or '' }}">
+            <label>Category
+              <select name="category" required>
+                <option value="">— choose —</option>
+                {% for value, label in category_options %}
+                  <option value="{{ value }}" {% if row.category == value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Consignor/Item Ref <input type="text" name="consignor_item_ref" value="{{ row.consignor_item_ref or '' }}"></label>
+            <button type="submit">Save</button>
+          </form>
+        </td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<style>.hidden-row { display: none; }</style>
+{% endblock %}

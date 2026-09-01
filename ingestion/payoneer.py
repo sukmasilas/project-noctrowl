@@ -59,13 +59,75 @@ def _mark_payoneer_row_posted(conn: Connection, wallet_group_id: int, payoneer_t
     )
 
 
+_REPORTS_STATEMENTS_DATE_RE = re.compile(r"^\d{1,2}\s+[A-Za-z]{3},?\s+\d{4}$")
+
+
+def _normalize_reports_statements_row(row: dict[str, str]) -> dict[str, str]:
+    """Convert a "Reports & Statements"-export row (columns: Date /
+    Description / Amount / Currency / Status / Transaction ID — a single
+    signed Amount, not separate Credit/Debit columns; Date as '28 May,
+    2026', not MM/DD/YYYY) into the SAME canonical shape
+    ``process_payoneer_rows``/``_process_ebay_payment_row`` already expect
+    from the older "Transactions page" export (Transaction Date, Credit
+    Amount, Debit Amount, Reference ID, Additional Description, Transaction
+    ID, Status) — see module docstring's "two real CSV export shapes" note,
+    added 2026-09 once a real ``report_*.csv`` sample (this second shape)
+    was collected. Neither ``Reference ID`` nor ``Additional Description``
+    exists in this export — left blank, which the existing amount+date
+    fallback matching in ``_process_ebay_payment_row``/the withdrawal branch
+    already handles (both already tolerate a missing/no-match id and fall
+    back to amount+date, per the design doc — no new fallback path needed).
+    """
+    day, month_abbr, year = row["Date"].replace(",", "").split()
+    txn_date = _dt.datetime.strptime(f"{day} {month_abbr} {year}", "%d %b %Y").date()
+    amount = _parse_money(row["Amount"])
+    return {
+        "Transaction Date": txn_date.strftime("%m/%d/%Y"),
+        "Description": row.get("Description", ""),
+        "Credit Amount": str(amount) if amount > 0 else "",
+        "Debit Amount": str(-amount) if amount < 0 else "",
+        "Status": row.get("Status", ""),
+        "Reference ID": "",
+        "Additional Description": "",
+        "Transaction ID": row.get("Transaction ID", ""),
+    }
+
+
 def parse_payoneer_csv_rows(text_content: str) -> list[dict[str, str]]:
-    """Structured CSV — no header-locating tricks needed, unlike the eBay
-    export. utf-8-sig strips a leading BOM if present (confirmed present in
-    the real sample).
+    """Structured CSV. utf-8-sig strips a leading BOM if present (confirmed
+    present in real samples of both formats).
+
+    **Two real Payoneer CSV export shapes exist** (confirmed 2026-09 —
+    CLAUDE.md itself names both: "Transactions page or Reports &
+    Statements"). The original milestone-3 sample
+    (``Payoneer_Transactions_04-2026.csv``) is the "Transactions page"
+    export (Transaction Date/Credit Amount/Debit Amount/Reference ID/
+    Additional Description columns). The real ``sample-documents/Payoneer/
+    report_*.csv`` files collected afterward are the "Reports & Statements"
+    export — a different column set entirely (Date/Amount single signed
+    column/no Reference ID at all). Detected here by header shape (whichever
+    is actually present dictates the branch — never assumed), normalized to
+    one canonical row shape so ``process_payoneer_rows`` and everything
+    downstream of it needs no format-awareness at all.
+
+    Both real header rows also have trailing whitespace/tab characters on
+    some column names and cell values (confirmed against the real "Reports &
+    Statements" samples specifically, e.g. a header literally named
+    ``"Transaction ID  "`` with trailing spaces, and values like
+    ``"992116509\\t   "``) — every key and value is stripped before use.
     """
     reader = csv.DictReader(io.StringIO(text_content))
-    return [row for row in reader if any(v.strip() for v in row.values())]
+    raw_rows = [
+        {(k or "").strip(): (v or "").strip() for k, v in row.items()}
+        for row in reader
+        if any((v or "").strip() for v in row.values())
+    ]
+    if not raw_rows:
+        return []
+
+    if "Transaction Date" in raw_rows[0]:
+        return raw_rows  # "Transactions page" export — already canonical shape
+    return [_normalize_reports_statements_row(row) for row in raw_rows]
 
 
 @dataclass

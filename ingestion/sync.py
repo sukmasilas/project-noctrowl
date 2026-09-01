@@ -37,10 +37,10 @@ from __future__ import annotations
 import datetime as _dt
 import io
 from dataclasses import dataclass, field
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.engine import Connection
 
-from ingestion import bank_statement, ebay_csv, invoices as invoices_module, matching, payoneer
+from ingestion import bank_statement, ebay_csv, invoices as invoices_module, mandiri_statement, matching, payoneer
 from ingestion.drive_client import FOLDER_MIME_TYPE, DriveFile
 from ingestion.kurs_pajak import lookup_most_recent_rate_as_of
 from ingestion.schema import invoices as invoices_table
@@ -321,6 +321,30 @@ def sync_payoneer(
 # ---------------------------------------------------------------------------
 
 
+_MANDIRI_MARKER = "Bank Mandiri"
+_BCA_MARKER = "TANGGAL KETERANGAN CBG MUTASI SALDO"
+
+
+def _detect_bank_statement_format(pages_text: list[str]) -> str:
+    """Sniff which bank actually issued this statement from its own
+    content, rather than assuming by document_type/folder (see Fix 1's
+    finding — the design doc's original assumption that the Bridging
+    Account is BCA-formatted "because it's the same bank as Main" was wrong;
+    the real Bridging Account statement is Mandiri-issued, in a completely
+    different layout — see ingestion/mandiri_statement.py's docstring).
+    Content-sniffed, not hardcoded by document_type, so a future
+    wallet-group whose bridging bank differs again doesn't need a code
+    change here — just another branch in this function once a real sample
+    exists for it.
+    """
+    combined = "\n".join(pages_text)
+    if _MANDIRI_MARKER in combined:
+        return "mandiri"
+    if _BCA_MARKER in combined:
+        return "bca"
+    return "unknown"
+
+
 def sync_bank_statement(
     conn: Connection,
     drive_client,
@@ -370,13 +394,38 @@ def sync_bank_statement(
 
     raw_bytes = drive_client.download_file(chosen.id)
     pages_text = bank_statement.extract_pdf_text_per_page(io.BytesIO(raw_bytes))
-    parsed = bank_statement.parse_bca_statement_text(pages_text)
-    warnings.extend(parsed.parse_warnings)
-    if parsed.reported_credit_total is not None and not parsed.reconciles:
-        warnings.append(
-            "Parsed lines do NOT reconcile against the statement's own printed CR/DB totals — "
-            "extraction may have missed or misread a line; needs a manual look before trusting this period's numbers."
-        )
+    statement_format = _detect_bank_statement_format(pages_text)
+
+    if statement_format == "mandiri":
+        pages_words = mandiri_statement.extract_pdf_page_words(io.BytesIO(raw_bytes))
+        parsed = mandiri_statement.parse_mandiri_statement_pages(pages_text, pages_words)
+        warnings.extend(parsed.parse_warnings)
+        if parsed.reported_dana_masuk is not None and not parsed.reconciles:
+            warnings.append(
+                "Parsed lines do NOT reconcile against the statement's own printed Dana Masuk/Dana Keluar/"
+                "Saldo Awal/Saldo Akhir totals — extraction may have missed or misread a line; needs a "
+                "manual look before trusting this period's numbers."
+            )
+    else:
+        # Default to the BCA parser for 'bca' and 'unknown' alike — BCA is
+        # the only confirmed real format for bank_statement_master (the
+        # consolidated Master Account), and was this whole pipeline's
+        # original/only format before Fix 1; an unrecognized format still
+        # gets a best-effort BCA-shaped parse attempt (its own parse
+        # -warnings/reconciliation check will correctly flag a bad read
+        # rather than silently trusting an empty result).
+        parsed = bank_statement.parse_bca_statement_text(pages_text)
+        warnings.extend(parsed.parse_warnings)
+        if parsed.reported_credit_total is not None and not parsed.reconciles:
+            warnings.append(
+                "Parsed lines do NOT reconcile against the statement's own printed CR/DB totals — "
+                "extraction may have missed or misread a line; needs a manual look before trusting this period's numbers."
+            )
+        if statement_format == "unknown":
+            warnings.append(
+                "Could not identify this statement as either a known BCA or Mandiri format from its own "
+                "content — attempted a best-effort BCA-shaped parse; treat this period's numbers with extra caution."
+            )
 
     src_id = _upsert_source_document(
         conn,
@@ -466,7 +515,14 @@ def sync_invoices(
 def _extract_invoice(drive_file: DriveFile, raw_bytes: bytes) -> invoices_module.InvoiceExtraction:
     if _matches_ext(drive_file.name, _PDF_EXTENSIONS):
         try:
-            return invoices_module.extract_tokopedia_pdf(io.BytesIO(raw_bytes))
+            # extract_pdf_invoice() sniffs the actual PDF content (Tokopedia
+            # / Shopee / a known Operations vendor) rather than assuming
+            # every PDF invoice is Tokopedia-shaped — see
+            # ingestion/invoices.py's dispatcher docstring. Replaces the
+            # milestone-3 original's hardcoded extract_tokopedia_pdf() call,
+            # which was correct when Tokopedia was the only real sample but
+            # broke once real Shopee/Operations-vendor invoices arrived.
+            return invoices_module.extract_pdf_invoice(io.BytesIO(raw_bytes))
         except Exception as exc:  # noqa: BLE001 - any unrecognized PDF format
             return invoices_module.InvoiceExtraction(
                 extracted_date=None,
@@ -521,6 +577,60 @@ def _extract_invoice(drive_file: DriveFile, raw_bytes: bytes) -> invoices_module
 # ---------------------------------------------------------------------------
 
 
+class SyncAlreadyRunningError(RuntimeError):
+    """Raised when another sync pipeline run already holds the advisory
+    lock below — a concurrent trigger correctly backing off rather than
+    racing it. Never a bug/crash signal; the caller (e.g. webapp's Sync Now
+    handler) should surface this as a plain "a sync is already running, try
+    again shortly" message, same spirit as the Sync Now cooldown.
+    """
+
+
+# Fix (2026-09-01, QA-found concurrency bug): ingestion.matching's
+# review-queue matching/posting (specifically _post_internal_transfer's
+# paired_review_queue_id claim, but also several OTHER SELECT-then-UPDATE
+# "claim" patterns in this pipeline — ebay_expected_payouts.matched_at,
+# consignment_sales.reimbursed_journal_entry_id/journal_entry_id, invoices'
+# drive_file_id dedup) is only safe under SEQUENTIAL execution. QA proved
+# this concretely: a two-thread test against a real staged Bridging/Main
+# pair, forced to maximal overlap with a threading.Barrier, produced TWO
+# separate journal entries for what should be one real transfer. QA also
+# found a real trigger path: webapp's Sync Now cooldown
+# (webapp/sync_cooldown.py) only records a run AFTER run_sync_for_period()
+# completes, so two near-simultaneous clicks (double-click, two tabs, a
+# client retry) can both pass the cooldown check and run the pipeline on
+# two separate DB connections at once.
+#
+# Fixed with a single, GLOBAL (not per-wallet-group — several of the races
+# above aren't wallet-group-scoped either, e.g. rule (b)'s invoice matching
+# and rule (d)'s consignment matching both search across ALL wallet groups)
+# Postgres advisory lock, acquired before ANY work starts in
+# run_sync_for_period below. Two deliberate choices on the exact primitive:
+#
+# - ``pg_try_advisory_xact_lock`` (the non-blocking, TRANSACTION-scoped
+#   variant), not ``pg_advisory_lock``: non-blocking means a second
+#   concurrent caller fails fast with SyncAlreadyRunningError instead of
+#   silently queueing/hanging the HTTP request (bad UX, and this pipeline
+#   does real work — OCR, Drive downloads — that a 1GB droplet shouldn't
+#   have two of piling up regardless of correctness, per CLAUDE.md's
+#   Scheduling section). Transaction-scoped (not session-scoped) means the
+#   lock is automatically released at COMMIT or ROLLBACK of the caller's
+#   own transaction (webapp commits once, at the end, after
+#   run_sync_for_period returns — see webapp/documents_bp.py) with NO
+#   manual unlock call needed anywhere — a session-scoped lock would risk
+#   leaking forever on a pooled connection if some future code path ever
+#   skipped a manual unlock (e.g. an unusual exception path), silently
+#   bricking every future sync until the app restarted. A transaction-scoped
+#   lock cannot leak that way: the DB itself guarantees release at
+#   transaction end no matter how the Python side exits.
+# - Re-acquiring the SAME lock from the SAME transaction is a safe no-op
+#   (Postgres advisory locks are reentrant per session/xact) — so a test (or
+#   any future caller) that calls run_sync_for_period more than once within
+#   one open transaction/connection, sequentially, is unaffected; only a
+#   GENUINELY concurrent second transaction is rejected.
+SYNC_PIPELINE_ADVISORY_LOCK_KEY = 872341987
+
+
 @dataclass
 class SyncResult:
     steps: list[StepResult] = field(default_factory=list)
@@ -552,7 +662,20 @@ def run_sync_for_period(
     (see CLAUDE.md's Prototype scope note on this) — set False rather than
     silently treating an absent Bridging folder as "not yet uploaded" when
     it may not exist as a concept for this business's real setup at all.
+
+    Raises SyncAlreadyRunningError immediately (before any Drive/parsing
+    work starts) if another sync run is concurrently in progress on a
+    different DB connection — see SYNC_PIPELINE_ADVISORY_LOCK_KEY above.
     """
+    acquired = conn.execute(
+        text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": SYNC_PIPELINE_ADVISORY_LOCK_KEY}
+    ).scalar()
+    if not acquired:
+        raise SyncAlreadyRunningError(
+            "Another sync is already running — its review-queue matching/posting isn't safe to run "
+            "concurrently with a second one. Try again once it finishes."
+        )
+
     result = SyncResult()
 
     result.steps.append(

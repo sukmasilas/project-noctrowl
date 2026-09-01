@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Drill-down — Noctrowl{% endblock %}
+{% block topbar %}<div><strong>Drill-down: {{ figure }}</strong></div>{% endblock %}
+{% block content %}
+<h1>Source transactions</h1>
+<div class="subtitle">{{ period_month | period }} — every posted journal line that sums to this figure.</div>
+{% if not lines %}
+<div class="empty-state">No posted lines for this figure/period.</div>
+{% else %}
+<table>
+  <thead><tr><th>Date</th><th>Source</th><th>Memo</th><th>Order Ref</th><th>Consignor/Item Ref</th><th class="num">Debit</th><th class="num">Credit</th></tr></thead>
+  <tbody>
+    {% for l in lines %}
+      <tr>
+        <td>{{ l.entry_date }}</td>
+        <td>{{ l.source_type }}</td>
+        <td>{{ l.memo or '—' }}</td>
+        <td>{{ l.ebay_order_ref or '—' }}</td>
+        <td>{{ l.consignor_item_ref or '—' }}</td>
+        <td class="num">{{ l.debit_idr | idr if l.debit_idr else '' }}</td>
+        <td class="num">{{ l.credit_idr | idr if l.credit_idr else '' }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

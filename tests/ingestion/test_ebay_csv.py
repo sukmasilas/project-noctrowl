@@ -18,9 +18,21 @@ from tests.ingestion.conftest import make_source_document
 REAL_SAMPLE = (
     Path(__file__).resolve().parents[2]
     / "sample-documents"
-    / "ebay-sales-export"
+    / "eBay account 1_ricky-game"
     / "Transaction_report_20260701_20260731.csv"
 )
+
+# Fix 3 validation pass (2026-09-01): 3 more real consecutive months
+# (May/Jun/Aug 2026) were collected alongside the original July sample — see
+# test_all_real_monthly_samples_parse_and_post_cleanly below.
+OTHER_MONTH_SAMPLES = [
+    Path(__file__).resolve().parents[2] / "sample-documents" / "eBay account 1_ricky-game" / name
+    for name in (
+        "Transaction_report_20260501_20260531.csv",
+        "Transaction_report_20260601_20260630.csv",
+        "Transaction_report_20260801_20260831.csv",
+    )
+]
 
 
 def _load_real_sample_rows():
@@ -141,6 +153,64 @@ def test_hold_placed_and_released_pair_never_posts_and_never_double_counts(iprot
     )
     assert result.holds_skipped == 4
     assert conn.execute(select(journal_entries.c.id)).all() == []
+
+
+def test_all_real_monthly_samples_parse_and_post_cleanly(iprototype):
+    """Fix 3 validation pass (2026-09-01): re-run the existing eBay CSV
+    parser/poster against the 3 other real consecutive months collected
+    alongside the original July sample (May/Jun/Aug 2026) — previously only
+    tested against a single real month. Also the regression test for the
+    real bug this pass found: a real May order (22-14606-65529) has $0 in
+    every itemized eBay fee column, which crashed post_ebay_sale's
+    unconditional 3-line construction (fixed in ledger/posting.py — only
+    posts the fee debit line when there actually is a fee).
+    """
+    conn, topo = iprototype
+    from ingestion.kurs_pajak import seed_kurs_pajak_rate
+
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 4, 20), rate_idr=Decimal("16200"))
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 5, 4), rate_idr=Decimal("16210"))
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 5, 11), rate_idr=Decimal("16220"))
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 5, 18), rate_idr=Decimal("16230"))
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 5, 25), rate_idr=Decimal("16240"))
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 6, 1), rate_idr=Decimal("16250"))
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 6, 8), rate_idr=Decimal("16260"))
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 6, 15), rate_idr=Decimal("16270"))
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 6, 22), rate_idr=Decimal("16280"))
+    # 2026-06-29 through 2026-08-03 are already seeded by the iprototype
+    # fixture (tests/ingestion/conftest.py) — not re-seeded here.
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 8, 10), rate_idr=Decimal("16410"))
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 8, 17), rate_idr=Decimal("16420"))
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 8, 24), rate_idr=Decimal("16430"))
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 8, 31), rate_idr=Decimal("16440"))
+
+    for i, sample in enumerate(OTHER_MONTH_SAMPLES):
+        text = sample.read_text(encoding="utf-8-sig")
+        _header, rows = parse_ebay_csv_rows(text)
+        src_id = make_source_document(
+            conn,
+            document_type="ebay_sales_csv",
+            period_month=_dt.date(2026, 5 if i == 0 else (6 if i == 1 else 8), 1),
+            ebay_account_id=topo["ebay_account_id"],
+        )
+        result = process_transaction_report(
+            conn, ebay_account_id=topo["ebay_account_id"], source_document_id=src_id, rows=rows
+        )
+        assert result.parse_warnings == [], f"{sample.name}: {result.parse_warnings}"
+        assert result.orders_posted > 0
+
+    total_debit = conn.execute(select(journal_lines.c.debit_amount_idr)).scalars().all()
+    total_credit = conn.execute(select(journal_lines.c.credit_amount_idr)).scalars().all()
+    assert sum(total_debit) == sum(total_credit)
+
+    # Confirmed 2026-09: no CONSIGN- prefixed row appears in any of the 4
+    # real monthly samples (May-Aug 2026) for this account — the CONSIGN-
+    # detection path still only has real coverage via the synthetic fixture
+    # below, not a real order. Not a bug (defaults to normal-sale treatment
+    # either way, per CLAUDE.md) — flagged to Main-agent as still-open, not
+    # silently assumed resolved just because more months arrived.
+    consign_sales = conn.execute(select(consignment_sales.c.id)).all()
+    assert consign_sales == []
 
 
 def test_consign_prefixed_order_creates_unconfirmed_consignment_sale_not_posted(iprototype):

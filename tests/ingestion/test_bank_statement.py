@@ -1,11 +1,21 @@
 """Tests for ingestion.bank_statement against the real BCA sample.
 
 Per CLAUDE.md's 2026-08-31 confirmation, this real sample is the BCA MAIN
-ACCOUNT statement (not Bridging — see Prototype scope). The Bridging-account
-path is exercised separately with a synthetic fixture in the same format
-(see test_bridging_account_synthetic_fixture below), since no real Bridging
-statement has been collected yet — per Main-agent's explicit instruction not
-to block on that and not to claim real-sample coverage for it.
+ACCOUNT statement (not Bridging — see Prototype scope). The real Bridging
+Account statement, collected 2026-09-01, turned out to be Mandiri-issued in
+a completely different layout — see ingestion/mandiri_statement.py and
+tests/ingestion/test_mandiri_statement.py, NOT this module. The synthetic
+BCA-shaped Bridging fixture below (test_bridging_account_synthetic_fixture)
+is kept as-is: it still exercises "a BCA-formatted bridging account" as a
+hypothetical shape this parser can handle structurally, even though we now
+know THIS business's actual Bridging Account isn't BCA-formatted.
+
+Real sample note (2026-09-01): the old `sample-documents/bank-statements/`
+single-sample layout was replaced with `sample-documents/Main Account
+(BCA)/`, now holding 4 real consecutive months (May-Aug 2026). July is used
+as the primary REAL_SAMPLE here for continuity with the other ingestion
+tests' shared July 2026 period; May/Jun/Aug are covered by
+test_all_four_real_monthly_samples_reconcile_cleanly below.
 """
 from __future__ import annotations
 
@@ -15,9 +25,11 @@ from pathlib import Path
 
 from ingestion.bank_statement import parse_bca_statement, parse_bca_statement_text
 
-REAL_SAMPLE = (
-    Path(__file__).resolve().parents[2] / "sample-documents" / "bank-statements" / "BCA Bank_1790345891_APR_2026.pdf"
-)
+SAMPLES_DIR = Path(__file__).resolve().parents[2] / "sample-documents" / "Main Account (BCA)"
+REAL_SAMPLE = SAMPLES_DIR / "1790345891_JUL_2026.pdf"
+MAY_SAMPLE = SAMPLES_DIR / "1790345891_MAY_2026.pdf"
+JUN_SAMPLE = SAMPLES_DIR / "1790345891_JUN_2026.pdf"
+AUG_SAMPLE = SAMPLES_DIR / "1790345891_AUG_2026.pdf"
 
 
 def test_real_sample_reconciles_against_statements_own_printed_totals():
@@ -28,17 +40,17 @@ def test_real_sample_reconciles_against_statements_own_printed_totals():
     """
     result = parse_bca_statement(REAL_SAMPLE)
 
-    assert result.period_month == _dt.date(2026, 4, 1)
-    assert result.opening_balance_idr == Decimal("13794994.94")
+    assert result.period_month == _dt.date(2026, 7, 1)
+    assert result.opening_balance_idr == Decimal("75620613.34")
     assert result.parse_warnings == []
     assert result.reconciles is True
 
     credits = [l for l in result.lines if l.amount_idr > 0]
     debits = [l for l in result.lines if l.amount_idr < 0]
-    assert len(credits) == 6
-    assert len(debits) == 73
-    assert sum((l.amount_idr for l in credits), Decimal("0")) == Decimal("164233187.11")
-    assert -sum((l.amount_idr for l in debits), Decimal("0")) == Decimal("167925222.22")
+    assert len(credits) == 5
+    assert len(debits) == 65
+    assert sum((l.amount_idr for l in credits), Decimal("0")) == Decimal("173666961.57")
+    assert -sum((l.amount_idr for l in debits), Decimal("0")) == Decimal("158201691.31")
 
 
 def test_real_sample_every_line_has_nonzero_amount_and_valid_date():
@@ -46,8 +58,20 @@ def test_real_sample_every_line_has_nonzero_amount_and_valid_date():
     for line in result.lines:
         assert line.amount_idr != 0
         assert line.transaction_date.year == 2026
-        assert line.transaction_date.month == 4
+        assert line.transaction_date.month == 7
         assert line.raw_description  # never blank
+
+
+def test_all_four_real_monthly_samples_reconcile_cleanly():
+    """Fix 3 validation pass (2026-09-01): re-run the existing BCA parser
+    against the newly-collected real multi-month data (May-Aug 2026) — it
+    was only ever tested against a single real month before. All 4 reconcile
+    cleanly with zero parse warnings; no parser change was needed.
+    """
+    for sample in (MAY_SAMPLE, JUN_SAMPLE, REAL_SAMPLE, AUG_SAMPLE):
+        result = parse_bca_statement(sample)
+        assert result.parse_warnings == [], f"{sample.name}: {result.parse_warnings}"
+        assert result.reconciles is True, f"{sample.name} did not reconcile"
 
 
 def test_reprocessing_same_pages_text_produces_identical_occurrence_indices():
@@ -77,10 +101,10 @@ def test_bank_admin_fee_and_interest_lines_present_and_correctly_signed():
     assert biaya_adm[0].amount_idr == Decimal("-10000.00")
 
     assert len(bunga) == 1
-    assert bunga[0].amount_idr == Decimal("596.11")  # credit — no DB suffix in the source
+    assert bunga[0].amount_idr == Decimal("1261.57")  # credit — no DB suffix in the source
 
     assert len(pajak_bunga) == 1
-    assert pajak_bunga[0].amount_idr == Decimal("-119.22")  # debit — DB suffix in the source
+    assert pajak_bunga[0].amount_idr == Decimal("-252.31")  # debit — DB suffix in the source
 
 
 def test_bridging_account_synthetic_fixture_same_format_parses_cleanly():

@@ -43,13 +43,17 @@ from ingestion.sync import (
 from ledger.schema import journal_entries
 
 SAMPLES = Path(__file__).resolve().parents[2] / "sample-documents"
-EBAY_CSV_BYTES = (SAMPLES / "ebay-sales-export" / "Transaction_report_20260701_20260731.csv").read_bytes()
-PAYONEER_CSV_BYTES = (SAMPLES / "payoneer" / "Payoneer_Transactions_04-2026.csv").read_bytes()
+# Real sample layout replaced 2026-09-01 — see sample-documents/README.md's
+# note that it may still describe the old folder layout; these paths point
+# at the CURRENT real files. Picked to share the same July 2026 period this
+# file's fixture already uses (see the "Cross-month note" in `drive` below).
+EBAY_CSV_BYTES = (SAMPLES / "eBay account 1_ricky-game" / "Transaction_report_20260701_20260731.csv").read_bytes()
+PAYONEER_CSV_BYTES = (SAMPLES / "Payoneer" / "report_2026-09-01_01-00-20.csv").read_bytes()  # July 2026
 PAYONEER_CONFIRMATION_BYTES = (
-    SAMPLES / "payoneer" / "Payoneer_Confirmation_of_Transfer_4366185623014087.pdf"
+    SAMPLES / "Payoneer" / "Confirmation of Transfer" / "Jul" / "Confirmation_of_Transfer_4366185623014087.pdf"
 ).read_bytes()
-BANK_STATEMENT_BYTES = (SAMPLES / "bank-statements" / "BCA Bank_1790345891_APR_2026.pdf").read_bytes()
-TOKOPEDIA_INVOICE_BYTES = (SAMPLES / "invoices-proof-of-purchase" / "Invoice Sample _ Tokopedia.pdf").read_bytes()
+BANK_STATEMENT_BYTES = (SAMPLES / "Main Account (BCA)" / "1790345891_JUL_2026.pdf").read_bytes()
+TOKOPEDIA_INVOICE_BYTES = (SAMPLES / "Invoice" / "Item Purchase" / "August" / "bearing.pdf").read_bytes()
 
 
 class FakeDriveClient:
@@ -100,15 +104,19 @@ class FakeDriveClient:
 @pytest.fixture()
 def drive(iprototype):
     """A fake Drive tree matching CLAUDE.md's Architecture folder structure
-    exactly, pre-populated with the real sample documents. Cross-month note:
-    the real samples span different real-world months (eBay CSV = July
-    2026, Payoneer/BCA statement = April 2026 — see
-    sample-documents/README.md) — placed under one shared test period here
-    since this file is testing PIPELINE WIRING, not fixture date-realism
-    (already covered per-parser in the other test files).
+    exactly, pre-populated with the real sample documents. Real sample
+    layout replaced 2026-09-01 (see module docstring / sample-documents/
+    README.md's note that it may still describe the old layout): the eBay
+    CSV, Payoneer CSV, Payoneer confirmation, and BCA bank statement here are
+    now all genuinely the same real July 2026 month (previously the
+    Payoneer/BCA samples were an unrelated April 2026 month) — only the
+    Tokopedia invoice sample (dated 2026-08-06) is technically a different
+    real month, which doesn't matter for invoice ingestion (not period
+    -gated the way the four fixed-expectation document types are).
     """
     conn, topo = iprototype
-    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 4, 1), rate_idr=Decimal("16400"))
+    # July's weekly Kurs Pajak rates are already seeded by the iprototype
+    # fixture (tests/ingestion/conftest.py) — covers every date used here.
 
     client = FakeDriveClient()
     period_month = _dt.date(2026, 7, 1)
@@ -120,10 +128,10 @@ def drive(iprototype):
     client.add_file(ebay_sales_folder, "Transaction_report_20260701_20260731.csv", EBAY_CSV_BYTES, "text/csv")
 
     payoneer_folder = client.add_path(client.root_id, UPLOADS_ROOT_NAME, "Wallet Group 1", year, ym, PAYONEER_SUBFOLDER)
-    client.add_file(payoneer_folder, "Payoneer_Transactions_04-2026.csv", PAYONEER_CSV_BYTES, "text/csv")
+    client.add_file(payoneer_folder, "report_2026-09-01_01-00-20.csv", PAYONEER_CSV_BYTES, "text/csv")
     client.add_file(
         payoneer_folder,
-        "Payoneer_Confirmation_of_Transfer_4366185623014087.pdf",
+        "Confirmation_of_Transfer_4366185623014087.pdf",
         PAYONEER_CONFIRMATION_BYTES,
         "application/pdf",
     )
@@ -131,10 +139,10 @@ def drive(iprototype):
     master_bank_folder = client.add_path(
         client.root_id, UPLOADS_ROOT_NAME, "Master Account", year, ym, BANK_STATEMENTS_SUBFOLDER
     )
-    client.add_file(master_bank_folder, "BCA Bank_1790345891_APR_2026.pdf", BANK_STATEMENT_BYTES, "application/pdf")
+    client.add_file(master_bank_folder, "1790345891_JUL_2026.pdf", BANK_STATEMENT_BYTES, "application/pdf")
 
     invoices_folder = client.add_path(client.root_id, UPLOADS_ROOT_NAME, "Master Account", year, ym, INVOICES_SUBFOLDER)
-    client.add_file(invoices_folder, "Invoice Sample _ Tokopedia.pdf", TOKOPEDIA_INVOICE_BYTES, "application/pdf")
+    client.add_file(invoices_folder, "bearing.pdf", TOKOPEDIA_INVOICE_BYTES, "application/pdf")
 
     return conn, topo, client, period_month
 
@@ -232,7 +240,7 @@ def test_sync_payoneer_real_sample_downloads_both_csv_and_confirmation(drive):
         period_month=period_month,
     )
     assert step.found_file is True
-    assert step.row_count == 7  # the real CSV's 7 completed rows
+    assert step.row_count == 6  # the real July report's 6 completed rows
 
     doc = conn.execute(
         select(source_documents.c.ingested_at, source_documents.c.row_count).where(
@@ -240,14 +248,17 @@ def test_sync_payoneer_real_sample_downloads_both_csv_and_confirmation(drive):
         )
     ).one()
     assert doc.ingested_at is not None
-    assert doc.row_count == 7
+    assert doc.row_count == 6
 
-    # The real confirmation PDF's own figures (Transfer ID 4366185623014087,
-    # 5000 USD) don't match any of this real CSV's 3 withdrawal rows'
-    # Reference IDs/amounts (different real-world months — see
-    # sample-documents/README.md) — expected to warn, not silently drop.
-    assert len(step.warnings) == 3
-    assert all("no matching withdrawal confirmation" in w for w in step.warnings)
+    # The real confirmation PDF (Transfer ID 4366185623014087, Transaction ID
+    # 1016018157, 5000 USD, 28 Jul) now genuinely matches ONE of this CSV's 2
+    # real withdrawal rows (the 27 Jul one, same Transaction ID, within the
+    # ±3-day tolerance) — unlike the OLD fixture's mismatched April/July
+    # pairing. The OTHER withdrawal row (13 Jul) has no confirmation loaded
+    # in this fixture, so it still correctly warns rather than guessing.
+    assert len(step.warnings) == 1
+    assert "no matching withdrawal confirmation" in step.warnings[0]
+    assert "2026-07-13" in step.warnings[0]
     # The 4 "Payment from eBay" rows have no seeded ebay_expected_payouts to
     # match against in this test, so they stage generically -> needs_review.
     staged = conn.execute(select(review_queue.c.id).where(review_queue.c.source_type == "payoneer_csv")).all()
@@ -260,7 +271,7 @@ def test_sync_bank_statement_master_real_sample_reconciles_no_warning(drive):
         conn, client, root_folder_id=client.root_id, period_month=period_month, master_folder_name="Master Account"
     )
     assert step.found_file is True
-    assert step.row_count == 79
+    assert step.row_count == 70
     assert step.warnings == []  # reconciles cleanly against the statement's own printed totals
 
     doc = conn.execute(
@@ -268,11 +279,11 @@ def test_sync_bank_statement_master_real_sample_reconciles_no_warning(drive):
             source_documents.c.document_type == "bank_statement_master"
         )
     ).one()
-    assert doc.row_count == 79
+    assert doc.row_count == 70
     assert doc.parse_warning is None
 
     staged = conn.execute(select(review_queue.c.id).where(review_queue.c.source_type == "bank_statement")).all()
-    assert len(staged) == 79
+    assert len(staged) == 70
 
 
 def test_sync_bank_statement_missing_folder_records_not_yet_uploaded(iprototype):
@@ -288,7 +299,12 @@ def test_sync_bank_statement_missing_folder_records_not_yet_uploaded(iprototype)
     assert doc.ingested_at is None
 
 
-def test_sync_invoices_real_tokopedia_sample_creates_needs_confirmation_record(drive):
+def test_sync_invoices_real_tokopedia_sample_creates_parsed_cogs_record(drive):
+    """Real sample layout replaced 2026-09-01: the old phone-purchase
+    Tokopedia sample (needs_confirmation, Purpose unset) is gone; the new
+    real Tokopedia sample (bearing.pdf) is a genuine auto-parts COGS
+    purchase — high-confidence, Purpose auto-classified.
+    """
     conn, topo, client, period_month = drive
     step = sync_invoices(
         conn, client, root_folder_id=client.root_id, master_folder_name="Master Account", period_month=period_month
@@ -299,10 +315,10 @@ def test_sync_invoices_real_tokopedia_sample_creates_needs_confirmation_record(d
     invoice = conn.execute(
         select(invoices.c.amount_idr, invoices.c.vendor_description, invoices.c.status, invoices.c.purpose)
     ).one()
-    assert invoice.amount_idr == Decimal("2617600")
-    assert invoice.vendor_description == "Brandon Harvest"
-    assert invoice.status == "needs_confirmation"  # phone purchase, Purpose correctly stays unset
-    assert invoice.purpose is None
+    assert invoice.amount_idr == Decimal("1541400")
+    assert invoice.vendor_description == "Multiprima9"
+    assert invoice.status == "parsed"
+    assert invoice.purpose == "cogs_purchase"
 
 
 def test_sync_invoices_is_idempotent_on_drive_file_id(drive):

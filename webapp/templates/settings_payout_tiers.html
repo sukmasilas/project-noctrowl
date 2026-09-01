@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Settings — Noctrowl{% endblock %}
+{% block topbar %}<div><strong>Settings — Consignor Payout Tiers</strong></div>{% endblock %}
+{% block content %}
+<h1>Consignor Payout Tiers</h1>
+<div class="subtitle">The "Pasal 3" schedule. Editing a rate only affects the lookup used for sales confirmed after the change — never applied retroactively to an already-posted sale.</div>
+<table>
+  <thead>
+    <tr><th>Price Range (USD)</th><th>Rate</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+      <tr>
+        <td>${{ row.min_price_usd }} – {% if row.max_price_usd %}${{ row.max_price_usd }}{% else %}∞{% endif %}</td>
+        <td>
+          {% if row.requires_manual_contact %}
+            <span class="small">No fixed rate — requires manual contact, never auto-applied.</span>
+          {% else %}
+            {{ row.rate_percent }}%
+          {% endif %}
+        </td>
+        <td>
+          {% if not row.requires_manual_contact %}
+          <form method="post" action="{{ url_for('settings.update_payout_tier', tier_id=row.id) }}" style="display:flex;gap:6px;">
+            <input class="selector" type="number" step="0.01" min="0.01" max="100" name="rate_percent" value="{{ row.rate_percent }}" style="width:90px;">
+            <button type="submit">Save</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

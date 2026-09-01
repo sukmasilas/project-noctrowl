@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% import "_status_badge.html" as sb %}
+{% import "reports/_chrome.html" as chrome %}
+{% block title %}P&amp;L — Noctrowl{% endblock %}
+{% block topbar %}
+<form method="get" style="display:flex;gap:10px;align-items:center;">
+  <select class="selector" disabled><option>Consolidated</option></select>
+  <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
+</form>
+{{ sb.status_badge(status, url_for('review_queue.index', period=period_month.isoformat()), url_for('documents.index', period=period_month.isoformat())) }}
+{% endblock %}
+{% block content %}
+{{ chrome.report_tabs('pnl', period_month) }}
+<h1>Profit &amp; Loss — Consolidated, {{ period_month | period }}</h1>
+<table>
+  <tbody>
+    {% for line in report.revenue_lines %}
+      <tr><td>{{ line.name }}</td><td class="num">{{ line.amount_idr | idr }}</td></tr>
+    {% endfor %}
+    <tr style="font-weight:700;"><td>Total Revenue</td><td class="num">{{ report.total_revenue_idr | idr }}</td></tr>
+    <tr><td>Cost of Goods Sold</td><td class="num">({{ report.cogs_idr | idr }})</td></tr>
+    <tr style="font-weight:700;"><td>Gross Profit</td><td class="num">{{ report.gross_profit_idr | idr }}</td></tr>
+    {% for line in report.opex_lines %}
+      <tr><td>{{ line.name }}</td><td class="num">({{ line.amount_idr | idr }})</td></tr>
+    {% endfor %}
+    <tr style="font-weight:700;"><td>Total Operating Expenses</td><td class="num">({{ report.total_opex_idr | idr }})</td></tr>
+    <tr style="font-weight:700;"><td>Operating Income</td><td class="num">{{ report.operating_income_idr | idr }}</td></tr>
+    {% for line in report.other_income_expense_lines %}
+      <tr><td>{{ line.name }}</td><td class="num">{{ line.amount_idr | idr }}</td></tr>
+    {% endfor %}
+    <tr style="font-weight:700;"><td>Net Income</td><td class="num">{{ report.net_income_idr | idr }}</td></tr>
+  </tbody>
+</table>
+{% endblock %}

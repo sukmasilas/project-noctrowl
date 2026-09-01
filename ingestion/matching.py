@@ -139,6 +139,13 @@ def _try_rule_b_invoice(conn: Connection, row) -> tuple[str, str, dict] | None:
     (paying an invoice is money leaving). Only invoices with a non-NULL
     amount_idr participate, regardless of parsed/needs_confirmation status
     — see design doc §6.
+
+    Three Purpose values route to three different review_queue categories
+    (a third branch, 'general_operating_expense' -> 'operating_expense',
+    added 2026-09 alongside Purpose's third value — see CLAUDE.md's Invoice
+    & proof-of-purchase capture section). 'consignment_purchase' (and any
+    other/unset purpose, matching the original two-value design's default)
+    still falls through to 'consignment_payout' — unchanged behavior.
     """
     if row.amount_idr >= 0:
         return None
@@ -154,33 +161,139 @@ def _try_rule_b_invoice(conn: Connection, row) -> tuple[str, str, dict] | None:
         if abs(c.amount_idr - outflow) <= AMOUNT_TOLERANCE_IDR and abs(
             (row.transaction_date - c.extracted_date).days
         ) <= DATE_TOLERANCE_DAYS:
-            category = "cogs_purchase" if c.purpose == "cogs_purchase" else "consignment_payout"
+            if c.purpose == "cogs_purchase":
+                category = "cogs_purchase"
+            elif c.purpose == "general_operating_expense":
+                category = "operating_expense"
+            else:
+                category = "consignment_payout"
             return category, "b", {"invoice_id": c.id}
     return None
 
 
 def _try_rule_c_internal_transfer(conn: Connection, row) -> tuple[str, str, dict] | None:
-    """(c) match a known/expected inter-account transfer amount — sourced
-    from payoneer_withdrawals.net_idr_landed (the Bridging-leg amount a
-    withdrawal already landed). Matches either the outflow line (in the
-    wallet-group's Bridging statement) or the inflow line (in the Master
-    statement) — see design doc §6 for the paired single-post guard applied
-    at posting time, not here.
+    """(c) match a known/expected inter-account transfer.
+
+    FIX (2026-09-01, Main-agent brief "Bridging Account double-posting
+    fix"): CLAUDE.md's Bridging Account correction (Money flow section,
+    "Correction, 2026-09-01") establishes that the Bridging Account is NOT
+    a pure pass-through — the amount that LANDS there (from a Payoneer
+    withdrawal) and the amount that later SWEEPS OUT to BCA Main are two
+    genuinely separate real-world events, for two genuinely different
+    (rounded) numbers, not the same ``net_idr_landed`` figure. The old
+    single check here matched ANY inflow or outflow against
+    ``net_idr_landed`` alone, with no direction constraint and no
+    already-consumed guard, which (a) let the Bridging statement's own
+    landing-echo line (already posted via ``post_realized_fx_withdrawal``
+    at Payoneer-CSV-ingestion time) wrongly re-match and phantom-post a
+    SECOND transfer, and (b) never matched the real, differently-sized
+    sweep at all — and crashed if a human manually labeled it, since
+    ``_post_internal_transfer`` (old) re-derived the match against
+    ``net_idr_landed`` and raised if nothing was found.
+
+    Replaced with two genuinely distinct sub-checks, tried in this order —
+    see each one's own docstring:
     """
-    target = abs(row.amount_idr)
+    outcome = _try_rule_c_landing_echo(conn, row)
+    if outcome is not None:
+        return outcome
+    return _try_rule_c_sweep_transfer(conn, row)
+
+
+def _try_rule_c_landing_echo(conn: Connection, row) -> tuple[str, str, dict] | None:
+    """(c-landing) The Bridging Account statement's OWN line showing a
+    Payoneer withdrawal LANDING — an inflow that's merely an echo of an
+    event ALREADY posted (``post_realized_fx_withdrawal``, called directly
+    from ``ingestion.payoneer`` when the Payoneer CSV + confirmation PDF
+    were processed, well before this bank-statement line ever arrives).
+    Recognizing this reconciles it for traceability but posts NOTHING NEW —
+    the money movement is already in the ledger.
+
+    Constrained to:
+    - inflow lines (amount_idr > 0) on a wallet-group-scoped (Bridging)
+      bank statement (wallet_group_id is not None) — a Master-statement
+      line is never a landing echo, since the landing only ever touches the
+      Bridging Account, never Main directly.
+    - ``payoneer_withdrawals`` rows not already reconciled against a
+      DIFFERENT Bridging line (``bridging_landing_reconciled_review_queue_id
+      IS NULL``) — so the same withdrawal can't be claimed twice either.
+
+    Amount/date tolerance is the same tight, shared threshold as everywhere
+    else in this module — appropriate here since both sides are
+    structured/near-simultaneous (confirmed against all 4 real Mandiri
+    samples: the statement's landing line always lands the exact same date
+    as the withdrawal confirmation, for the exact rounded IDR amount).
+    """
+    if row.wallet_group_id is None or row.amount_idr <= 0:
+        return None
     candidates = conn.execute(
         select(
             payoneer_withdrawals.c.id,
             payoneer_withdrawals.c.net_idr_landed,
             payoneer_withdrawals.c.withdrawal_date,
-            payoneer_withdrawals.c.wallet_group_id,
+        ).where(
+            payoneer_withdrawals.c.wallet_group_id == row.wallet_group_id,
+            payoneer_withdrawals.c.bridging_landing_reconciled_review_queue_id.is_(None),
         )
     ).all()
     for c in candidates:
-        if abs(c.net_idr_landed - target) <= AMOUNT_TOLERANCE_IDR and abs(
+        if abs(c.net_idr_landed - row.amount_idr) <= AMOUNT_TOLERANCE_IDR and abs(
             (row.transaction_date - c.withdrawal_date).days
         ) <= DATE_TOLERANCE_DAYS:
-            return "internal_transfer", "c", {"payoneer_withdrawal_id": c.id}
+            return "internal_transfer_landing", "c-landing", {"payoneer_withdrawal_id": c.id}
+    return None
+
+
+def _try_rule_c_sweep_transfer(conn: Connection, row) -> tuple[str, str, dict] | None:
+    """(c-sweep) The real, later, genuinely SEPARATE Bridging -> Main
+    transfer — a rounded amount the business actually swept, which can be
+    smaller OR larger than ``net_idr_landed`` (confirmed against all 4 real
+    Mandiri months: e.g. a 66,928,398.00 landing swept out as
+    66,930,000.00; an 85,361,499.00 landing swept out as 85,350,000.00) —
+    never the same number, and never within this module's own Rp100
+    tolerance of it. This check deliberately never references
+    ``payoneer_withdrawals``/``net_idr_landed`` at all — it pairs a
+    Bridging outflow line directly against its Master-statement inflow
+    counterpart, by amount + date alone, exactly like reconciling two ends
+    of the same real bank transfer.
+
+    A row only qualifies as a "self" candidate for this check in its own
+    expected direction: a Bridging-scoped (wallet_group_id is not None)
+    OUTFLOW (the sweep leaving Bridging), or a Master-scoped
+    (wallet_group_id is None) INFLOW (the same sweep landing in Main).
+
+    The counterpart search allows a candidate that's either not yet
+    classified (category IS NULL — the common case: both sides of a fresh
+    sweep usually arrive in the same sync and get classified independently,
+    each finding the other) OR already classified 'internal_transfer' (a
+    previously auto-matched or human-labeled row still waiting on its pair
+    — see ``_post_internal_transfer_sweep``'s no-crash handling for how
+    that resolves once the pair does show up). Any OTHER category means
+    that line was already explained as something else entirely and must
+    never be stolen for a transfer it isn't part of.
+    """
+    if row.wallet_group_id is not None:
+        if row.amount_idr >= 0:
+            return None  # only the OUTFLOW leg of a Bridging-scoped line is a sweep-out candidate
+        counterpart_where = (review_queue.c.wallet_group_id.is_(None)) & (review_queue.c.amount_idr > 0)
+    else:
+        if row.amount_idr <= 0:
+            return None  # only the INFLOW leg of a Master-scoped line is a sweep-landing candidate
+        counterpart_where = (review_queue.c.wallet_group_id.isnot(None)) & (review_queue.c.amount_idr < 0)
+
+    candidates = conn.execute(
+        select(review_queue.c.id, review_queue.c.amount_idr, review_queue.c.transaction_date).where(
+            review_queue.c.id != row.id,
+            review_queue.c.source_type == "bank_statement",
+            counterpart_where,
+            (review_queue.c.category.is_(None)) | (review_queue.c.category == "internal_transfer"),
+        )
+    ).all()
+    for c in candidates:
+        if abs(abs(c.amount_idr) - abs(row.amount_idr)) <= AMOUNT_TOLERANCE_IDR and abs(
+            (row.transaction_date - c.transaction_date).days
+        ) <= DATE_TOLERANCE_DAYS:
+            return "internal_transfer", "c-sweep", {}
     return None
 
 
@@ -267,12 +380,23 @@ def run_auto_match(conn: Connection) -> AutoMatchResult:
             values["consignor_item_ref"] = f"invoice:{extra['invoice_id']}"
         if rule_name == "d":
             values["consignor_item_ref"] = extra["consignor_item_ref"]
+        if rule_name == "c-landing":
+            values["linked_payoneer_withdrawal_id"] = extra["payoneer_withdrawal_id"]
         conn.execute(update(review_queue).where(review_queue.c.id == row.id).values(**values))
         if rule_name == "a":
             conn.execute(
                 update(ebay_expected_payouts)
                 .where(ebay_expected_payouts.c.id == extra["expected_payout_id"])
                 .values(matched_at=_dt.datetime.now(_dt.timezone.utc))
+            )
+        if rule_name == "c-landing":
+            # Claim this withdrawal immediately (same connection, same
+            # sequential loop — no two rows in this pass can race for it)
+            # so no OTHER Bridging line can also match it as a landing echo.
+            conn.execute(
+                update(payoneer_withdrawals)
+                .where(payoneer_withdrawals.c.id == extra["payoneer_withdrawal_id"])
+                .values(bridging_landing_reconciled_review_queue_id=row.id)
             )
         result.matched += 1
 
@@ -289,6 +413,13 @@ def run_auto_match(conn: Connection) -> AutoMatchResult:
 class PostResult:
     posted: int = 0
     skipped_unclassified: int = 0
+    # A row IS classified ('internal_transfer' — the c-sweep case) but its
+    # pair hasn't shown up in review_queue yet (e.g. a human manually
+    # labeled one side before the other was ever ingested). Not an error —
+    # nothing in this system force-posts an unbalanced/unconfirmed transfer
+    # (see CLAUDE.md). Left unposted; a later sync's post_pending_rows call
+    # picks it up once the pair does arrive. See _post_internal_transfer.
+    skipped_pending_pair: int = 0
 
 
 def _paying_account_for_row(row) -> tuple[str, dict]:
@@ -327,6 +458,7 @@ def post_pending_rows(conn: Connection) -> PostResult:
             review_queue.c.category,
             review_queue.c.consignor_item_ref,
             review_queue.c.linked_invoice_id,
+            review_queue.c.linked_payoneer_withdrawal_id,
         ).where(review_queue.c.posted_at.is_(None))
     ).all()
 
@@ -336,6 +468,10 @@ def post_pending_rows(conn: Connection) -> PostResult:
             continue  # never a silent best-guess post — CLAUDE.md rule 5
 
         journal_entry_id = _post_one_row(conn, row)
+        if journal_entry_id is None:
+            # c-sweep, pair not found yet — see PostResult.skipped_pending_pair.
+            result.skipped_pending_pair += 1
+            continue
         conn.execute(
             update(review_queue)
             .where(review_queue.c.id == row.id)
@@ -365,8 +501,15 @@ def post_pending_rows(conn: Connection) -> PostResult:
     return result
 
 
-def _post_one_row(conn: Connection, row) -> int:
+def _post_one_row(conn: Connection, row) -> int | None:
+    """Returns the journal_entry_id this row should link to, or None if
+    it's classified but genuinely not ready to post yet (see
+    PostResult.skipped_pending_pair / _post_internal_transfer).
+    """
     entry_date = row.transaction_date
+
+    if row.category == "internal_transfer_landing":
+        return _post_internal_transfer_landing(conn, row)
 
     if row.category == "internal_transfer":
         return _post_internal_transfer(conn, row)
@@ -412,8 +555,21 @@ def _post_one_row(conn: Connection, row) -> int:
         )
 
     if row.category == "operating_expense":
-        outcome = _try_rule_e_keyword(conn, row)
-        expense_code = outcome[2]["expense_account_type_code"] if outcome else "GENERAL_OPEX"
+        if row.linked_invoice_id is not None:
+            # Matched via rule (b) — a 'general_operating_expense' invoice
+            # (see _try_rule_b_invoice). Always GENERAL_OPEX; deliberately
+            # does NOT re-run the rule-(e) keyword lookup below, since that
+            # keyword table is scoped to bank-line-DESCRIPTION heuristics
+            # (rule e) and re-running it here against an invoice-matched
+            # row's raw bank-line text could accidentally pick a different,
+            # unrelated expense account if the description happens to
+            # contain some other keyword — the invoice's own Purpose is the
+            # authoritative signal for this row, not a coincidental keyword
+            # hit on the bank line's description.
+            expense_code = "GENERAL_OPEX"
+        else:
+            outcome = _try_rule_e_keyword(conn, row)
+            expense_code = outcome[2]["expense_account_type_code"] if outcome else "GENERAL_OPEX"
         paying_code, paying_kwargs = _paying_account_for_row(row)
         return posting.post_operating_expense(
             conn,
@@ -465,51 +621,137 @@ def _post_one_row(conn: Connection, row) -> int:
     raise ValueError(f"No posting handler for review_queue category {row.category!r}")
 
 
-def _post_internal_transfer(conn: Connection, row) -> int:
-    """The paired-transfer double-posting guard (design doc §6): find the
-    matching payoneer_withdrawals row again; if its
-    bridging_to_main_journal_entry_id is already set (a DIFFERENT
-    review_queue row already posted this exact transfer), link to that
-    existing entry instead of posting a second time.
+def _post_internal_transfer_landing(conn: Connection, row) -> int:
+    """(c-landing) posting: never inserts a new journal entry. The money
+    movement was already posted at Payoneer-CSV-ingestion time (see
+    ``post_realized_fx_withdrawal``) — this just resolves the already
+    -established link (``review_queue.linked_payoneer_withdrawal_id``, set
+    by rule c-landing in ``run_auto_match``) to that existing entry, so
+    ``post_pending_rows`` can record it as this row's ``posted_journal_entry_id``
+    for traceability.
     """
-    target = abs(row.amount_idr)
-    candidate = None
-    for c in conn.execute(
-        select(
-            payoneer_withdrawals.c.id,
-            payoneer_withdrawals.c.net_idr_landed,
-            payoneer_withdrawals.c.withdrawal_date,
-            payoneer_withdrawals.c.wallet_group_id,
-            payoneer_withdrawals.c.bridging_to_main_journal_entry_id,
+    if row.linked_payoneer_withdrawal_id is None:
+        # Should never happen via the normal auto-match path (rule c-landing
+        # always sets this link atomically with the category) — this
+        # category isn't meant to be a human-selectable review-queue label.
+        # Defense in depth only: treat as "not ready" rather than crash, same
+        # philosophy as the c-sweep "pending pair" case below.
+        return None
+    return conn.execute(
+        select(payoneer_withdrawals.c.journal_entry_id).where(
+            payoneer_withdrawals.c.id == row.linked_payoneer_withdrawal_id
         )
-    ).all():
-        if abs(c.net_idr_landed - target) <= AMOUNT_TOLERANCE_IDR and abs(
-            (row.transaction_date - c.withdrawal_date).days
+    ).scalar_one()
+
+
+def _post_internal_transfer(conn: Connection, row) -> int | None:
+    """(c-sweep) posting: pairs this row directly against its
+    opposite-direction counterpart in review_queue (never against
+    payoneer_withdrawals/net_idr_landed — see CLAUDE.md's 2026-09-01
+    correction and ``_try_rule_c_sweep_transfer``). Whichever side is
+    processed FIRST (within this call, or in an earlier sync run) posts the
+    real transfer and its own row ends up with ``posted_journal_entry_id``
+    set; the second side finds that already set and just links to it
+    instead of posting again — same paired-transfer single-post guard as
+    before, just matched against review_queue directly now.
+
+    Returns None — posts nothing, YET — if no counterpart is found at all.
+    This is an expected, non-error "still waiting for its pair" state (e.g.
+    a human manually labeled one side 'internal_transfer' before the other
+    side was ever ingested) — see PostResult.skipped_pending_pair. Nothing
+    in this system force-posts an unconfirmed/unbalanced transfer.
+
+    Hardening (found in adversarial self-review, 2026-09-01): without a
+    "claimed" guard, two different candidate rows that both happen to
+    plausibly match the SAME single real counterpart (amount+date within
+    tolerance — e.g. two same-day, same-amount Bridging outflows and only
+    one genuine Master-side inflow) could each post their own separate
+    transfer for it, recreating the exact double-posting bug class this
+    whole fix exists to close, one level up. Closing this needs TWO parts,
+    not just a candidate-side exclusion filter:
+
+    1. ``row``'s OWN current ``paired_review_queue_id`` is re-checked LIVE
+       (never trusted from the caller's possibly-stale snapshot — it may
+       have been set by the counterpart's own processing earlier in this
+       very ``post_pending_rows`` call). If already claimed, this function
+       goes STRAIGHT to that specific counterpart — no broader search at
+       all — so a THIRD, coincidentally-matching row processed later can
+       never cause an already-correctly-paired row to be re-paired with
+       someone else (the exact scenario a naive "exclude already-claimed
+       candidates" filter alone does NOT prevent, if the row initiating the
+       search is itself the one with multiple plausible partners).
+    2. Only once row is confirmed still unclaimed does the normal
+       amount+date candidate search run, restricted to UNCLAIMED
+       counterparts (``paired_review_queue_id IS NULL``) — claiming both
+       sides immediately, before posting/linking.
+    """
+    current_pairing = conn.execute(
+        select(review_queue.c.paired_review_queue_id).where(review_queue.c.id == row.id)
+    ).scalar_one()
+    if current_pairing is not None:
+        return conn.execute(
+            select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == current_pairing)
+        ).scalar_one()  # None if the counterpart genuinely hasn't posted yet — never a crash
+
+    if row.wallet_group_id is not None:
+        if row.amount_idr >= 0:
+            raise ValueError(
+                f"review_queue row {row.id} is a Bridging-scoped 'internal_transfer' row with a "
+                f"non-negative amount ({row.amount_idr}) — only an outflow should ever reach this "
+                "category on the Bridging side; matching logic drifted."
+            )
+        counterpart_where = (review_queue.c.wallet_group_id.is_(None)) & (review_queue.c.amount_idr > 0)
+    else:
+        if row.amount_idr <= 0:
+            raise ValueError(
+                f"review_queue row {row.id} is a Master-scoped 'internal_transfer' row with a "
+                f"non-positive amount ({row.amount_idr}) — only an inflow should ever reach this "
+                "category on the Master side; matching logic drifted."
+            )
+        counterpart_where = (review_queue.c.wallet_group_id.isnot(None)) & (review_queue.c.amount_idr < 0)
+
+    candidates = conn.execute(
+        select(
+            review_queue.c.id,
+            review_queue.c.amount_idr,
+            review_queue.c.transaction_date,
+            review_queue.c.wallet_group_id,
+            review_queue.c.posted_journal_entry_id,
+        ).where(
+            review_queue.c.id != row.id,
+            review_queue.c.source_type == "bank_statement",
+            review_queue.c.category == "internal_transfer",
+            review_queue.c.paired_review_queue_id.is_(None),
+            counterpart_where,
+        )
+    ).all()
+
+    match = None
+    for c in candidates:
+        if abs(abs(c.amount_idr) - abs(row.amount_idr)) <= AMOUNT_TOLERANCE_IDR and abs(
+            (row.transaction_date - c.transaction_date).days
         ) <= DATE_TOLERANCE_DAYS:
-            candidate = c
+            match = c
             break
 
-    if candidate is None:
-        raise ValueError(
-            f"review_queue row categorized internal_transfer but no matching payoneer_withdrawals "
-            f"row found for amount={target} near {row.transaction_date} — matching/posting logic drifted."
-        )
+    if match is None:
+        return None  # still waiting for its pair — see docstring, never a crash
 
-    if candidate.bridging_to_main_journal_entry_id is not None:
-        return candidate.bridging_to_main_journal_entry_id
+    # Claim this pairing on BOTH sides now, before posting/linking — closes
+    # the ambiguous-candidate race described in this function's docstring.
+    conn.execute(update(review_queue).where(review_queue.c.id == row.id).values(paired_review_queue_id=match.id))
+    conn.execute(update(review_queue).where(review_queue.c.id == match.id).values(paired_review_queue_id=row.id))
 
-    entry_id = posting.post_inter_account_transfer(
+    if match.posted_journal_entry_id is not None:
+        return match.posted_journal_entry_id
+
+    wallet_group_id = row.wallet_group_id if row.wallet_group_id is not None else match.wallet_group_id
+    return posting.post_inter_account_transfer(
         conn,
         entry_date=row.transaction_date,
         from_account_type_code="BCA_BRIDGING",
         to_account_type_code="BCA_MAIN",
-        amount_idr=candidate.net_idr_landed,
-        from_wallet_group_id=candidate.wallet_group_id,
+        amount_idr=abs(row.amount_idr),
+        from_wallet_group_id=wallet_group_id,
         memo="Periodic transfer from BCA Bridging Account to BCA Main Account",
     )
-    conn.execute(
-        update(payoneer_withdrawals)
-        .where(payoneer_withdrawals.c.id == candidate.id)
-        .values(bridging_to_main_journal_entry_id=entry_id)
-    )
-    return entry_id

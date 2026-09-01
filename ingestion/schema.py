@@ -60,20 +60,50 @@ if "reimbursed_journal_entry_id" not in consignment_sales.c:
     )
 
 # A second additive column, same pattern, on the existing milestone-2
-# payoneer_withdrawals table: solves the "paired-transfer double-posting
-# risk" from design doc §6 (a single real BCA Bridging -> BCA Main transfer
-# can show up as TWO bank lines to reconcile — an outflow in the
-# wallet-group's bridging statement, an inflow in the Master statement).
-# Whichever review_queue row is processed FIRST posts the transfer and sets
-# this; the second row that matches the same withdrawal's net_idr_landed
-# amount sees it already set and just links to the existing journal entry
-# instead of posting a second time. See ingestion/matching.py.
-if "bridging_to_main_journal_entry_id" not in payoneer_withdrawals.c:
+# payoneer_withdrawals table.
+#
+# SUPERSEDED (2026-09-01 Fix — see CLAUDE.md's "Correction, 2026-09-01" note
+# on the Bridging Account's business model): the original
+# ``bridging_to_main_journal_entry_id`` column and its paired-transfer guard
+# assumed the Bridging Account was a pure pass-through where the landing
+# amount and the later sweep-out amount were the SAME number
+# (``net_idr_landed``). Real Mandiri statement data
+# (``sample-documents/Bridging Account (Mandiri)/``) proved this false: the
+# sweep-out is a genuinely separate, later event for a rounded, DIFFERENT
+# amount (the business keeps a buffer in Bridging). Matching a Bridging
+# outflow / Master inflow pair against ``net_idr_landed`` caused two real
+# bugs — a phantom double-post of the withdrawal's own landing echo, and a
+# crash when a human manually labeled the real (non-matching-amount) sweep
+# row. That column/guard is removed; see ``ingestion/matching.py``'s
+# ``_try_rule_c_sweep_transfer``/``_post_internal_transfer_sweep`` for the
+# new design, which pairs a Bridging outflow directly against its Master
+# inflow counterpart (by amount + date, found live in ``review_queue``) and
+# never references ``net_idr_landed`` at all.
+#
+# ``bridging_landing_reconciled_review_queue_id`` replaces it for a
+# DIFFERENT, distinct purpose: recognizing the Bridging statement's own
+# inflow line that's just an echo of a withdrawal ALREADY posted (via
+# ``post_realized_fx_withdrawal`` at Payoneer-CSV-ingestion time) — that
+# line must reconcile (link for traceability), never post a second
+# transfer. Sits on ``payoneer_withdrawals`` (not ``review_queue``) as the
+# "have I already been reconciled against a Bridging line" guard, mirroring
+# ``ebay_expected_payouts.matched_at``'s consumed-once pattern — prevents a
+# second, different Bridging inflow line from also claiming this same
+# withdrawal.
+if "bridging_landing_reconciled_review_queue_id" not in payoneer_withdrawals.c:
     payoneer_withdrawals.append_column(
         Column(
-            "bridging_to_main_journal_entry_id",
+            "bridging_landing_reconciled_review_queue_id",
             Integer,
-            ForeignKey("journal_entries.id"),
+            # use_alter + an explicit name: payoneer_withdrawals is defined
+            # BEFORE review_queue in this file, and review_queue itself has
+            # its own FK back to payoneer_withdrawals
+            # (linked_payoneer_withdrawal_id, below) — a genuine two-table FK
+            # cycle. Without use_alter, SQLAlchemy can't topologically sort
+            # CREATE/DROP order for either table. use_alter defers this
+            # specific constraint to its own ALTER TABLE ADD/DROP CONSTRAINT
+            # statement, breaking the cycle for ordering purposes.
+            ForeignKey("review_queue.id", use_alter=True, name="fk_payoneer_withdrawals_landing_review_queue"),
             nullable=True,
         )
     )
@@ -191,7 +221,7 @@ invoices = Table(
     Column("confirmed_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     CheckConstraint(
-        "purpose IS NULL OR purpose IN ('cogs_purchase','consignment_purchase')",
+        "purpose IS NULL OR purpose IN ('cogs_purchase','consignment_purchase','general_operating_expense')",
         name="ck_invoices_purpose",
     ),
     CheckConstraint("status IN ('parsed','needs_confirmation')", name="ck_invoices_status"),
@@ -255,6 +285,34 @@ review_queue = Table(
     Column("category", Text, nullable=True),
     Column("consignor_item_ref", Text, nullable=True),
     Column("linked_invoice_id", Integer, ForeignKey("invoices.id"), nullable=True),
+    # Fix (2026-09-01): traceability link for a 'internal_transfer_landing'
+    # row (see the category CHECK constraint below and
+    # ingestion/matching.py's rule c-landing) — which payoneer_withdrawals
+    # row this Bridging-statement inflow line reconciles against. Posting
+    # never inserts a new journal entry for this category; it just returns
+    # the withdrawal's own (already-posted) journal_entry_id via this link.
+    Column("linked_payoneer_withdrawal_id", Integer, ForeignKey("payoneer_withdrawals.id"), nullable=True),
+    # Fix (2026-09-01), hardening found during adversarial self-review of
+    # the c-sweep pairing design: without an explicit "claimed" guard, two
+    # DIFFERENT candidate rows that both happen to plausibly match the SAME
+    # single counterpart (by amount+date, within tolerance) could each post
+    # their own separate transfer for it — the exact double-posting bug
+    # class this whole fix exists to close, just recreated one level up.
+    # Self-referencing: set on BOTH sides the moment
+    # ``_post_internal_transfer`` actually commits to a specific pairing
+    # (whether posting new or linking to an already-posted counterpart), so
+    # no other row can later claim either side of an already-paired
+    # transfer. See ingestion/matching.py.
+    #
+    # Trust note (QA, 2026-09-01, non-blocking): like ``posted_at``/
+    # ``posted_journal_entry_id`` elsewhere in this table, this column is an
+    # application-level guard, not enforced by a DB constraint — a raw-SQL
+    # write with direct database access could forge it (e.g. pre-set it to
+    # point at an unrelated row before the real pairing runs) with no
+    # application-reachable path to do so. Same trust boundary already
+    # accepted for the rest of review_queue's posting-idempotency columns;
+    # not a new gap this fix introduces.
+    Column("paired_review_queue_id", Integer, ForeignKey("review_queue.id", use_alter=True, name="fk_review_queue_paired_review_queue_id"), nullable=True),
     Column("labeled_at", DateTime(timezone=True), nullable=True),
     Column("posted_at", DateTime(timezone=True), nullable=True),
     Column("posted_journal_entry_id", Integer, ForeignKey("journal_entries.id"), nullable=True),
@@ -264,9 +322,17 @@ review_queue = Table(
         name="ck_review_queue_source_type",
     ),
     CheckConstraint("match_status IN ('matched','needs_review')", name="ck_review_queue_match_status"),
+    # 'internal_transfer_landing' added 2026-09-01 (Fix — see CLAUDE.md's
+    # Bridging Account correction): distinct from 'internal_transfer', which
+    # now means ONLY the genuine, separate Bridging -> Main sweep (see
+    # ingestion/matching.py's rule c-sweep). 'internal_transfer_landing' is
+    # the Bridging statement's own echo of an ALREADY-posted Payoneer
+    # withdrawal landing — reconciled for traceability, never posts a new
+    # journal entry.
     CheckConstraint(
         "category IS NULL OR category IN ('revenue_settlement','cogs_purchase','consignment_payout',"
-        "'internal_transfer','operating_expense','owners_draw','owners_contribution','other')",
+        "'internal_transfer','internal_transfer_landing','operating_expense','owners_draw',"
+        "'owners_contribution','other')",
         name="ck_review_queue_category",
     ),
     # The idempotency invariant from CLAUDE.md rule 6, structural: a row can

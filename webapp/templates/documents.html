@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Documents — Noctrowl{% endblock %}
+{% block topbar %}
+  {% if not no_accounts %}
+  <form method="get" style="display:flex;gap:10px;align-items:center;">
+    <select class="selector" name="account_id" onchange="this.form.submit()">
+      {% for a in accounts %}
+        <option value="{{ a.id }}" {% if selected_account and a.id == selected_account.id %}selected{% endif %}>{{ a.name }}</option>
+      {% endfor %}
+    </select>
+    <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
+  </form>
+  {% endif %}
+{% endblock %}
+{% block content %}
+<h1>Documents</h1>
+<div class="subtitle">{{ selected_account.name if selected_account else '' }} — {{ period_month | period }}</div>
+
+{% if no_accounts %}
+  <div class="empty-state">No eBay account is set up yet.</div>
+{% else %}
+
+<form method="post" action="{{ url_for('documents.sync_now') }}" style="margin-bottom:16px;">
+  <input type="hidden" name="account_id" value="{{ selected_account.id }}">
+  <input type="hidden" name="period" value="{{ period_month.isoformat() }}">
+  <button type="submit" {% if sync_cooldown_seconds > 0 %}disabled{% endif %}>
+    {% if sync_cooldown_seconds > 0 %}Sync Now (wait {{ sync_cooldown_seconds }}s){% else %}Sync Now{% endif %}
+  </button>
+  {% if sync_cooldown_seconds > 0 %}
+    <span class="small">Cooldown protects the droplet from repeated OCR/parsing load.</span>
+  {% endif %}
+</form>
+
+<div class="card-row">
+  {% for card in cards %}
+    <div class="card" style="flex:1;min-width:200px;">
+      <div><strong>{{ card.label }}</strong></div>
+      {% if card.state == 'uploaded' %}
+        <span class="badge green">Uploaded</span>
+        <div class="small">{{ card.row_count }} row(s){% if card.drive_file_name %} — {{ card.drive_file_name }}{% endif %}</div>
+      {% elif card.state == 'missing' %}
+        <span class="badge red">Missing — expected by {{ card.expected_by.isoformat() }}</span>
+      {% else %}
+        <span class="badge blue">Not yet uploaded</span>
+      {% endif %}
+      {% if card.parse_warning %}
+        <div class="small" style="color:var(--red-text);">{{ card.parse_warning }}</div>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+
+<h1 style="margin-top:24px;">Invoices &amp; Proof of Purchase</h1>
+<div class="subtitle">Consolidated across all accounts — purchases don't trace to one eBay account.</div>
+<table>
+  <thead>
+    <tr><th>Date</th><th>Vendor / Description</th><th class="num">Amount (IDR)</th><th>Purpose</th><th>Status</th><th>Matched</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for inv in invoice_rows %}
+      <tr class="figure-row" onclick="document.getElementById('inv-editor-{{ inv.id }}').classList.toggle('hidden-row')">
+        <td>{{ inv.extracted_date or '—' }}</td>
+        <td>{{ inv.vendor_description or '—' }}</td>
+        <td class="num">{{ inv.amount_idr | idr }}</td>
+        <td>{{ inv.purpose or '—' }}</td>
+        <td>
+          {% if inv.status == 'parsed' %}<span class="badge green">Parsed</span>
+          {% else %}<span class="badge amber">Needs Confirmation</span>{% endif %}
+        </td>
+        <td>{% if inv.id in matched_invoice_ids %}Matched{% else %}Awaiting payment match{% endif %}</td>
+        <td><a href="https://drive.google.com/file/d/{{ inv.drive_file_id }}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Open in Drive ↗</a></td>
+      </tr>
+      <tr id="inv-editor-{{ inv.id }}" class="inline-editor hidden-row">
+        <td colspan="7">
+          <form method="post" action="{{ url_for('documents.update_invoice', invoice_id=inv.id) }}">
+            <input type="hidden" name="period" value="{{ period_month.isoformat() }}">
+            <input type="hidden" name="account_id" value="{{ selected_account.id }}">
+            <label>Date <input type="date" name="extracted_date" value="{{ inv.extracted_date or '' }}"></label>
+            <label>Vendor/Description <input type="text" name="vendor_description" value="{{ inv.vendor_description or '' }}"></label>
+            <label>Amount (IDR) <input type="number" step="1" name="amount_idr" value="{{ inv.amount_idr or '' }}"></label>
+            <label>Purpose
+              <select name="purpose">
+                <option value="">— choose —</option>
+                {% for value, label in purpose_options %}
+                  <option value="{{ value }}" {% if inv.purpose == value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <button type="submit">Save</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="empty-state">No invoices uploaded yet for this period.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if unmatched_cogs %}
+<div class="card" style="margin-top:16px;">
+  <strong>Unmatched COGS activity</strong>
+  <div class="small">{{ unmatched_cogs | length }} review-queue transaction(s) labeled COGS/Consignment Payout have no linked invoice.
+    <a href="{{ url_for('review_queue.index', period=period_month.isoformat()) }}">View in Review Queue</a>
+  </div>
+</div>
+{% endif %}
+
+{% endif %}
+<style>.hidden-row { display: none; }</style>
+{% endblock %}

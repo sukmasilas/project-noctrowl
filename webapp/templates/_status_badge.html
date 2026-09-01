@@ -1,0 +1,10 @@
+{% macro status_badge(status, review_queue_url, documents_url) %}
+  {% if status.is_final %}
+    <span class="status-badge final">Final</span>
+  {% else %}
+    {% set target = review_queue_url if status.needs_review_count else documents_url %}
+    <a class="status-badge provisional" href="{{ target }}" title="{{ status.reasons | join(' · ') }}">
+      Provisional — {{ status.reasons | join(' · ') }}
+    </a>
+  {% endif %}
+{% endmacro %}

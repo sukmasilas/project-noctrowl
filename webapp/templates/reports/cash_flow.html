@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% import "_status_badge.html" as sb %}
+{% import "reports/_chrome.html" as chrome %}
+{% block title %}Cash Flow — Noctrowl{% endblock %}
+{% block topbar %}
+<form method="get" style="display:flex;gap:10px;align-items:center;">
+  <select class="selector" name="account_id" onchange="this.form.submit()">
+    <option value="consolidated" {% if is_consolidated %}selected{% endif %}>Consolidated</option>
+    {% for a in accounts %}
+      <option value="{{ a.id }}" {% if selected_account and a.id == selected_account.id %}selected{% endif %}>{{ a.name }}</option>
+    {% endfor %}
+  </select>
+  <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
+</form>
+{{ sb.status_badge(status, url_for('review_queue.index', period=period_month.isoformat()), url_for('documents.index', period=period_month.isoformat())) }}
+{% endblock %}
+{% block content %}
+{{ chrome.report_tabs('cash_flow', period_month, selected_account.id if selected_account else 'consolidated') }}
+<h1>Cash Flow — {{ report.scope_label }}, {{ period_month | period }}</h1>
+
+{% if report.is_shared_pool %}
+<div class="banner-shared">This Payoneer wallet is shared with another eBay account ({{ report.wallet_group_name }}). Everything from here down is the pooled total for both accounts.</div>
+{% endif %}
+{% if report.transfer_elimination_idr is not none %}
+<div class="banner-shared">Inter-account transfers eliminated — {{ report.transfer_elimination_idr | idr }} moved internally this period nets to zero across the consolidated total (and the shared wallet-group's Payoneer/Bridging figures above are de-duplicated, not summed per account).</div>
+{% endif %}
+
+{% for stage in report.stages %}
+<h2 style="font-size:15px;margin:18px 0 6px;">{{ stage.label }}</h2>
+{% if not stage.movements %}
+<div class="empty-state">No activity this period.</div>
+{% else %}
+<table>
+  <thead><tr><th>Date</th><th>Type</th><th>Memo</th><th class="num">Net (IDR)</th></tr></thead>
+  <tbody>
+    {% for m in stage.movements %}
+      <tr><td>{{ m.entry_date }}</td><td>{{ m.source_type }}</td><td>{{ m.memo or '—' }}</td><td class="num">{{ m.net_idr | idr }}</td></tr>
+    {% endfor %}
+    <tr style="font-weight:700;"><td colspan="3">Net this stage</td><td class="num">{{ stage.net_idr | idr }}</td></tr>
+  </tbody>
+</table>
+{% endif %}
+{% endfor %}
+{% endblock %}
