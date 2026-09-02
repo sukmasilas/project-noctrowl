@@ -5,9 +5,17 @@ credentials/network access. Live connectivity was verified separately (once,
 manually, read-only, no writes) against the real service account and Drive
 folder during Phase B — see the milestone report for that action log; it is
 not re-run automatically here.
+
+OAuth path tests (added 2026-09-02, alongside the service-account -> OAuth
+switch): exercise _load_oauth_credentials and DriveClient's auth-mode
+selection against a fake, locally-generated token file — never a real
+interactive consent flow (not meaningfully testable without a real browser
+and a real user, per the brief).
 """
 from __future__ import annotations
 
+import json
+import os
 from unittest import mock
 
 import pytest
@@ -31,6 +39,7 @@ def test_nonexistent_credentials_file_raises_clear_error(monkeypatch, tmp_path):
 def test_list_files_builds_expected_query_and_paginates(monkeypatch):
     from ingestion.drive_client import DriveClient
 
+    monkeypatch.delenv("GOOGLE_OAUTH_TOKEN_PATH", raising=False)
     with mock.patch("ingestion.drive_client._load_credentials", return_value=mock.Mock()):
         with mock.patch("googleapiclient.discovery.build") as build_mock:
             service = mock.Mock()
@@ -49,3 +58,220 @@ def test_list_files_builds_expected_query_and_paginates(monkeypatch):
     assert files[0].modified_time == "2026-05-01T00:00:00Z"
     assert files[1].modified_time is None
     assert service.files.return_value.list.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Token file writing (save_oauth_token) — atomicity + restricted permissions
+# ---------------------------------------------------------------------------
+
+
+def test_save_oauth_token_writes_content_and_restricts_permissions(tmp_path):
+    import stat
+
+    from ingestion.drive_client import save_oauth_token
+
+    token_path = tmp_path / "nested" / "google-oauth-token.json"
+    save_oauth_token(str(token_path), '{"token": "abc"}')
+
+    assert token_path.read_text() == '{"token": "abc"}'
+    mode = stat.S_IMODE(os.stat(token_path).st_mode)
+    assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+    # No leftover .tmp sibling once the atomic swap has completed.
+    assert not (tmp_path / "nested" / "google-oauth-token.json.tmp").exists()
+
+
+def test_save_oauth_token_overwrites_existing_file_atomically(tmp_path):
+    from ingestion.drive_client import save_oauth_token
+
+    token_path = tmp_path / "google-oauth-token.json"
+    save_oauth_token(str(token_path), '{"token": "old"}')
+    save_oauth_token(str(token_path), '{"token": "new"}')
+
+    assert token_path.read_text() == '{"token": "new"}'
+    assert not (tmp_path / "google-oauth-token.json.tmp").exists()
+
+
+def test_save_oauth_token_cleans_up_tmp_file_on_write_failure(tmp_path, monkeypatch):
+    from ingestion.drive_client import save_oauth_token
+
+    token_path = tmp_path / "google-oauth-token.json"
+
+    real_fdopen = os.fdopen
+
+    def _boom_fdopen(fd, mode="r", *args, **kwargs):
+        f = real_fdopen(fd, mode, *args, **kwargs)
+        f.close()
+        raise RuntimeError("simulated crash mid-write")
+
+    monkeypatch.setattr(os, "fdopen", _boom_fdopen)
+
+    with pytest.raises(RuntimeError, match="simulated crash mid-write"):
+        save_oauth_token(str(token_path), '{"token": "abc"}')
+
+    # Original target file must not exist (nothing was ever written to it
+    # directly) and the .tmp scratch file must have been cleaned up rather
+    # than left behind half-written.
+    assert not token_path.exists()
+    assert not (tmp_path / "google-oauth-token.json.tmp").exists()
+
+
+# ---------------------------------------------------------------------------
+# OAuth credential loading (_load_oauth_credentials)
+# ---------------------------------------------------------------------------
+
+
+def _fake_token_json(*, expiry: str | None = None) -> str:
+    """A syntactically-valid fake OAuth token file, same shape
+    Credentials.to_json() produces / scripts/authorize_google_drive.py
+    saves. Never a real credential — for unit tests only.
+    """
+    info = {
+        "token": "fake-access-token",
+        "refresh_token": "fake-refresh-token",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "fake-client-id.apps.googleusercontent.com",
+        "client_secret": "fake-client-secret",
+        "scopes": ["https://www.googleapis.com/auth/drive"],
+    }
+    if expiry is not None:
+        info["expiry"] = expiry
+    return json.dumps(info)
+
+
+def test_oauth_missing_token_path_env_raises_clear_error(monkeypatch):
+    from ingestion.drive_client import _load_oauth_credentials
+
+    monkeypatch.delenv("GOOGLE_OAUTH_TOKEN_PATH", raising=False)
+    with pytest.raises(DriveCredentialError, match="not set"):
+        _load_oauth_credentials()
+
+
+def test_oauth_nonexistent_token_file_raises_clear_error(monkeypatch, tmp_path):
+    from ingestion.drive_client import _load_oauth_credentials
+
+    missing_path = tmp_path / "does-not-exist.json"
+    monkeypatch.setenv("GOOGLE_OAUTH_TOKEN_PATH", str(missing_path))
+    with pytest.raises(DriveCredentialError, match="doesn't exist"):
+        _load_oauth_credentials()
+
+
+def test_oauth_malformed_token_file_raises_clear_error(monkeypatch, tmp_path):
+    from ingestion.drive_client import _load_oauth_credentials
+
+    token_path = tmp_path / "google-oauth-token.json"
+    token_path.write_text("this is not valid json at all {")
+    monkeypatch.setenv("GOOGLE_OAUTH_TOKEN_PATH", str(token_path))
+    with pytest.raises(DriveCredentialError, match="Could not load OAuth token"):
+        _load_oauth_credentials()
+
+
+def test_oauth_unexpired_token_loads_without_refreshing(monkeypatch, tmp_path):
+    from ingestion.drive_client import _load_oauth_credentials
+
+    token_path = tmp_path / "google-oauth-token.json"
+    far_future = "2099-01-01T00:00:00Z"
+    token_path.write_text(_fake_token_json(expiry=far_future))
+    monkeypatch.setenv("GOOGLE_OAUTH_TOKEN_PATH", str(token_path))
+
+    with mock.patch("google.oauth2.credentials.Credentials.refresh") as refresh_mock:
+        credentials = _load_oauth_credentials()
+
+    refresh_mock.assert_not_called()
+    assert credentials.token == "fake-access-token"
+    # File must be unchanged (still the original fake token) since no refresh happened.
+    assert json.loads(token_path.read_text())["token"] == "fake-access-token"
+
+
+def test_oauth_expired_token_refreshes_and_persists_new_token(monkeypatch, tmp_path):
+    from ingestion.drive_client import _load_oauth_credentials
+
+    token_path = tmp_path / "google-oauth-token.json"
+    # No "expiry" key at all => from_authorized_user_info treats it as
+    # already-expired (see google.oauth2.credentials source), exercising
+    # the refresh path without needing to fabricate a past timestamp.
+    token_path.write_text(_fake_token_json())
+    monkeypatch.setenv("GOOGLE_OAUTH_TOKEN_PATH", str(token_path))
+
+    def fake_refresh(self, request):
+        # Simulate what a real refresh does: update the in-memory token.
+        self.token = "refreshed-access-token"  # noqa: SLF001 - test double
+
+    with mock.patch("google.oauth2.credentials.Credentials.refresh", new=fake_refresh):
+        credentials = _load_oauth_credentials()
+
+    assert credentials.token == "refreshed-access-token"
+    # Refreshed token must be persisted back to the same file so an
+    # unattended process never needs to re-run the interactive consent flow.
+    saved = json.loads(token_path.read_text())
+    assert saved["token"] == "refreshed-access-token"
+    assert saved["refresh_token"] == "fake-refresh-token"
+
+
+def test_oauth_refresh_failure_raises_clear_error(monkeypatch, tmp_path):
+    from ingestion.drive_client import _load_oauth_credentials
+
+    token_path = tmp_path / "google-oauth-token.json"
+    token_path.write_text(_fake_token_json())
+    monkeypatch.setenv("GOOGLE_OAUTH_TOKEN_PATH", str(token_path))
+
+    def failing_refresh(self, request):
+        raise RuntimeError("invalid_grant: token has been revoked")
+
+    with mock.patch("google.oauth2.credentials.Credentials.refresh", new=failing_refresh):
+        with pytest.raises(DriveCredentialError, match="could not be refreshed"):
+            _load_oauth_credentials()
+
+
+# ---------------------------------------------------------------------------
+# DriveClient auth-mode selection
+# ---------------------------------------------------------------------------
+
+
+def test_driveclient_defaults_to_oauth_when_token_path_env_is_set(monkeypatch):
+    from ingestion.drive_client import DriveClient
+
+    monkeypatch.setenv("GOOGLE_OAUTH_TOKEN_PATH", "/fake/path/token.json")
+    with mock.patch("ingestion.drive_client._load_oauth_credentials", return_value=mock.Mock()) as oauth_mock:
+        with mock.patch("ingestion.drive_client._load_credentials") as sa_mock:
+            with mock.patch("googleapiclient.discovery.build"):
+                client = DriveClient()
+
+    assert client.auth_mode == "oauth"
+    oauth_mock.assert_called_once()
+    sa_mock.assert_not_called()
+
+
+def test_driveclient_falls_back_to_service_account_when_no_oauth_env(monkeypatch):
+    from ingestion.drive_client import DriveClient
+
+    monkeypatch.delenv("GOOGLE_OAUTH_TOKEN_PATH", raising=False)
+    with mock.patch("ingestion.drive_client._load_oauth_credentials") as oauth_mock:
+        with mock.patch("ingestion.drive_client._load_credentials", return_value=mock.Mock()) as sa_mock:
+            with mock.patch("googleapiclient.discovery.build"):
+                client = DriveClient()
+
+    assert client.auth_mode == "service_account"
+    sa_mock.assert_called_once()
+    oauth_mock.assert_not_called()
+
+
+def test_driveclient_auth_mode_can_be_forced_explicitly(monkeypatch):
+    from ingestion.drive_client import DriveClient
+
+    # Even with the OAuth env var set, an explicit auth_mode overrides the default.
+    monkeypatch.setenv("GOOGLE_OAUTH_TOKEN_PATH", "/fake/path/token.json")
+    with mock.patch("ingestion.drive_client._load_oauth_credentials") as oauth_mock:
+        with mock.patch("ingestion.drive_client._load_credentials", return_value=mock.Mock()) as sa_mock:
+            with mock.patch("googleapiclient.discovery.build"):
+                client = DriveClient(auth_mode="service_account")
+
+    assert client.auth_mode == "service_account"
+    sa_mock.assert_called_once()
+    oauth_mock.assert_not_called()
+
+
+def test_driveclient_unknown_auth_mode_raises_value_error():
+    from ingestion.drive_client import DriveClient
+
+    with pytest.raises(ValueError, match="Unknown auth_mode"):
+        DriveClient(auth_mode="carrier-pigeon")

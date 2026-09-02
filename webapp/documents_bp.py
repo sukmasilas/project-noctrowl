@@ -238,6 +238,20 @@ def sync_now():
     conn.commit()
 
     new_files = sum(1 for s in result.steps if s.found_file)
+    # BUG FIX (2026-09-02, found during the real live-Drive validation run):
+    # result.auto_match.needs_review is the TOTAL count of every still
+    # -unclassified review_queue row across ALL periods (run_auto_match has
+    # no period filter — see ingestion/matching.py), not "new" items created
+    # by this one sync. The old wording ("N new Needs Review item(s)") made
+    # every single Sync Now click look like it had just created N fresh
+    # problems, even on a fully-idempotent re-sync that added zero rows —
+    # confirmed misleading in practice when a real re-sync legitimately
+    # produced 0 new rows but the message still said "392 new".
+    posted_count = result.posted.posted if result.posted else 0
     needs_review = result.auto_match.needs_review if result.auto_match else 0
-    flash(f"Synced just now — {new_files} sources checked, {needs_review} new Needs Review item(s).", "success")
+    flash(
+        f"Synced just now — {new_files} sources checked, {posted_count} row(s) posted, "
+        f"{needs_review} Needs Review item(s) outstanding (across all periods).",
+        "success",
+    )
     return redirect(url_for("documents.index", period=period_month.isoformat(), account_id=account.id))

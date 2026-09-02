@@ -66,6 +66,50 @@ def test_stage_raw_lines_synthesizes_dedup_key_when_no_external_ref(iprototype):
     assert len(conn.execute(select(review_queue.c.id)).all()) == 2
 
 
+def test_synthetic_external_ref_is_stable_across_separate_processes():
+    """Regression test for the 2026-09-02 real live-Drive-run bug: the
+    synthetic dedup key used to embed Python's built-in ``hash()`` of the
+    raw description, which is randomized per-process (PYTHONHASHSEED) —
+    stable within one pytest run (so every OTHER test above, which only
+    ever calls stage_raw_lines twice within the SAME process, could never
+    catch this), but different across two genuinely separate processes,
+    which silently defeated the ON CONFLICT DO NOTHING dedup on a real
+    second sync run and double-posted 9 already-posted transactions.
+
+    Proves the fix (hashlib.sha256, not hash()) by actually spawning two
+    separate child Python processes with DIFFERENT explicit PYTHONHASHSEED
+    values and confirming they compute the identical synthetic
+    external_ref for the same input — the exact property a value persisted
+    into the database across re-syncs needs, which an in-process-only test
+    structurally cannot exercise.
+    """
+    import os
+    import subprocess
+    import sys
+
+    snippet = (
+        "from ingestion.matching import RawLine, _synthetic_external_ref; "
+        "print(_synthetic_external_ref(3, RawLine("
+        "transaction_date=__import__('datetime').date(2026, 5, 3), "
+        "raw_description='TRSF E-BANKING DB 0608/FTFVA/WS95271 / 80777/TOKOPEDIA', "
+        "amount_idr=__import__('decimal').Decimal('-1541400.00'), occurrence_index=1)))"
+    )
+
+    def _run_with_seed(seed: str) -> str:
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        result = subprocess.run(
+            [sys.executable, "-c", snippet], env=env, capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip()
+
+    ref_seed_0 = _run_with_seed("0")
+    ref_seed_42 = _run_with_seed("42")
+    ref_seed_random = _run_with_seed("random")
+
+    assert ref_seed_0 == ref_seed_42 == ref_seed_random
+    assert ref_seed_0.startswith("doc3:2026-05-03:")
+
+
 # ---------------------------------------------------------------------------
 # rule (a) — expected eBay payout
 # ---------------------------------------------------------------------------

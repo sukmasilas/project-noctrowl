@@ -20,10 +20,15 @@ load_dotenv()
 from webapp import create_app  # noqa: E402 - must follow load_dotenv()
 
 drive_client = None
-if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and os.environ.get("GOOGLE_DRIVE_ROOT_FOLDER_ID"):
+_has_oauth = bool(os.environ.get("GOOGLE_OAUTH_TOKEN_PATH"))
+_has_service_account = bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"))
+if os.environ.get("GOOGLE_DRIVE_ROOT_FOLDER_ID") and (_has_oauth or _has_service_account):
     try:
         from ingestion.drive_client import DriveClient
 
+        # DriveClient itself defaults to OAuth when GOOGLE_OAUTH_TOKEN_PATH is set
+        # (see ingestion/drive_client.py), falling back to the legacy service-account
+        # path otherwise — no auth_mode needs to be chosen here.
         drive_client = DriveClient()
     except Exception:  # noqa: BLE001 - Drive isn't required for the app to boot; Sync Now will just report it's unavailable
         drive_client = None

@@ -413,7 +413,15 @@ def test_live_list_files_against_real_configured_root_folder():
 
     from ingestion.drive_client import DriveClient
 
-    client = DriveClient(readwrite=False)
+    # auth_mode="service_account" is explicit and load-bearing, not
+    # decorative: this test's whole point is to smoke-test the
+    # service-account credential path specifically. Once the user finishes
+    # real OAuth setup, .env will likely have both GOOGLE_APPLICATION_CREDENTIALS
+    # and GOOGLE_OAUTH_TOKEN_PATH set, and DriveClient() with no auth_mode
+    # would silently default to OAuth instead (see ingestion/drive_client.py) —
+    # which would still pass, but would no longer be testing what this test
+    # name/comment claims it tests.
+    client = DriveClient(readwrite=False, auth_mode="service_account")
     # Must not raise (proves the credential + scope + folder ID all work
     # together) — this is a real, if currently empty, Drive folder, so we
     # only assert it comes back as a list, not on its exact contents.

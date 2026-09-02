@@ -16,6 +16,7 @@ that design doc's §7):
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -43,10 +44,44 @@ class RawLine:
     occurrence_index: int | None = None  # for synthesizing a dedup key when external_ref is None
 
 
+def _stable_description_hash(raw_description: str) -> str:
+    """A deterministic digest of ``raw_description``, safe to embed in a
+    persisted dedup key across separate process runs.
+
+    BUG FIX (2026-09-02, found against the real live-Drive validation run —
+    see docs/build-briefs): this previously used Python's built-in
+    ``hash()``, which is **randomized per-process** by default
+    (``PYTHONHASHSEED``) for every ``str``/``bytes`` object — deliberately,
+    for hash-flooding DoS protection, per CPython's own docs. That's fine
+    for an in-memory dict key, but catastrophic for a value persisted into
+    ``review_queue.external_ref`` specifically to survive across re-syncs:
+    every existing test only ever calls ``stage_raw_lines`` twice within
+    ONE pytest process, where ``hash()`` of the same string IS stable (the
+    seed is fixed once per process, not per call) — so this never failed a
+    test. It only breaks the moment two DIFFERENT real processes ingest the
+    same statement (e.g. a one-off script, then the Flask app; or, in real
+    production, any two separate runs of a cron job / gunicorn worker
+    restart) — each gets its own random seed, so the SAME bank line
+    produces a DIFFERENT synthetic external_ref, silently defeating the
+    ON CONFLICT DO NOTHING dedup in ``stage_raw_lines`` entirely. Confirmed
+    concretely: a real second sync run (different process) against an
+    already-fully-ingested period re-staged and re-posted 9 already-posted
+    transactions (3 COGS purchases + 3 paired inter-account transfers) as
+    brand-new rows — a real double-post, not a theoretical risk.
+
+    ``hashlib.sha256`` is deterministic for the same input in any process,
+    forever (no per-process seed) — exactly what a persisted dedup key
+    needs. Truncated to 16 hex chars: still far more collision-resistant
+    than the tolerances (``AMOUNT_TOLERANCE_IDR``/date) anything downstream
+    of this key actually needs, while keeping ``external_ref`` short.
+    """
+    return hashlib.sha256(raw_description.encode("utf-8")).hexdigest()[:16]
+
+
 def _synthetic_external_ref(source_document_id: int, line: RawLine) -> str:
     return (
         f"doc{source_document_id}:{line.transaction_date.isoformat()}:"
-        f"{hash(line.raw_description)}:{line.amount_idr}:{line.occurrence_index or 1}"
+        f"{_stable_description_hash(line.raw_description)}:{line.amount_idr}:{line.occurrence_index or 1}"
     )
 
 
