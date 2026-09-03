@@ -827,6 +827,74 @@ def test_rule_d_matches_and_marks_consignment_sale_reimbursed(iprototype):
     assert any(s.match_status == "needs_review" for s in statuses)
 
 
+def test_rule_d_consignment_reimbursement_paid_from_payoneer_carries_usd_reference(iprototype):
+    """QA BUG FIX (2026-09): a consignment reimbursement paid directly out
+    of a Payoneer Wallet (not the usual BCA Main/Bridging bank line) used
+    to post with NO amount_usd_ref on the Payoneer Wallet line, even
+    though the staged payoneer_csv row had a real one. See
+    tests/scheduling/test_fx_revaluation.py for why this matters (it
+    silently corrupted compute_payoneer_wallet_balance's USD sum).
+    """
+    conn, topo = iprototype
+    cs_id = posting.create_consignment_sale(
+        conn,
+        item_price_usd=Decimal("200.00"),
+        payout_model="tier",
+        payout_amount_idr=Decimal("2686960"),
+        consignor_item_ref="CONSIGN-Y:order-2",
+        tier_rate_percent=Decimal("82.00"),
+        confirmed=True,
+    )
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 5, 1), rate_idr=Decimal("16400"))
+    posting.post_consignment_sale(
+        conn,
+        consignment_sale_id=cs_id,
+        ebay_account_id=topo["ebay_account_id"],
+        entry_date=_dt.date(2026, 5, 5),
+        gross_sale_price_usd=Decimal("220.00"),
+        ebay_fee_usd=Decimal("20.00"),
+        kurs_pajak_rate=Decimal("16400"),
+    )
+
+    src_id = make_source_document(
+        conn, document_type="payoneer_csv", period_month=_dt.date(2026, 5, 1), wallet_group_id=topo["wallet_group_id"]
+    )
+    stage_raw_lines(
+        conn,
+        source_type="payoneer_csv",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 10),
+                raw_description="Payment sent to consignor",
+                amount_idr=Decimal("-2686960.00"),
+                amount_usd_ref=Decimal("-163.84"),
+            )
+        ],
+    )
+    run_auto_match(conn)
+    row = conn.execute(select(review_queue.c.category, review_queue.c.match_rule)).one()
+    assert row.category == "consignment_payout"
+    assert row.match_rule == "d"
+
+    post_pending_rows(conn)
+    payoneer_wallet_id = get_account_id(conn, "PAYONEER_WALLET", wallet_group_id=topo["wallet_group_id"])
+    payoneer_line = conn.execute(
+        select(journal_lines.c.credit_amount_idr, journal_lines.c.amount_usd_ref).where(
+            journal_lines.c.account_id == payoneer_wallet_id
+        )
+    ).one()
+    assert payoneer_line.credit_amount_idr == Decimal("2686960.00")
+    # amount_usd_ref is always a positive USD MAGNITUDE (QA bug fix #2,
+    # 2026-09) — direction is encoded structurally by debit vs credit, not
+    # by the sign of this reference field, matching every other posting
+    # function's convention (post_ebay_sale, post_realized_fx_withdrawal,
+    # post_unrealized_fx_revaluation). The staged RawLine's amount_usd_ref
+    # was -163.84 (an outflow); this must land as +163.84 here.
+    assert payoneer_line.amount_usd_ref == Decimal("163.84")
+
+
 # ---------------------------------------------------------------------------
 # rule (e) — keyword rules
 # ---------------------------------------------------------------------------
@@ -1027,13 +1095,33 @@ def test_seeded_openai_subscription_keyword_matches_on_payoneer_wallet(iprototyp
     payoneer_wallet_id = get_account_id(conn, "PAYONEER_WALLET", wallet_group_id=topo["wallet_group_id"])
     general_opex_id = get_account_id(conn, "GENERAL_OPEX")
     payoneer_line = conn.execute(
-        select(journal_lines.c.credit_amount_idr).where(journal_lines.c.account_id == payoneer_wallet_id)
-    ).scalar_one()
-    assert payoneer_line == Decimal("334130.00")
+        select(journal_lines.c.credit_amount_idr, journal_lines.c.amount_usd_ref).where(
+            journal_lines.c.account_id == payoneer_wallet_id
+        )
+    ).one()
+    assert payoneer_line.credit_amount_idr == Decimal("334130.00")
+    # QA BUG FIX (2026-09): this Payoneer Wallet line used to post with a
+    # NULL amount_usd_ref even though the staged row had a real one — it
+    # was simply never threaded through post_operating_expense. That
+    # silently corrupted scheduling.fx_revaluation.compute_payoneer_wallet_
+    # balance's USD-balance sum for this wallet-group going forward (see
+    # tests/scheduling/test_fx_revaluation.py's dedicated regression test
+    # for the concrete before/after balance numbers).
+    #
+    # QA BUG FIX #2 (2026-09): amount_usd_ref is always a positive USD
+    # MAGNITUDE, never the raw signed value — direction is encoded
+    # structurally by debit vs credit, matching every other posting
+    # function's convention. The staged RawLine's amount_usd_ref was
+    # -20.37 (an outflow); this must land as +20.37 here, not -20.37 (the
+    # first version of this fix got this backwards and QA caught it).
+    assert payoneer_line.amount_usd_ref == Decimal("20.37")
     opex_line = conn.execute(
-        select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == general_opex_id)
-    ).scalar_one()
-    assert opex_line == Decimal("334130.00")
+        select(journal_lines.c.debit_amount_idr, journal_lines.c.amount_usd_ref).where(
+            journal_lines.c.account_id == general_opex_id
+        )
+    ).one()
+    assert opex_line.debit_amount_idr == Decimal("334130.00")
+    assert opex_line.amount_usd_ref == Decimal("20.37")
 
 
 def test_amount_just_outside_tolerance_does_not_false_match(iprototype):

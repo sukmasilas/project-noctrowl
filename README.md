@@ -40,6 +40,7 @@ project-noctrowl-2/
 ├── README.md              — this file
 └── docs/
     ├── flowcharts.md      — money flow + system data flow diagrams
+    ├── scheduling.md      — milestone 5: the three scheduled jobs, cron config to install later, why cron over an in-process scheduler
     └── design/
         ├── ui-ux-design.md — screens, elements, states, and user flows (milestone 1 spec)
         └── mockup.html      — clickable static mockup, open directly in a browser

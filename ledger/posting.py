@@ -548,14 +548,38 @@ def post_consignor_reimbursement(
     paying_account_type_code: str = "BCA_MAIN",
     paying_ebay_account_id: int | None = None,
     paying_wallet_group_id: int | None = None,
+    amount_usd_ref: Decimal | None = None,
+    fx_rate_used: Decimal | None = None,
     memo: str | None = None,
 ) -> int:
     """Clear (part of) the aggregate Consignor Payable liability by actually
     paying a consignor out. Never touches P&L or equity.
+
+    ``amount_usd_ref``/``fx_rate_used`` (added 2026-09, QA-found bug fix —
+    see ``scheduling/fx_revaluation.py``'s ``compute_payoneer_wallet_
+    balance`` docstring for the concrete money-math impact of NOT
+    threading these through: a Payoneer-wallet-paid reimbursement with no
+    USD reference silently corrupts the wallet-group's computed USD
+    balance, which then feeds a fictitious month-end Unrealized FX
+    Gain/Loss straight onto the consolidated P&L) are OPTIONAL and only
+    meaningful when ``paying_account_type_code`` is a USD-denominated
+    account (i.e. ``PAYONEER_WALLET`` — a reimbursement paid directly out
+    of a Payoneer Wallet, per ``ingestion.matching._paying_account_for_
+    row``'s ``payoneer_csv`` case). Tagged on BOTH lines, matching this
+    module's existing convention (``post_ebay_sale``, ``post_refund``,
+    ``post_ebay_wallet_operating_expense`` — the USD figure is a reference
+    on the whole TRANSACTION, not something only the USD-currency side of
+    it carries). Both default None, same optional-kwarg pattern already
+    used by ``post_inter_account_transfer``/``post_refund`` — existing
+    callers that don't pass these are unaffected.
     """
     _require_decimal(amount_idr, "amount_idr")
     if not consignor_item_ref:
         raise ValueError("consignor_item_ref is required (traceability).")
+    if amount_usd_ref is not None:
+        _require_decimal(amount_usd_ref, "amount_usd_ref")
+    if fx_rate_used is not None:
+        _require_decimal(fx_rate_used, "fx_rate_used")
 
     consignor_payable_id = _singleton(conn, "CONSIGNOR_PAYABLE")
     paying_account_id = get_account_id(
@@ -565,9 +589,12 @@ def post_consignor_reimbursement(
         wallet_group_id=paying_wallet_group_id,
     )
 
+    common_kwargs = dict(
+        consignor_item_ref=consignor_item_ref, amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used
+    )
     lines = [
-        debit(consignor_payable_id, amount_idr, consignor_item_ref=consignor_item_ref),
-        credit(paying_account_id, amount_idr, consignor_item_ref=consignor_item_ref),
+        debit(consignor_payable_id, amount_idr, **common_kwargs),
+        credit(paying_account_id, amount_idr, **common_kwargs),
     ]
     return _insert_journal_entry(
         conn, entry_date=entry_date, source_type="consignment_payout", lines=lines, memo=memo
@@ -875,6 +902,8 @@ def post_operating_expense(
     paying_account_type_code: str = "BCA_MAIN",
     paying_ebay_account_id: int | None = None,
     paying_wallet_group_id: int | None = None,
+    amount_usd_ref: Decimal | None = None,
+    fx_rate_used: Decimal | None = None,
     memo: str | None = None,
 ) -> int:
     """Generic "debit an operating-expense account, credit whatever paid it"
@@ -883,8 +912,21 @@ def post_operating_expense(
     'bank_other' as source_type, the same catch-all precedent already used
     by post_shipping_cost_purchase for anything without its own dedicated
     journal_entries.source_type value.
+
+    ``amount_usd_ref``/``fx_rate_used`` (added 2026-09, QA-found bug fix —
+    see ``post_consignor_reimbursement``'s docstring above for the full
+    explanation; the same gap applied here for a Payoneer-wallet-paid
+    operating expense, e.g. a Payoneer-charged fee classified via
+    review-queue rule (e)) are OPTIONAL, tagged on BOTH lines (matching
+    this module's established convention), and only meaningful when
+    ``paying_account_type_code`` is ``PAYONEER_WALLET``. Both default
+    None; existing callers that don't pass these are unaffected.
     """
     _require_decimal(amount_idr, "amount_idr")
+    if amount_usd_ref is not None:
+        _require_decimal(amount_usd_ref, "amount_usd_ref")
+    if fx_rate_used is not None:
+        _require_decimal(fx_rate_used, "fx_rate_used")
     expense_id = _singleton(conn, expense_account_type_code)
     paying_id = get_account_id(
         conn,
@@ -892,7 +934,8 @@ def post_operating_expense(
         ebay_account_id=paying_ebay_account_id,
         wallet_group_id=paying_wallet_group_id,
     )
-    lines = [debit(expense_id, amount_idr), credit(paying_id, amount_idr)]
+    common_kwargs = dict(amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used)
+    lines = [debit(expense_id, amount_idr, **common_kwargs), credit(paying_id, amount_idr, **common_kwargs)]
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
 
 
@@ -1014,6 +1057,8 @@ def post_interest_income_line(
     paying_account_type_code: str = "BCA_MAIN",
     paying_ebay_account_id: int | None = None,
     paying_wallet_group_id: int | None = None,
+    amount_usd_ref: Decimal | None = None,
+    fx_rate_used: Decimal | None = None,
     memo: str | None = None,
 ) -> int:
     """Additive sibling to ``post_interest_income`` (2026-09-02) — posts a
@@ -1046,10 +1091,22 @@ def post_interest_income_line(
     BUNGA/PAJAK BUNGA seen so far is on the BCA Main Account statement — see
     docs/design — but not hardcoded to it, in case a future Bridging-account
     statement's own interest line needs the same treatment).
+
+    ``amount_usd_ref``/``fx_rate_used`` (added 2026-09, QA-found bug fix —
+    see ``post_consignor_reimbursement``'s docstring above for the full
+    explanation) are OPTIONAL, tagged on BOTH lines, and only meaningful
+    when ``paying_account_type_code`` is ``PAYONEER_WALLET`` (a Payoneer
+    -sourced interest-ish line — included here for completeness/defense in
+    depth even though every real sample seen so far is BCA Main). Both
+    default None; existing callers are unaffected.
     """
     _require_decimal(amount_idr, "amount_idr")
     if amount_idr == 0:
         raise ValueError("amount_idr must be non-zero (a journal line amount must be > 0).")
+    if amount_usd_ref is not None:
+        _require_decimal(amount_usd_ref, "amount_usd_ref")
+    if fx_rate_used is not None:
+        _require_decimal(fx_rate_used, "fx_rate_used")
 
     interest_income_id = _singleton(conn, "INTEREST_INCOME")
     paying_id = get_account_id(
@@ -1059,8 +1116,9 @@ def post_interest_income_line(
         wallet_group_id=paying_wallet_group_id,
     )
     magnitude = abs(amount_idr)
+    common_kwargs = dict(amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used)
     if amount_idr > 0:
-        lines = [debit(paying_id, magnitude), credit(interest_income_id, magnitude)]
+        lines = [debit(paying_id, magnitude, **common_kwargs), credit(interest_income_id, magnitude, **common_kwargs)]
     else:
-        lines = [debit(interest_income_id, magnitude), credit(paying_id, magnitude)]
+        lines = [debit(interest_income_id, magnitude, **common_kwargs), credit(paying_id, magnitude, **common_kwargs)]
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)

@@ -310,6 +310,22 @@ fx_revaluations = Table(
     Column("journal_entry_id", Integer, ForeignKey("journal_entries.id"), nullable=False),
 )
 
+# Real DB-level backstop for the month-end FX revaluation job's idempotency
+# (milestone 5, see scheduling/fx_revaluation.py) — makes "one revaluation
+# per wallet-group per period" a structural guarantee, not just an
+# application-layer SELECT-before-INSERT convention (which this project has
+# a real history of races bypassing — see ledger/migrations.py's audit of
+# the same class of bug on consignment_sales/invoices). A genuinely
+# concurrent second attempt at posting the same wallet-group/period fails
+# fast with an IntegrityError that scheduling.fx_revaluation catches inside
+# a SAVEPOINT, atomically rolling back that attempt's journal entry too.
+Index(
+    "ux_fx_revaluations_wallet_group_period",
+    fx_revaluations.c.wallet_group_id,
+    fx_revaluations.c.period_month,
+    unique=True,
+)
+
 
 # ---------------------------------------------------------------------------
 # Postgres-only structural triggers (defense-in-depth: hold even if a

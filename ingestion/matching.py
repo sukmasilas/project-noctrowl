@@ -472,6 +472,66 @@ def _paying_account_for_row(row) -> tuple[str, dict]:
     return "BCA_MAIN", {}
 
 
+def _usd_reference_kwargs(row) -> dict:
+    """Best-effort USD reference figure to thread through a generic
+    (non-COGS/consignment-accrual) posting.
+
+    QA-FOUND BUG FIX (2026-09): before this, none of post_operating_expense
+    / post_consignor_reimbursement / post_interest_income_line ever
+    received row.amount_usd_ref, even though it's sitting right there on
+    the review_queue row for every payoneer_csv-sourced line (see
+    ingestion/payoneer.py's generic-line staging). scheduling.fx_
+    revaluation.compute_payoneer_wallet_balance sums amount_usd_ref across
+    every non-fx_revaluation line touching a Payoneer Wallet account to
+    determine its real USD balance — a Payoneer-wallet-paid expense/
+    reimbursement/interest line posted with NO USD reference silently
+    corrupted that sum (the IDR side dropped correctly, the USD side
+    didn't move at all), producing a phantom gap that gets multiplied by
+    the Kurs Pajak rate and posted as a fictitious Unrealized FX Gain/Loss
+    at the next month-end revaluation. Reproduced and confirmed by QA.
+
+    Same ``row.amount_usd_ref and (row.amount_idr / row.amount_usd_ref)``
+    rate-derivation idiom already used by the 'revenue_settlement' branch
+    below — safe (short-circuits to falsy/None rather than dividing by
+    zero) and correct: ingestion/payoneer.py stores amount_idr and
+    amount_usd_ref with the SAME sign for a given staged line, so their
+    ratio is always the correct positive rate regardless of sign.
+
+    QA-FOUND BUG FIX #2 (2026-09, rejected the first version of this
+    function): ``amount_usd_ref`` is returned as an always-positive USD
+    MAGNITUDE (``abs(row.amount_usd_ref)``), never the raw signed value —
+    matching every existing convention in ledger/posting.py
+    (post_ebay_sale, post_realized_fx_withdrawal,
+    post_unrealized_fx_revaluation): direction is encoded structurally by
+    which side (debit vs credit) the line sits on, never by the sign of
+    amount_usd_ref itself. scheduling.fx_revaluation.compute_payoneer_
+    wallet_balance's SQL (``sum(debit amount_usd_ref) - sum(credit
+    amount_usd_ref)``) depends on that convention holding. The first
+    version of this function passed ``row.amount_usd_ref`` through raw —
+    for a Payoneer-wallet-paid OUTFLOW (the common real case, e.g. the
+    OpenAI-subscription pattern), both ``row.amount_idr`` and
+    ``row.amount_usd_ref`` are NEGATIVE per ingestion/payoneer.py's
+    same-sign staging convention, and that negative value landed on the
+    Payoneer Wallet's CREDIT line — since the credit term is already
+    negated in the balance formula, subtracting a negative flipped the
+    sign, so the expense was silently ADDED to the computed USD balance
+    instead of subtracted (and by double the true amount). QA reproduced
+    this concretely both via a direct post_operating_expense call and via
+    the full ingestion pipeline. ``rate`` is unaffected by this fix and
+    stays exactly as before — it's already a positive value whenever both
+    inputs share a sign (which they always do here), so it does not need
+    (and must not get) its own ``abs()``.
+
+    A row from any OTHER source_type (bank_statement, etc.) never carries
+    a real amount_usd_ref — this returns (None, None) for those, a
+    harmless no-op identical to every other optional amount_usd_ref/
+    fx_rate_used kwarg pair already used throughout ledger/posting.py.
+    """
+    rate = row.amount_usd_ref and (row.amount_idr / row.amount_usd_ref)
+    magnitude = abs(row.amount_usd_ref) if row.amount_usd_ref is not None else None
+    return {"amount_usd_ref": magnitude, "fx_rate_used": rate}
+
+
 def post_pending_rows(conn: Connection) -> PostResult:
     """Post every review_queue row with category set and posted_at still
     NULL — covers both auto-matched rows (posted immediately, no human
@@ -569,6 +629,7 @@ def _post_one_row(conn: Connection, row) -> int | None:
             consignor_item_ref=consignor_item_ref,
             paying_account_type_code=paying_code,
             **paying_kwargs,
+            **_usd_reference_kwargs(row),
         )
         if cs_row is not None:
             conn.execute(
@@ -585,6 +646,7 @@ def _post_one_row(conn: Connection, row) -> int | None:
             amount_idr=abs(row.amount_idr),
             paying_account_type_code=paying_code,
             **paying_kwargs,
+            **_usd_reference_kwargs(row),
         ) if paying_code != "BCA_MAIN" else posting.post_cogs_purchase(
             conn, entry_date=entry_date, amount_idr=abs(row.amount_idr), memo=row.raw_description
         )
@@ -613,6 +675,7 @@ def _post_one_row(conn: Connection, row) -> int | None:
             amount_idr=abs(row.amount_idr),
             paying_account_type_code=paying_code,
             **paying_kwargs,
+            **_usd_reference_kwargs(row),
         )
 
     if row.category == "interest_income":
@@ -628,6 +691,7 @@ def _post_one_row(conn: Connection, row) -> int | None:
             paying_account_type_code=paying_code,
             memo=row.raw_description,
             **paying_kwargs,
+            **_usd_reference_kwargs(row),
         )
 
     if row.category == "owners_draw":
@@ -666,6 +730,7 @@ def _post_one_row(conn: Connection, row) -> int | None:
             amount_idr=abs(row.amount_idr),
             paying_account_type_code=paying_code,
             **paying_kwargs,
+            **_usd_reference_kwargs(row),
         )
 
     raise ValueError(f"No posting handler for review_queue category {row.category!r}")

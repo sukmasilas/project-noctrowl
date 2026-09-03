@@ -238,6 +238,28 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "drive_folder_name TEXT",
         ),
     ),
+    MigrationStep(
+        id="fx_revaluations_wallet_group_period_unique_index",
+        description=(
+            "ux_fx_revaluations_wallet_group_period — a real DB-level unique "
+            "index (milestone 5, see scheduling/fx_revaluation.py) closing "
+            "the same class of gap already fixed for consignment_sales/"
+            "invoices above: the only guard against double-posting a "
+            "wallet-group's month-end unrealized FX revaluation was an "
+            "app-layer SELECT-before-INSERT, unsafe against two concurrent "
+            "job runs racing each other."
+        ),
+        table="fx_revaluations",
+        already_applied_check=(
+            "SELECT 1 FROM pg_indexes WHERE indexname="
+            "'ux_fx_revaluations_wallet_group_period'"
+        ),
+        apply_sql=(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ux_fx_revaluations_wallet_group_period "
+            "ON fx_revaluations (wallet_group_id, period_month)",
+        ),
+    ),
     # --- ingestion/schema.py-owned tables: only exist once ingestion.schema
     # has been imported and provisioned in this database. Each step below
     # is skipped (not an error) on a milestone-2-only database. ---
