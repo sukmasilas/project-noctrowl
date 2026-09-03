@@ -61,6 +61,17 @@ wallet_groups = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("name", Text, nullable=False, unique=True),
+    # Explicit real Google Drive folder name for this wallet-group's uploads
+    # folder (e.g. "Wallet Group for 1 (ricky-game)"), as it actually exists
+    # under "01 - Uploads" in Drive — NOT necessarily the same string as
+    # ``name`` above (a generic display label). Added 2026-09-02 to close a
+    # known gap flagged during milestone 4's design review (Phase A): Sync
+    # Now was deriving the Drive folder name from ``name`` instead of
+    # storing the real folder name explicitly, so it silently looked in the
+    # wrong folder. Nullable — NULL means "no explicit override recorded
+    # yet"; callers fall back to deriving from ``name`` (the old behavior)
+    # only in that case, never blindly.
+    Column("drive_folder_name", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
@@ -72,6 +83,10 @@ ebay_accounts = Table(
     Column("wallet_group_id", Integer, ForeignKey("wallet_groups.id"), nullable=False),
     Column("ebay_seller_username", Text, nullable=True),
     Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    # Same purpose/rationale as wallet_groups.drive_folder_name above (e.g.
+    # "eBay Account - 1 (ricky-game)") — nullable, explicit-field-with
+    # -fallback pattern, not a hard requirement on every row.
+    Column("drive_folder_name", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
@@ -378,16 +393,69 @@ CREATE TRIGGER trg_check_transfer_accounts
 
 
 def create_schema(engine: Engine) -> None:
-    """Create all tables and (on Postgres) the structural enforcement triggers."""
+    """Create all tables and (on Postgres) the structural enforcement
+    triggers, then bring the schema up to date with every additive change
+    ``metadata.create_all()`` can't retrofit onto an already-existing table
+    (a later-added nullable column, index, or widened CHECK constraint —
+    see ``ledger.migrations`` for the full audited list and why this exists).
+
+    Calling this on a brand-new database is a no-op for the migrations step
+    (create_all already built the current shape). Calling it on an older
+    database — including one that only ever provisioned milestone 2's
+    tables and never imported ingestion.schema/webapp.schema — brings it
+    current without erroring; ledger.migrations.run_migrations skips any
+    step whose target table isn't provisioned yet at this layer.
+    """
     metadata.create_all(engine)
     if engine.dialect.name == "postgresql":
         with engine.begin() as conn:
             conn.execute(text(_BALANCE_TRIGGER_SQL))
             conn.execute(text(_TRANSFER_ACCOUNT_TRIGGER_SQL))
 
+        # Imported lazily, inside the function, to avoid a module-import-time
+        # circular concern (ledger.migrations has no need to import
+        # ledger.schema itself, but keeping the import here rather than at
+        # module scope keeps create_schema's own dependency direction
+        # obvious: schema definition first, migrations applied after).
+        from ledger.migrations import run_migrations
+
+        run_migrations(engine)
+
+
+class UnsafeSchemaDropError(RuntimeError):
+    """Raised when drop_schema() is asked to run against a database that
+    doesn't look disposable.
+
+    Added after a 2026-09 incident: a test run's engine fixture resolved to
+    the real, persistent `noctrowl` database (via a TEST_DATABASE_URL ->
+    DATABASE_URL fallback in tests/conftest.py) and drop_schema() destroyed
+    880 real posted journal entries. The fallback itself has since been
+    removed, but this check lives here — at the actual destructive call,
+    not just in the test fixtures that happen to call it today — so ANY
+    caller (a new test file, a script, a REPL session, a future fixture
+    someone adds without reading this file) gets the same protection even
+    if it forgets to re-implement the guard itself.
+    """
+
 
 def drop_schema(engine: Engine) -> None:
-    """Drop all tables (and their triggers, via CASCADE). Test/dev use only."""
+    """Drop all tables (and their triggers, via CASCADE). Test/dev use only.
+
+    Refuses to run unless the target database's name contains "test"
+    (case-insensitive) — see UnsafeSchemaDropError above for why. A database
+    named plain "noctrowl" must never pass this check, even if some caller
+    genuinely means to point at it; rename the database instead.
+    """
+    db_name = (engine.url.database or "")
+    if "test" not in db_name.lower():
+        raise UnsafeSchemaDropError(
+            f"Refusing to drop_schema() on database {db_name!r} — its name "
+            "does not contain 'test'. drop_schema() drops every table and "
+            "must only ever run against a disposable test database (e.g. "
+            "'noctrowl_test'), never a real/persistent one. If this really "
+            "is meant to be a disposable database, rename it to include "
+            "'test' rather than bypassing this check."
+        )
     metadata.drop_all(engine)
     if engine.dialect.name == "postgresql":
         with engine.begin() as conn:

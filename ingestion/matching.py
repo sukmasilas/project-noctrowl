@@ -615,6 +615,21 @@ def _post_one_row(conn: Connection, row) -> int | None:
             **paying_kwargs,
         )
 
+    if row.category == "interest_income":
+        # BUNGA (credit inflow) / PAJAK BUNGA (debit outflow) — see
+        # ledger.posting.post_interest_income_line's docstring. Sign-aware,
+        # unlike 'operating_expense' (which always assumes an outflow), so
+        # amount_idr is passed through SIGNED here, not abs()'d.
+        paying_code, paying_kwargs = _paying_account_for_row(row)
+        return posting.post_interest_income_line(
+            conn,
+            entry_date=entry_date,
+            amount_idr=row.amount_idr,
+            paying_account_type_code=paying_code,
+            memo=row.raw_description,
+            **paying_kwargs,
+        )
+
     if row.category == "owners_draw":
         return posting.post_owner_draw(conn, entry_date=entry_date, amount_idr=abs(row.amount_idr), memo=row.raw_description)
 

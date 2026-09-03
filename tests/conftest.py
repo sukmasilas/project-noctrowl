@@ -5,8 +5,8 @@ balance-enforcement and transfer-whitelist invariants are implemented as
 Postgres triggers (see ledger/schema.py), and float-vs-Decimal or
 constraint-timing bugs don't reliably surface against a different engine.
 
-Point TEST_DATABASE_URL (falls back to DATABASE_URL) at a disposable
-Postgres instance before running the suite, e.g.:
+Point TEST_DATABASE_URL at a disposable Postgres instance before running
+the suite, e.g.:
 
     docker run -d --name noctrowl-test-pg \\
         -e POSTGRES_USER=noctrowl -e POSTGRES_PASSWORD=testpass \\
@@ -16,7 +16,13 @@ Postgres instance before running the suite, e.g.:
     pytest
 
 Never point this at a real/production database — the schema is dropped and
-recreated for every test.
+recreated for every test. There is deliberately NO fallback to
+DATABASE_URL (see tests/_db_safety.py) — a 2026-09 incident lost 880 real
+posted journal entries exactly that way, when DATABASE_URL was pointed at
+the real `noctrowl` database and TEST_DATABASE_URL wasn't set. Both
+TEST_DATABASE_URL being required AND the resolved database name needing to
+contain "test" are enforced in tests/_db_safety.py and, as a second
+independent layer, inside ledger.schema.drop_schema() itself.
 
 Note on transactions: most tests share one open (uncommitted) connection
 transaction per test, which is enough because ledger/posting.py's own
@@ -28,28 +34,17 @@ with ``SET CONSTRAINTS ALL IMMEDIATE`` rather than relying on this fixture.
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from ledger.db import get_engine
 from ledger.schema import create_schema, drop_schema
 from ledger.seed import seed_catalogs, seed_full_topology, seed_prototype_topology
-
-
-def _test_database_url() -> str:
-    url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
-    if not url:
-        pytest.skip(
-            "TEST_DATABASE_URL (or DATABASE_URL) is not set — point it at a "
-            "disposable PostgreSQL database to run the ledger test suite."
-        )
-    return url
+from tests._db_safety import resolve_test_database_url
 
 
 @pytest.fixture()
 def engine():
-    eng = get_engine(_test_database_url())
+    eng = get_engine(resolve_test_database_url())
     drop_schema(eng)
     create_schema(eng)
     yield eng

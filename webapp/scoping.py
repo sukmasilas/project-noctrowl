@@ -24,6 +24,37 @@ class EbayAccountOption:
     wallet_group_id: int
     wallet_group_name: str
     wallet_group_is_shared: bool
+    # Explicit real Drive folder names (ledger.schema's
+    # ebay_accounts.drive_folder_name / wallet_groups.drive_folder_name) —
+    # NULL when not yet recorded for a given row. Use the
+    # ``*_drive_folder_name_resolved`` properties below rather than these
+    # raw fields directly; they apply the documented fallback.
+    drive_folder_name: str | None
+    wallet_group_drive_folder_name: str | None
+
+    @property
+    def ebay_account_drive_folder_name_resolved(self) -> str:
+        """The real Drive folder name to look in for this eBay account's
+        uploads. Prefers the explicit ``drive_folder_name`` field (added
+        2026-09-02 to close the "Sync Now looks in the wrong folder" gap —
+        see ledger/schema.py); falls back to the old derived-from-display
+        -name convention only when no explicit value has been recorded yet,
+        so a hypothetical future account without this field set still
+        degrades to the previous (imperfect but non-crashing) behavior
+        instead of erroring.
+        """
+        if self.drive_folder_name:
+            return self.drive_folder_name
+        return f"eBay Account - {self.name}"
+
+    @property
+    def wallet_group_drive_folder_name_resolved(self) -> str:
+        """Same fallback pattern as above, for the wallet-group's own
+        upload folder.
+        """
+        if self.wallet_group_drive_folder_name:
+            return self.wallet_group_drive_folder_name
+        return self.wallet_group_name
 
 
 def list_ebay_accounts(conn: Connection) -> list[EbayAccountOption]:
@@ -32,7 +63,9 @@ def list_ebay_accounts(conn: Connection) -> list[EbayAccountOption]:
             ebay_accounts.c.id,
             ebay_accounts.c.name,
             ebay_accounts.c.wallet_group_id,
+            ebay_accounts.c.drive_folder_name,
             wallet_groups.c.name.label("wallet_group_name"),
+            wallet_groups.c.drive_folder_name.label("wallet_group_drive_folder_name"),
         )
         .join(wallet_groups, wallet_groups.c.id == ebay_accounts.c.wallet_group_id)
         .where(ebay_accounts.c.is_active.is_(True))
@@ -54,6 +87,8 @@ def list_ebay_accounts(conn: Connection) -> list[EbayAccountOption]:
             wallet_group_id=r.wallet_group_id,
             wallet_group_name=r.wallet_group_name,
             wallet_group_is_shared=counts[r.wallet_group_id] > 1,
+            drive_folder_name=r.drive_folder_name,
+            wallet_group_drive_folder_name=r.wallet_group_drive_folder_name,
         )
         for r in rows
     ]

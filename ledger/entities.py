@@ -19,8 +19,8 @@ from ledger.errors import InvalidStructuralEntityError, UnknownAccountInstanceEr
 from ledger.schema import account_types, accounts, ebay_accounts, wallet_groups
 
 
-def create_wallet_group(conn: Connection, name: str) -> int:
-    result = conn.execute(wallet_groups.insert().values(name=name))
+def create_wallet_group(conn: Connection, name: str, *, drive_folder_name: str | None = None) -> int:
+    result = conn.execute(wallet_groups.insert().values(name=name, drive_folder_name=drive_folder_name))
     return result.inserted_primary_key[0]
 
 
@@ -31,6 +31,7 @@ def create_ebay_account(
     *,
     ebay_seller_username: str | None = None,
     is_active: bool = True,
+    drive_folder_name: str | None = None,
 ) -> int:
     result = conn.execute(
         ebay_accounts.insert().values(
@@ -38,6 +39,7 @@ def create_ebay_account(
             wallet_group_id=wallet_group_id,
             ebay_seller_username=ebay_seller_username,
             is_active=is_active,
+            drive_folder_name=drive_folder_name,
         )
     )
     return result.inserted_primary_key[0]

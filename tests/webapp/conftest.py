@@ -1,6 +1,6 @@
 """Fixtures for milestone-4 web app tests. Reuses the same disposable
 Postgres instance as tests/conftest.py and tests/ingestion/conftest.py
-(TEST_DATABASE_URL, falls back to DATABASE_URL).
+(TEST_DATABASE_URL, no fallback to DATABASE_URL — see tests/_db_safety.py).
 
 Unlike the rollback-per-test pattern the other conftests use, web-app
 integration tests need COMMITTED seed data: Flask's test client drives real
@@ -14,7 +14,6 @@ so nothing leaks between tests despite the commits.
 from __future__ import annotations
 
 import datetime as _dt
-import os
 from decimal import Decimal
 
 import pytest
@@ -30,22 +29,13 @@ from ingestion.schema import review_queue, source_documents
 from ledger.db import get_engine
 from ledger.schema import create_schema, drop_schema
 from ledger.seed import seed_catalogs, seed_prototype_topology
+from tests._db_safety import resolve_test_database_url
 from webapp import create_app
-
-
-def _test_database_url() -> str:
-    url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
-    if not url:
-        pytest.skip(
-            "TEST_DATABASE_URL (or DATABASE_URL) is not set — point it at a "
-            "disposable PostgreSQL database to run the web app test suite."
-        )
-    return url
 
 
 @pytest.fixture()
 def wengine():
-    eng = get_engine(_test_database_url())
+    eng = get_engine(resolve_test_database_url())
     drop_schema(eng)
     create_schema(eng)
     yield eng

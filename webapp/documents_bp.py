@@ -203,9 +203,9 @@ def sync_now():
             root_folder_id=root_folder_id,
             period_month=period_month,
             ebay_account_id=account.id,
-            ebay_account_folder_name=f"eBay Account - {account.name}",
+            ebay_account_folder_name=account.ebay_account_drive_folder_name_resolved,
             wallet_group_id=account.wallet_group_id,
-            wallet_group_folder_name=account.wallet_group_name,
+            wallet_group_folder_name=account.wallet_group_drive_folder_name_resolved,
         )
         conn.commit()
     except SyncAlreadyRunningError:

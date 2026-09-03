@@ -1004,3 +1004,63 @@ def post_interest_income(
     interest_income_id = _singleton(conn, "INTEREST_INCOME")
     lines = [debit(bca_main_id, net_idr), credit(interest_income_id, net_idr)]
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
+
+
+def post_interest_income_line(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    paying_account_type_code: str = "BCA_MAIN",
+    paying_ebay_account_id: int | None = None,
+    paying_wallet_group_id: int | None = None,
+    memo: str | None = None,
+) -> int:
+    """Additive sibling to ``post_interest_income`` (2026-09-02) — posts a
+    SINGLE bank-statement line (BUNGA credited interest OR PAJAK BUNGA
+    withheld tax on it) to INTEREST_INCOME, direction chosen by the sign of
+    ``amount_idr``, rather than requiring both figures known/paired together
+    up front the way ``post_interest_income`` does.
+
+    Why this exists instead of reusing ``post_interest_income``: the review
+    -queue pipeline posts one journal entry per bank-statement LINE (see
+    ``ingestion.matching.post_pending_rows``) — BUNGA and PAJAK BUNGA arrive
+    as two separate real bank lines, staged and classified independently,
+    often without ever being paired programmatically. Per Main-agent's brief
+    (2026-09-02): "two separate real bank lines, two separate traceable
+    postings, but the account's own balance nets to the true net interest
+    received" — i.e. netting happens naturally because both postings hit the
+    SAME INTEREST_INCOME account, not by combining them into one entry.
+    ``post_interest_income`` (unchanged, still usable if a caller ever DOES
+    have both figures together) is left exactly as it was; nothing here
+    replaces it.
+
+    - amount_idr > 0 (BUNGA — bank-credited interest, an inflow): debit the
+      paying/receiving account, credit INTEREST_INCOME.
+    - amount_idr < 0 (PAJAK BUNGA — withholding tax on that interest, an
+      outflow): debit INTEREST_INCOME, credit the paying account.
+
+    ``paying_account_type_code``/``paying_ebay_account_id``/
+    ``paying_wallet_group_id`` mirror ``post_operating_expense``'s generic
+    asset-account resolution (default BCA_MAIN, since every real sample of
+    BUNGA/PAJAK BUNGA seen so far is on the BCA Main Account statement — see
+    docs/design — but not hardcoded to it, in case a future Bridging-account
+    statement's own interest line needs the same treatment).
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_idr == 0:
+        raise ValueError("amount_idr must be non-zero (a journal line amount must be > 0).")
+
+    interest_income_id = _singleton(conn, "INTEREST_INCOME")
+    paying_id = get_account_id(
+        conn,
+        paying_account_type_code,
+        ebay_account_id=paying_ebay_account_id,
+        wallet_group_id=paying_wallet_group_id,
+    )
+    magnitude = abs(amount_idr)
+    if amount_idr > 0:
+        lines = [debit(paying_id, magnitude), credit(interest_income_id, magnitude)]
+    else:
+        lines = [debit(interest_income_id, magnitude), credit(paying_id, magnitude)]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)

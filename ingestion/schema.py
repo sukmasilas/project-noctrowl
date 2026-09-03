@@ -329,10 +329,15 @@ review_queue = Table(
     # the Bridging statement's own echo of an ALREADY-posted Payoneer
     # withdrawal landing — reconciled for traceability, never posts a new
     # journal entry.
+    # 'interest_income' added 2026-09-02, same reasoning as
+    # bank_keyword_rules.category above — BUNGA/PAJAK BUNGA route here so
+    # ingestion.matching._post_one_row can post them sign-aware via
+    # ledger.posting.post_interest_income_line, distinct from
+    # 'operating_expense' (always an outflow).
     CheckConstraint(
         "category IS NULL OR category IN ('revenue_settlement','cogs_purchase','consignment_payout',"
         "'internal_transfer','internal_transfer_landing','operating_expense','owners_draw',"
-        "'owners_contribution','other')",
+        "'owners_contribution','interest_income','other')",
         name="ck_review_queue_category",
     ),
     # The idempotency invariant from CLAUDE.md rule 6, structural: a row can
@@ -477,9 +482,16 @@ bank_keyword_rules = Table(
     Column("expense_account_type_code", Text, nullable=True),
     Column("is_active", Boolean, nullable=False, server_default=text("true")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # 'interest_income' added 2026-09-02 (Fix — see ingestion/seed.py's
+    # seed_bank_keyword_rules and ledger.posting.post_interest_income_line):
+    # bank-credited interest (BUNGA) and the withholding tax on it (PAJAK
+    # BUNGA) both need to route to INTEREST_INCOME, not GENERAL_OPEX —
+    # 'operating_expense' always debits the expense account regardless of
+    # the underlying line's sign, which is wrong for BUNGA's inflow.
     CheckConstraint(
         "category IN ('revenue_settlement','cogs_purchase','consignment_payout',"
-        "'internal_transfer','operating_expense','owners_draw','owners_contribution','other')",
+        "'internal_transfer','operating_expense','owners_draw','owners_contribution',"
+        "'interest_income','other')",
         name="ck_bank_keyword_rules_category",
     ),
 )

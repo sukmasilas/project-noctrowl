@@ -33,15 +33,7 @@ from ledger import posting
 from ledger.db import get_engine
 from ledger.schema import create_schema, drop_schema, journal_entries
 from ledger.seed import seed_catalogs, seed_prototype_topology
-
-
-def _test_database_url() -> str:
-    import os
-
-    url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
-    if not url:
-        pytest.skip("TEST_DATABASE_URL (or DATABASE_URL) is not set.")
-    return url
+from tests._db_safety import resolve_test_database_url
 
 
 class _EmptyDriveClient:
@@ -70,7 +62,7 @@ def concurrency_setup():
     engine + topology for the test to open its own concurrent connections
     against.
     """
-    engine = get_engine(_test_database_url())
+    engine = get_engine(resolve_test_database_url())
     drop_schema(engine)
     create_schema(engine)
 

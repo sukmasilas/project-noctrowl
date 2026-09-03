@@ -20,6 +20,7 @@ from ingestion.matching import (
 )
 from ingestion.schema import bank_keyword_rules, ebay_expected_payouts, invoice_journal_links, invoices, review_queue
 from ledger import posting
+from ledger.entities import get_account_id
 from ledger.schema import consignment_sales, journal_entries, journal_lines
 from tests.ingestion.conftest import make_source_document
 
@@ -856,6 +857,183 @@ def test_rule_e_keyword_match_posts_to_named_expense_account(iprototype):
     assert post_result.posted == 1
     entry = conn.execute(select(journal_entries.c.source_type)).scalar_one()
     assert entry == "bank_other"
+
+
+# ---------------------------------------------------------------------------
+# bank_keyword_rules seeding fix (2026-09-02) — the real 5 confirmed
+# mappings (ingestion/seed.py's seed_bank_keyword_rules, wired into every
+# ingestion test's iprototype/iconn fixture the same way seed_catalogs
+# already is) actually auto-match and post correctly. See CLAUDE.md's Chart
+# of accounts note on INTEREST_INCOME being booked net of PAJAK BUNGA.
+# ---------------------------------------------------------------------------
+
+
+def test_seeded_bi_fast_transfer_fee_keyword_matches_and_posts(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 5, 3), raw_description="Biaya transfer BI Fast", amount_idr=Decimal("-2500"), occurrence_index=1)
+        ],
+    )
+    match_result = run_auto_match(conn)
+    assert match_result.matched == 1
+    row = conn.execute(select(review_queue.c.category, review_queue.c.match_rule)).one()
+    assert row.category == "operating_expense"
+    assert row.match_rule == "e"
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    general_opex_id = get_account_id(conn, "GENERAL_OPEX")
+    line = conn.execute(select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == general_opex_id)).scalar_one()
+    assert line == Decimal("2500.00")
+
+
+def test_seeded_admin_fee_keyword_matches_and_posts_general_opex(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 5, 31), raw_description="Biaya administrasi rekening", amount_idr=Decimal("-6000"), occurrence_index=1),
+            # A textually different real fee ("kartu debit", not "rekening")
+            # in the SAME statement — must NOT accidentally match, a
+            # genuinely different fee type.
+            RawLine(transaction_date=_dt.date(2026, 5, 14), raw_description="Biaya administrasi kartu debit", amount_idr=Decimal("-6000"), occurrence_index=1),
+        ],
+    )
+    match_result = run_auto_match(conn)
+    assert match_result.matched == 1
+    assert match_result.needs_review == 1
+    rows = conn.execute(select(review_queue.c.raw_description, review_queue.c.category, review_queue.c.match_rule)).all()
+    rekening_row = next(r for r in rows if r.raw_description == "Biaya administrasi rekening")
+    kartu_debit_row = next(r for r in rows if r.raw_description == "Biaya administrasi kartu debit")
+    assert rekening_row.category == "operating_expense"
+    assert rekening_row.match_rule == "e"
+    assert kartu_debit_row.category is None  # correctly left for Needs Review
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+
+def test_seeded_bunga_credit_posts_to_interest_income(iprototype):
+    """BUNGA (bank-credited interest, an inflow) must debit BCA_MAIN and
+    credit INTEREST_INCOME — NOT the reversed direction 'operating_expense'
+    handling would produce if it were forced through that generic path.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[RawLine(transaction_date=_dt.date(2026, 5, 31), raw_description="BUNGA", amount_idr=Decimal("1186.92"), occurrence_index=1)],
+    )
+    run_auto_match(conn)
+    row = conn.execute(select(review_queue.c.category, review_queue.c.match_rule)).one()
+    assert row.category == "interest_income"
+    assert row.match_rule == "e"
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    interest_income_id = get_account_id(conn, "INTEREST_INCOME")
+    bca_main_id = get_account_id(conn, "BCA_MAIN")
+    interest_line = conn.execute(
+        select(journal_lines.c.debit_amount_idr, journal_lines.c.credit_amount_idr).where(journal_lines.c.account_id == interest_income_id)
+    ).one()
+    assert interest_line.debit_amount_idr == Decimal("0.00")
+    assert interest_line.credit_amount_idr == Decimal("1186.92")
+    bca_main_line = conn.execute(
+        select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == bca_main_id)
+    ).scalar_one()
+    assert bca_main_line == Decimal("1186.92")
+
+
+def test_seeded_bunga_and_pajak_bunga_together_net_interest_income_correctly(iprototype):
+    """The pair together (two separate real bank lines, two separate
+    journal entries — per CLAUDE.md/ledger.posting.post_interest_income_line)
+    must leave INTEREST_INCOME's own balance netted to the true amount
+    actually received, without a separate tax-expense line anywhere.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 5, 31), raw_description="BUNGA", amount_idr=Decimal("1186.92"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 5, 31), raw_description="PAJAK BUNGA", amount_idr=Decimal("-237.38"), occurrence_index=1),
+        ],
+    )
+    run_auto_match(conn)
+    rows = conn.execute(select(review_queue.c.category, review_queue.c.match_rule)).all()
+    assert all(r.category == "interest_income" and r.match_rule == "e" for r in rows)
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 2  # two separate lines, two separate traceable postings
+    entries = conn.execute(select(journal_entries.c.id)).scalars().all()
+    assert len(entries) == 2  # never combined into one entry
+
+    interest_income_id = get_account_id(conn, "INTEREST_INCOME")
+    interest_lines = conn.execute(
+        select(journal_lines.c.debit_amount_idr, journal_lines.c.credit_amount_idr).where(journal_lines.c.account_id == interest_income_id)
+    ).all()
+    net = sum(l.credit_amount_idr - l.debit_amount_idr for l in interest_lines)
+    assert net == Decimal("949.54")  # 1186.92 - 237.38, no separate tax-expense line posted anywhere
+    general_opex_id = get_account_id(conn, "GENERAL_OPEX")
+    assert conn.execute(select(journal_lines.c.id).where(journal_lines.c.account_id == general_opex_id)).all() == []
+
+
+def test_seeded_openai_subscription_keyword_matches_on_payoneer_wallet(iprototype):
+    """The recurring Payoneer card charge is staged with source_type
+    'payoneer_csv' (see ingestion.payoneer's generic staging branch) — this
+    proves the keyword rule fires there too (not just on bank-statement
+    lines) and pays out of the Payoneer Wallet, not BCA_MAIN.
+    """
+    conn, topo = iprototype
+    src_id = make_source_document(
+        conn, document_type="payoneer_csv", period_month=_dt.date(2026, 8, 1), wallet_group_id=topo["wallet_group_id"]
+    )
+    stage_raw_lines(
+        conn,
+        source_type="payoneer_csv",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 28),
+                raw_description="Card charge (OPENAI *CHATGPT SUBSCR)",
+                amount_idr=Decimal("-334130.00"),
+                amount_usd_ref=Decimal("-20.37"),
+                external_ref="287852392",
+            )
+        ],
+    )
+    run_auto_match(conn)
+    row = conn.execute(select(review_queue.c.category, review_queue.c.match_rule)).one()
+    assert row.category == "operating_expense"
+    assert row.match_rule == "e"
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    payoneer_wallet_id = get_account_id(conn, "PAYONEER_WALLET", wallet_group_id=topo["wallet_group_id"])
+    general_opex_id = get_account_id(conn, "GENERAL_OPEX")
+    payoneer_line = conn.execute(
+        select(journal_lines.c.credit_amount_idr).where(journal_lines.c.account_id == payoneer_wallet_id)
+    ).scalar_one()
+    assert payoneer_line == Decimal("334130.00")
+    opex_line = conn.execute(
+        select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == general_opex_id)
+    ).scalar_one()
+    assert opex_line == Decimal("334130.00")
 
 
 def test_amount_just_outside_tolerance_does_not_false_match(iprototype):

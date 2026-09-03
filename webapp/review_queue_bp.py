@@ -24,6 +24,16 @@ CATEGORY_OPTIONS = [
     ("operating_expense", "Operating Expense"),
     ("owners_draw", "Owner's Draw"),
     ("owners_contribution", "Owner's Contribution"),
+    # Added 2026-09-02 alongside the bank_keyword_rules seeding fix (see
+    # ingestion/seed.py, ledger.posting.post_interest_income_line): without
+    # this, a human could never correctly hand-label a leftover
+    # interest-related Needs Review row (e.g. the Bridging account's "Pajak
+    # rekening" line, which the seeded keyword rules deliberately do NOT
+    # auto-match — see ingestion/seed.py's note) — they'd be forced to
+    # mislabel it 'operating_expense', posting it to GENERAL_OPEX instead of
+    # netting it against INTEREST_INCOME as CLAUDE.md's Chart of accounts
+    # section requires.
+    ("interest_income", "Interest Income"),
     ("other", "Other"),
 ]
 

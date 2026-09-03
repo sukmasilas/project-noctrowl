@@ -1,11 +1,11 @@
 """Fixtures for milestone-3 ingestion tests. Reuses the same disposable
-Postgres instance as tests/conftest.py (TEST_DATABASE_URL, falls back to
-DATABASE_URL) — see that file's docstring for how to stand one up.
+Postgres instance as tests/conftest.py (TEST_DATABASE_URL, no fallback to
+DATABASE_URL — see tests/_db_safety.py) — see that file's docstring for how
+to stand one up.
 """
 from __future__ import annotations
 
 import datetime as _dt
-import os
 from decimal import Decimal
 
 import pytest
@@ -16,24 +16,16 @@ import pytest
 import ingestion.schema as ischema  # noqa: F401
 from ingestion.kurs_pajak import seed_kurs_pajak_rate
 from ingestion.schema import source_documents
+from ingestion.seed import seed_bank_keyword_rules
 from ledger.db import get_engine
 from ledger.schema import create_schema, drop_schema
 from ledger.seed import seed_catalogs, seed_prototype_topology
-
-
-def _test_database_url() -> str:
-    url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
-    if not url:
-        pytest.skip(
-            "TEST_DATABASE_URL (or DATABASE_URL) is not set — point it at a "
-            "disposable PostgreSQL database to run the ingestion test suite."
-        )
-    return url
+from tests._db_safety import resolve_test_database_url
 
 
 @pytest.fixture()
 def iengine():
-    eng = get_engine(_test_database_url())
+    eng = get_engine(resolve_test_database_url())
     drop_schema(eng)
     create_schema(eng)
     yield eng
@@ -44,6 +36,12 @@ def iengine():
 def iconn(iengine):
     with iengine.connect() as connection:
         seed_catalogs(connection)
+        # bank_keyword_rules (rule-e auto-match) — real, confirmed catalog
+        # data, seeded by default for every ingestion test the same way
+        # seed_catalogs already always includes consignor_payout_tiers. See
+        # ingestion/seed.py for the 5 mappings and why each is real (not
+        # guessed) data.
+        seed_bank_keyword_rules(connection)
         yield connection
         connection.rollback()
 
