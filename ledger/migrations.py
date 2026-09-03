@@ -365,6 +365,52 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
         ),
     ),
     MigrationStep(
+        id="journal_entries_source_type_check_widen",
+        description=(
+            "ck_journal_entries_source_type widened to add 'opening_balance' "
+            "(2026-09-03, see ledger/posting.py's post_opening_balance — a "
+            "one-time entry recording a wallet/bank account's real balance "
+            "as of just before ledger-tracking began, booked to Owner's "
+            "Capital; closes the negative-Payoneer-balance gap described in "
+            "CLAUDE.md's Definition of done). DROP+ADD unconditionally "
+            "re-run, same pattern as the invoices/review_queue CHECK "
+            "-widening steps above."
+        ),
+        table="journal_entries",
+        apply_sql=(
+            "ALTER TABLE journal_entries DROP CONSTRAINT IF EXISTS ck_journal_entries_source_type",
+            "ALTER TABLE journal_entries ADD CONSTRAINT ck_journal_entries_source_type CHECK "
+            "(source_type IN ('ebay_sale','ebay_refund','cogs_purchase','consignment_sale',"
+            "'consignment_payout','inter_account_transfer','payoneer_withdrawal',"
+            "'fx_revaluation','owner_contribution','owner_draw','bank_other',"
+            "'opening_balance'))",
+        ),
+    ),
+    MigrationStep(
+        id="opening_balances_account_id_unique_index",
+        description=(
+            "ux_opening_balances_account_id — real DB-level unique index "
+            "enforcing at most one opening_balance entry per account (see "
+            "ledger/posting.py's post_opening_balance and ledger/schema.py's "
+            "opening_balances table). opening_balances is a brand-new table "
+            "introduced in this same change with this index already built "
+            "in, so per this module's own stated policy (see module "
+            "docstring) create_all() alone is sufficient on any database "
+            "that doesn't have the table yet — this step is additional "
+            "defense-in-depth only, for a database that somehow already has "
+            "the table without the index (same caution already applied to "
+            "fx_revaluations' own unique index above)."
+        ),
+        table="opening_balances",
+        already_applied_check=(
+            "SELECT 1 FROM pg_indexes WHERE indexname='ux_opening_balances_account_id'"
+        ),
+        apply_sql=(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_opening_balances_account_id "
+            "ON opening_balances (account_id)",
+        ),
+    ),
+    MigrationStep(
         id="bank_keyword_rules_category_check_widen",
         description=(
             "ck_bank_keyword_rules_category widened to add 'interest_income' "

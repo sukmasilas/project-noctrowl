@@ -208,7 +208,8 @@ journal_entries = Table(
     CheckConstraint(
         "source_type IN ('ebay_sale','ebay_refund','cogs_purchase','consignment_sale',"
         "'consignment_payout','inter_account_transfer','payoneer_withdrawal',"
-        "'fx_revaluation','owner_contribution','owner_draw','bank_other')",
+        "'fx_revaluation','owner_contribution','owner_draw','bank_other',"
+        "'opening_balance')",
         name="ck_journal_entries_source_type",
     ),
 )
@@ -323,6 +324,40 @@ Index(
     "ux_fx_revaluations_wallet_group_period",
     fx_revaluations.c.wallet_group_id,
     fx_revaluations.c.period_month,
+    unique=True,
+)
+
+# One-time opening-balance entries (added 2026-09-03) — records a wallet/
+# bank account's real balance as of just before ledger-tracking began
+# (2026-05-01, the earliest posted entry in the real database), booked to
+# Owner's Capital. See ledger/posting.py's post_opening_balance and
+# CLAUDE.md's Definition of done (the negative-Payoneer-balance gap this
+# closes). Same "money-math detail table" pattern as consignment_sales /
+# payoneer_withdrawals / fx_revaluations above: one row per real event,
+# journal_entry_id links it back to the actual posting for traceability.
+opening_balances = Table(
+    "opening_balances",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("account_id", Integer, ForeignKey("accounts.id"), nullable=False),
+    Column("entry_date", Date, nullable=False),
+    Column("amount_idr", Numeric(20, 2), nullable=False),
+    Column("amount_usd_ref", Numeric(14, 2), nullable=True),
+    Column("fx_rate_used", Numeric(12, 4), nullable=True),
+    Column("journal_entry_id", Integer, ForeignKey("journal_entries.id"), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+# Real DB-level backstop (not just an app-layer SELECT-before-INSERT) making
+# "at most one opening_balance entry per account" a structural guarantee —
+# this project has a real, repeated history of exactly this bug class
+# (missing DB-level dedup constraints; see ledger/migrations.py's audit of
+# consignment_sales/invoices/fx_revaluations). A second post_opening_balance
+# call for an account that already has one fails fast at INSERT time with an
+# IntegrityError rather than silently double-posting.
+Index(
+    "ux_opening_balances_account_id",
+    opening_balances.c.account_id,
     unique=True,
 )
 

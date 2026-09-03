@@ -67,6 +67,7 @@ from ledger.schema import (
     fx_revaluations,
     journal_entries,
     journal_lines,
+    opening_balances,
     payoneer_withdrawals,
 )
 
@@ -1122,3 +1123,98 @@ def post_interest_income_line(
     else:
         lines = [debit(interest_income_id, magnitude, **common_kwargs), credit(paying_id, magnitude, **common_kwargs)]
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
+
+
+# ---------------------------------------------------------------------------
+# Opening balance (added 2026-09-03) — a one-time entry recording a wallet/
+# bank account's real balance as of just before ledger-tracking began
+# (2026-05-01, the earliest posted entry in the real database). See
+# CLAUDE.md's Definition of done, the negative-Payoneer-balance gap note,
+# and scripts/post_opening_balance.py for the real one-off use of this
+# against wallet-group 1's Payoneer Wallet.
+# ---------------------------------------------------------------------------
+
+def post_opening_balance(
+    conn: Connection,
+    *,
+    account_type_code: str,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    ebay_account_id: int | None = None,
+    wallet_group_id: int | None = None,
+    amount_usd_ref: Decimal | None = None,
+    fx_rate_used: Decimal | None = None,
+    memo: str | None = None,
+) -> int:
+    """Record a wallet/bank account's real balance as of just before ledger
+    -tracking began, as a debit to that SPECIFIC target account (any account
+    type/instance — generic and reusable, not hardcoded to Payoneer Wallet
+    or any one wallet-group) and a credit to Owner's Capital. Per the user's
+    2026-09-03 confirmation: a pre-existing balance predating ledger
+    tracking is the owner's own money that was already there, so it books
+    to OWNERS_CAPITAL — deliberately NOT ``post_owner_contribution``, which
+    hardcodes debiting BCA_MAIN and represents an ongoing capital-injection
+    EVENT, not a one-time correction for a balance that already existed
+    before tracking began.
+
+    ``amount_usd_ref``/``fx_rate_used`` follow this module's established
+    optional-USD-reference convention (positive magnitude, direction
+    encoded structurally by debit/credit side — the exact convention
+    Milestone 5 fixed a real bug around, see ``post_consignor_reimbursement``
+    's docstring) and are tagged on BOTH lines, same as every other function
+    here. Only meaningful for a USD-denominated target account (e.g.
+    PAYONEER_WALLET or EBAY_WALLET).
+
+    ``source_type='opening_balance'`` is deliberately distinct from
+    'owner_contribution' (see above) and is NOT excluded from
+    ``scheduling.fx_revaluation.compute_payoneer_wallet_balance``'s USD sum
+    (unlike 'fx_revaluation' rows) — this falls out correctly from that
+    function's existing logic without any special-casing, because an
+    opening balance genuinely represents real USD sitting in the wallet (not
+    a restatement of an existing balance at a new rate, which is the only
+    reason 'fx_revaluation' rows are excluded there).
+
+    IDEMPOTENCY: this function does NOT itself guard against being called
+    twice for the same account — the real backstop is the DB-level unique
+    index ``ux_opening_balances_account_id`` on ``opening_balances.
+    account_id`` (see ledger/schema.py). A second call for an account that
+    already has an opening balance fails at INSERT time with an
+    IntegrityError, matching this project's established "DB constraint is
+    the real backstop" pattern (see e.g. ``fx_revaluations``' own unique
+    index) rather than an app-layer SELECT-before-INSERT that could race.
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_idr <= 0:
+        raise ValueError(
+            "amount_idr must be > 0 — an opening balance records a real, nonzero pre-existing balance."
+        )
+    if amount_usd_ref is not None:
+        _require_decimal(amount_usd_ref, "amount_usd_ref")
+    if fx_rate_used is not None:
+        _require_decimal(fx_rate_used, "fx_rate_used")
+
+    target_account_id = get_account_id(
+        conn, account_type_code, ebay_account_id=ebay_account_id, wallet_group_id=wallet_group_id
+    )
+    capital_id = _singleton(conn, "OWNERS_CAPITAL")
+
+    common_kwargs = dict(amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used)
+    lines = [
+        debit(target_account_id, amount_idr, **common_kwargs),
+        credit(capital_id, amount_idr, **common_kwargs),
+    ]
+    entry_id = _insert_journal_entry(
+        conn, entry_date=entry_date, source_type="opening_balance", lines=lines, memo=memo
+    )
+
+    conn.execute(
+        opening_balances.insert().values(
+            account_id=target_account_id,
+            entry_date=entry_date,
+            amount_idr=amount_idr,
+            amount_usd_ref=amount_usd_ref,
+            fx_rate_used=fx_rate_used,
+            journal_entry_id=entry_id,
+        )
+    )
+    return entry_id
