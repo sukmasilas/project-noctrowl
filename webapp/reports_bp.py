@@ -104,6 +104,29 @@ def equity():
     return render_template("reports/equity.html", period_month=period_month, report=report, status=status)
 
 
+@bp.route("/balance-sheet")
+@login_required
+def balance_sheet():
+    conn = get_db()
+    period_month = parse_period(request.args.get("period"), conn)
+    report = reporting.balance_sheet_report(conn, period_month=period_month)
+    status = report_status(conn, period_month=period_month)  # consolidated only, same gating as P&L/Equity
+    return render_template(
+        "reports/balance_sheet.html", period_month=period_month, report=report, status=status
+    )
+
+
+@bp.route("/balance-sheet/drilldown/<int:account_id>")
+@login_required
+def balance_sheet_drilldown(account_id: int):
+    conn = get_db()
+    period_month = parse_period(request.args.get("period"), conn)
+    lines = reporting.account_instance_drilldown(conn, account_id=account_id, period_month=period_month)
+    return render_template(
+        "reports/drilldown.html", figure=f"balance-sheet account #{account_id}", lines=lines, period_month=period_month
+    )
+
+
 _DRILLDOWN_CODES = {
     "sales_revenue": (["SALES_REVENUE"], False),
     "returns_allowances": (["SALES_RETURNS_ALLOWANCES"], False),
@@ -118,7 +141,30 @@ _DRILLDOWN_CODES = {
     "interest_income": (["INTEREST_INCOME"], False),
     "owners_capital": (["OWNERS_CAPITAL"], True),
     "owners_draw": (["OWNERS_DRAW"], True),
-    "retained_earnings": (["RETAINED_EARNINGS"], True),
+    # Retained Earnings is a COMPUTED cumulative net-income figure, not a
+    # posted account balance (see webapp/reporting.py's
+    # _cumulative_net_income — nothing ever posts to the RETAINED_EARNINGS
+    # account type). Its drill-down is therefore every P&L account's lines,
+    # cumulative through period end — the exact set that nets to the
+    # retained-earnings figure — not the (always-empty) RETAINED_EARNINGS
+    # account itself.
+    "retained_earnings": (
+        [
+            "SALES_REVENUE",
+            "SALES_RETURNS_ALLOWANCES",
+            "CONSIGNMENT_COMMISSION_INCOME",
+            "COGS",
+            "EBAY_SELLING_FEES",
+            "PAYOUT_FEE",
+            "PAYROLL",
+            "GENERAL_OPEX",
+            "SHIPPING_COST",
+            "REALIZED_FX",
+            "UNREALIZED_FX",
+            "INTEREST_INCOME",
+        ],
+        True,
+    ),
 }
 
 

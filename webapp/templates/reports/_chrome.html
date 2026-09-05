@@ -4,5 +4,6 @@
   <a href="{{ url_for('reports.cash_flow', period=period_month.isoformat(), account_id=account_id) }}" class="{% if active == 'cash_flow' %}active{% endif %}">Cash Flow</a>
   <a href="{{ url_for('reports.pnl', period=period_month.isoformat()) }}" class="{% if active == 'pnl' %}active{% endif %}">P&amp;L</a>
   <a href="{{ url_for('reports.equity', period=period_month.isoformat()) }}" class="{% if active == 'equity' %}active{% endif %}">Equity</a>
+  <a href="{{ url_for('reports.balance_sheet', period=period_month.isoformat()) }}" class="{% if active == 'balance_sheet' %}active{% endif %}">Balance Sheet</a>
 </div>
 {% endmacro %}

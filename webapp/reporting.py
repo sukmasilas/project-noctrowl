@@ -384,8 +384,16 @@ class PnLReport:
     net_income_idr: Decimal
 
 
-def _section_lines(conn: Connection, period_month: _dt.date, statement_section: str):
-    return conn.execute(
+def _section_lines(conn: Connection, period_month: _dt.date, statement_section: str, *, cumulative: bool = False):
+    """``cumulative=True`` sums every entry through the end of
+    ``period_month`` (period_month <= :month) instead of just entries dated
+    within it (period_month == :month) — the same "running balance as of
+    period end" shape ``equity_report()`` already uses for
+    OWNERS_CAPITAL/OWNERS_DRAW, extended here so the retained-earnings
+    computation (a cumulative net-income figure, not a period flow) and the
+    Balance Sheet can reuse this same query shape rather than a new pattern.
+    """
+    query = (
         select(
             account_types.c.code,
             account_types.c.name,
@@ -398,8 +406,12 @@ def _section_lines(conn: Connection, period_month: _dt.date, statement_section: 
         .join(journal_lines, journal_lines.c.account_id == accounts.c.id)
         .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
         .where(account_types.c.statement_section == statement_section)
-        .where(journal_entries.c.period_month == period_month)
-    ).all()
+    )
+    if cumulative:
+        query = query.where(journal_entries.c.period_month <= period_month)
+    else:
+        query = query.where(journal_entries.c.period_month == period_month)
+    return conn.execute(query).all()
 
 
 def _sum_by_code(rows) -> dict[str, tuple[str, Decimal]]:
@@ -465,6 +477,45 @@ def pnl_report(conn: Connection, *, period_month: _dt.date) -> PnLReport:
     )
 
 
+def _cumulative_net_income(conn: Connection, period_month: _dt.date) -> Decimal:
+    """Cumulative net income (Revenue − Sales Returns & Allowances − COGS −
+    Operating Expenses ± Other Income/Expense) for every journal_entry with
+    ``period_month <= period_month`` — i.e. accumulated profit through the
+    end of this period. This is what Retained Earnings actually IS in a
+    non-period-closing ledger like this one: no closing entry ever zeroes
+    P&L accounts into RETAINED_EARNINGS (see ledger/posting.py — nothing
+    posts to that account type), so Retained Earnings must be computed by
+    re-summing the P&L accounts cumulatively, not read off a posted balance.
+
+    Mirrors ``pnl_report()``'s exact math (same sign handling for the
+    contra Sales Returns & Allowances line, same per-section normal-balance
+    netting) but with ``cumulative=True`` instead of a single period, and
+    returns only the bottom-line net-income number — callers needing the
+    line-item breakdown for a given period should use ``pnl_report()``
+    instead; this exists specifically for Equity/Balance Sheet's
+    as-of-period-end Retained Earnings figure.
+    """
+    revenue_rows = _section_lines(conn, period_month, "revenue", cumulative=True)
+    revenue_by_code = _sum_by_code(revenue_rows)
+    total_revenue = ZERO
+    for code, (_name, amount) in revenue_by_code.items():
+        is_contra = any(r.code == code and r.is_contra for r in revenue_rows)
+        total_revenue += -amount if is_contra else amount
+
+    cogs_rows = _section_lines(conn, period_month, "cogs", cumulative=True)
+    cogs_total = sum((r.debit_amount_idr - r.credit_amount_idr for r in cogs_rows), ZERO)
+
+    opex_rows = _section_lines(conn, period_month, "opex", cumulative=True)
+    opex_by_code = _sum_by_code(opex_rows)
+    total_opex = sum((amount for _name, amount in opex_by_code.values()), ZERO)
+
+    other_rows = _section_lines(conn, period_month, "other_income_expense", cumulative=True)
+    other_by_code = _sum_by_code(other_rows)
+    total_other = sum((amount for _name, amount in other_by_code.values()), ZERO)
+
+    return total_revenue - cogs_total - total_opex + total_other
+
+
 # ---------------------------------------------------------------------------
 # Equity (consolidated only) — a running balance-sheet-style total, not a
 # period flow: uses period_month <= :month, unlike P&L/Cash Flow's
@@ -481,7 +532,7 @@ class EquityReport:
     ending_balance_idr: Decimal
 
 
-EQUITY_CODES = ("OWNERS_CAPITAL", "OWNERS_DRAW", "RETAINED_EARNINGS")
+EQUITY_CODES = ("OWNERS_CAPITAL", "OWNERS_DRAW")
 
 
 def equity_report(conn: Connection, *, period_month: _dt.date) -> EquityReport:
@@ -508,7 +559,13 @@ def equity_report(conn: Connection, *, period_month: _dt.date) -> EquityReport:
 
     capital = totals["OWNERS_CAPITAL"]
     draw = totals["OWNERS_DRAW"]  # debit-normal, positive = cumulative draws taken
-    retained = totals["RETAINED_EARNINGS"]
+    # Retained Earnings is NOT read off the RETAINED_EARNINGS account balance
+    # (nothing ever posts to it — no closing-entry mechanism exists, and none
+    # should: this ledger computes P&L by filtering journal_entries by
+    # period, not by zeroing account balances each period-end). It's a pure
+    # computation: cumulative net income through this period's end. See
+    # _cumulative_net_income()'s docstring for why.
+    retained = _cumulative_net_income(conn, period_month)
     ending_balance = capital - draw + retained
 
     return EquityReport(
@@ -518,6 +575,179 @@ def equity_report(conn: Connection, *, period_month: _dt.date) -> EquityReport:
         retained_earnings_idr=retained,
         ending_balance_idr=ending_balance,
     )
+
+
+# ---------------------------------------------------------------------------
+# Balance Sheet / Statement of Financial Position (consolidated only) — a
+# point-in-time snapshot as of period end, same "period_month <= :month"
+# cumulative-balance shape as equity_report() above, extended to every
+# asset and liability account instance rather than just the two equity
+# account types.
+#
+# Consolidated only, same reasoning as P&L and Equity (see CLAUDE.md's
+# Accounting scope): Liabilities (Consignor Payable) and Equity are already
+# consolidated-only concepts in the chart of accounts, and Assets=
+# Liabilities+Equity only holds as a whole-business identity — a genuine
+# per-account balance sheet isn't buildable without inventing an allocation
+# for the liability/equity side, the exact thing this project avoids
+# elsewhere.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BalanceSheetLine:
+    account_id: int
+    account_type_code: str
+    label: str
+    balance_idr: Decimal
+
+
+@dataclass
+class BalanceSheetReport:
+    period_month: _dt.date
+    asset_lines: list[BalanceSheetLine]
+    total_assets_idr: Decimal
+    liability_lines: list[BalanceSheetLine]
+    total_liabilities_idr: Decimal
+    owners_capital_idr: Decimal
+    owners_draw_idr: Decimal
+    retained_earnings_idr: Decimal
+    total_equity_idr: Decimal
+    total_liabilities_and_equity_idr: Decimal
+    # assets - (liabilities + equity). Should be exactly 0 — debits=credits
+    # is enforced on every journal entry by a real Postgres trigger (see
+    # ledger/schema.py), so once every account is correctly bucketed into
+    # Asset/Liability/Equity/Revenue/COGS/Opex/Other, this nets to zero as a
+    # mathematical property of double-entry bookkeeping, not something
+    # force-reconciled here. A nonzero value means some account somewhere
+    # isn't being captured in one of the three buckets — surfaced, never
+    # papered over with a plug figure.
+    difference_idr: Decimal
+
+
+def _account_balance_through(conn: Connection, account_id: int, period_month: _dt.date, normal_balance: str) -> Decimal:
+    rows = conn.execute(
+        select(journal_lines.c.debit_amount_idr, journal_lines.c.credit_amount_idr)
+        .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
+        .where(journal_lines.c.account_id == account_id)
+        .where(journal_entries.c.period_month <= period_month)
+    ).all()
+    if normal_balance == "debit":
+        return sum((r.debit_amount_idr - r.credit_amount_idr for r in rows), ZERO)
+    return sum((r.credit_amount_idr - r.debit_amount_idr for r in rows), ZERO)
+
+
+def _account_instance_lines(conn: Connection, period_month: _dt.date, statement_section: str) -> list[BalanceSheetLine]:
+    """Every individual ``accounts`` row (not account TYPE) under a given
+    statement_section, with its own as-of-period-end balance — i.e. each of
+    the 3 eBay Wallets and 2 Payoneer Wallets/BCA Bridging Accounts shows as
+    its own line, not blended into one "eBay Wallet" total, since these are
+    genuinely separate ledger accounts (see ledger/schema.py's per-instance
+    accounts table + CLAUDE.md's Chart of accounts scoping).
+    """
+    rows = conn.execute(
+        select(
+            accounts.c.id.label("account_id"),
+            account_types.c.code,
+            account_types.c.name.label("type_name"),
+            account_types.c.normal_balance,
+            ebay_accounts.c.name.label("ebay_account_name"),
+            wallet_groups.c.name.label("wallet_group_name"),
+        )
+        .select_from(accounts)
+        .join(account_types, account_types.c.id == accounts.c.account_type_id)
+        .outerjoin(ebay_accounts, ebay_accounts.c.id == accounts.c.ebay_account_id)
+        .outerjoin(wallet_groups, wallet_groups.c.id == accounts.c.wallet_group_id)
+        .where(account_types.c.statement_section == statement_section)
+        .order_by(account_types.c.code, accounts.c.id)
+    ).all()
+
+    lines: list[BalanceSheetLine] = []
+    for r in rows:
+        if r.ebay_account_name:
+            label = f"{r.type_name} — {r.ebay_account_name}"
+        elif r.wallet_group_name:
+            label = f"{r.type_name} — {r.wallet_group_name}"
+        else:
+            label = r.type_name
+        balance = _account_balance_through(conn, r.account_id, period_month, r.normal_balance)
+        lines.append(
+            BalanceSheetLine(account_id=r.account_id, account_type_code=r.code, label=label, balance_idr=balance)
+        )
+    return lines
+
+
+def balance_sheet_report(conn: Connection, *, period_month: _dt.date) -> BalanceSheetReport:
+    asset_lines = _account_instance_lines(conn, period_month, "asset")
+    total_assets = sum((line.balance_idr for line in asset_lines), ZERO)
+
+    liability_lines = _account_instance_lines(conn, period_month, "liability")
+    total_liabilities = sum((line.balance_idr for line in liability_lines), ZERO)
+
+    equity = equity_report(conn, period_month=period_month)
+    total_equity = equity.ending_balance_idr
+    total_liabilities_and_equity = total_liabilities + total_equity
+
+    return BalanceSheetReport(
+        period_month=period_month,
+        asset_lines=asset_lines,
+        total_assets_idr=total_assets,
+        liability_lines=liability_lines,
+        total_liabilities_idr=total_liabilities,
+        owners_capital_idr=equity.owners_capital_idr,
+        owners_draw_idr=equity.owners_draw_idr,
+        retained_earnings_idr=equity.retained_earnings_idr,
+        total_equity_idr=total_equity,
+        total_liabilities_and_equity_idr=total_liabilities_and_equity,
+        difference_idr=total_assets - total_liabilities_and_equity,
+    )
+
+
+def account_instance_drilldown(
+    conn: Connection, *, account_id: int, period_month: _dt.date
+) -> list[DrilldownLine]:
+    """Every journal line posted to one specific ``accounts`` row (a single
+    eBay Wallet, a single wallet-group's Payoneer Wallet, etc.) through the
+    end of ``period_month`` — the Balance Sheet's drill-down. Deliberately
+    keyed on the literal ``account_id`` rather than reusing ``drilldown()``'s
+    account_type_codes + per-eBay-account-attribution approach: that
+    attribution logic only resolves to an eBay account, never a wallet-group,
+    so it can't correctly key a shared Payoneer Wallet/BCA Bridging line
+    (see module docstring on attribution's Payoneer-stage limits). Filtering
+    by the exact account_id sidesteps that entirely and is a more literal,
+    more obviously-correct traceability mechanism for "what makes up this
+    specific ledger account's balance" than re-deriving an attribution.
+    """
+    rows = conn.execute(
+        select(
+            journal_entries.c.entry_date,
+            journal_entries.c.source_type,
+            journal_entries.c.memo,
+            journal_lines.c.debit_amount_idr,
+            journal_lines.c.credit_amount_idr,
+            journal_lines.c.ebay_order_ref,
+            journal_lines.c.consignor_item_ref,
+            journal_lines.c.journal_entry_id,
+        )
+        .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
+        .where(journal_lines.c.account_id == account_id)
+        .where(journal_entries.c.period_month <= period_month)
+        .order_by(journal_entries.c.entry_date)
+    ).all()
+
+    return [
+        DrilldownLine(
+            entry_date=r.entry_date,
+            source_type=r.source_type,
+            memo=r.memo,
+            debit_idr=r.debit_amount_idr,
+            credit_idr=r.credit_amount_idr,
+            ebay_order_ref=r.ebay_order_ref,
+            consignor_item_ref=r.consignor_item_ref,
+            journal_entry_id=r.journal_entry_id,
+        )
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------

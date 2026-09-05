@@ -321,3 +321,152 @@ def test_drilldown_lines_sum_to_the_same_headline_figure(prototype):
     )
     summed = sum((l.credit_idr - l.debit_idr for l in lines), Decimal("0"))
     assert summed == report.sales_revenue_idr
+
+
+# ---------------------------------------------------------------------------
+# Retained Earnings fix — must be a computed cumulative net-income figure,
+# not the (always-zero, nothing-ever-posts-to-it) RETAINED_EARNINGS account
+# balance. See webapp/reporting.py's _cumulative_net_income.
+# ---------------------------------------------------------------------------
+
+
+def test_retained_earnings_is_computed_from_cumulative_net_income_not_the_zero_account(prototype):
+    conn, topo = prototype
+    # A sale (revenue + COGS-adjacent fee), a COGS purchase, and an opex
+    # payment — enough to make net income genuinely nonzero and checkable
+    # by hand, not just "some nonzero number".
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=DAY, gross_sale_price_usd=Decimal("300"),
+        ebay_fee_usd=Decimal("30"), kurs_pajak_rate=RATE, ebay_order_ref="RE1",
+    )
+    posting.post_cogs_purchase(conn, entry_date=DAY, amount_idr=Decimal("1000000"))
+    posting.post_operating_expense(
+        conn, entry_date=DAY, expense_account_type_code="GENERAL_OPEX", amount_idr=Decimal("500000"),
+    )
+
+    # Nothing ever posts to the RETAINED_EARNINGS account type itself — the
+    # bug this fixes is exactly that reading its balance always gives 0.
+    from sqlalchemy import select as _select
+
+    from ledger.entities import get_account_id
+    from ledger.schema import journal_lines as _jl
+
+    re_account_id = get_account_id(conn, "RETAINED_EARNINGS")
+    re_lines = conn.execute(_select(_jl.c.id).where(_jl.c.account_id == re_account_id)).all()
+    assert re_lines == []  # confirms the account genuinely has zero postings
+
+    pnl = reporting.pnl_report(conn, period_month=PERIOD)
+    equity = reporting.equity_report(conn, period_month=PERIOD)
+
+    assert pnl.net_income_idr != Decimal("0")
+    assert equity.retained_earnings_idr == pnl.net_income_idr
+    assert equity.ending_balance_idr == equity.owners_capital_idr - equity.owners_draw_idr + pnl.net_income_idr
+
+
+def test_retained_earnings_accumulates_across_periods(prototype):
+    conn, topo = prototype
+    june = _dt.date(2026, 6, 1)
+    july = _dt.date(2026, 7, 1)
+
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=_dt.date(2026, 6, 10),
+        gross_sale_price_usd=Decimal("100"), ebay_fee_usd=Decimal("10"), kurs_pajak_rate=RATE, ebay_order_ref="JUN1",
+    )
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=DAY,
+        gross_sale_price_usd=Decimal("50"), ebay_fee_usd=Decimal("5"), kurs_pajak_rate=RATE, ebay_order_ref="JUL1",
+    )
+
+    june_equity = reporting.equity_report(conn, period_month=june)
+    july_equity = reporting.equity_report(conn, period_month=july)
+
+    # July's retained earnings includes June's income too (cumulative).
+    assert july_equity.retained_earnings_idr > june_equity.retained_earnings_idr
+    june_pnl = reporting.pnl_report(conn, period_month=june)
+    july_pnl = reporting.pnl_report(conn, period_month=july)
+    assert june_equity.retained_earnings_idr == june_pnl.net_income_idr
+    assert july_equity.retained_earnings_idr == june_pnl.net_income_idr + july_pnl.net_income_idr
+
+
+# ---------------------------------------------------------------------------
+# Balance Sheet
+# ---------------------------------------------------------------------------
+
+
+def test_balance_sheet_balances_exactly_with_a_realistic_mix_of_transactions(full_topology):
+    """Assets = Liabilities + Equity must hold EXACTLY (not approximately)
+    once every account type is correctly bucketed — see
+    webapp/reporting.py's BalanceSheetReport.difference_idr docstring for
+    why this is a mathematical property of double-entry bookkeeping here,
+    not something to fudge. Exercises assets (eBay Wallet via a sale, BCA
+    Main via COGS/opex/owner transactions), a liability (Consignor Payable,
+    via a confirmed consignment sale not yet reimbursed), and equity
+    (Capital, Draw, and the fixed Retained Earnings computation) all in one
+    scenario.
+    """
+    from ledger.consignment import calc_tier_payout_usd
+    from ledger.posting import confirm_consignment_sale, create_consignment_sale, post_consignment_sale
+
+    conn, topo = full_topology
+    ebay_1 = topo["ebay_accounts"]["1"]
+
+    posting.post_owner_contribution(conn, entry_date=_dt.date(2026, 6, 1), amount_idr=Decimal("50000000"))
+    posting.post_ebay_sale(
+        conn, ebay_account_id=ebay_1, entry_date=DAY, gross_sale_price_usd=Decimal("300"),
+        ebay_fee_usd=Decimal("30"), kurs_pajak_rate=RATE, ebay_order_ref="BS1",
+    )
+    posting.post_cogs_purchase(conn, entry_date=DAY, amount_idr=Decimal("1000000"))
+    posting.post_operating_expense(
+        conn, entry_date=DAY, expense_account_type_code="PAYROLL", amount_idr=Decimal("2000000"),
+    )
+    posting.post_owner_draw(conn, entry_date=DAY, amount_idr=Decimal("500000"))
+
+    suggestion = calc_tier_payout_usd(Decimal("80.00"), Decimal("80.00"))
+    cs_id = create_consignment_sale(
+        conn, item_price_usd=Decimal("80.00"), payout_model="tier", tier_rate_percent=Decimal("80.00"),
+        payout_amount_idr=suggestion * RATE, consignor_item_ref="CONSIGN-BS-1",
+    )
+    confirm_consignment_sale(conn, cs_id)
+    post_consignment_sale(
+        conn, consignment_sale_id=cs_id, ebay_account_id=ebay_1, entry_date=DAY,
+        gross_sale_price_usd=Decimal("90.00"), ebay_fee_usd=Decimal("10.00"), kurs_pajak_rate=RATE,
+        ebay_order_ref="BS-CONSIGN-1",
+    )
+
+    bs = reporting.balance_sheet_report(conn, period_month=PERIOD)
+    assert bs.difference_idr == Decimal("0")
+    assert bs.total_assets_idr == bs.total_liabilities_and_equity_idr
+    assert bs.total_liabilities_idr > Decimal("0")  # the unreimbursed consignor payable
+    assert bs.total_equity_idr == bs.owners_capital_idr - bs.owners_draw_idr + bs.retained_earnings_idr
+
+
+def test_balance_sheet_lists_one_line_per_account_instance_not_per_type(full_topology):
+    """3 eBay Wallets (per-account) and 2 Payoneer Wallets/BCA Bridging
+    Accounts (per-wallet-group, one shared by two eBay accounts) should each
+    show as their OWN line — never blended into one type-level total (see
+    CLAUDE.md's chart-of-accounts scoping).
+    """
+    conn, topo = full_topology
+    bs = reporting.balance_sheet_report(conn, period_month=PERIOD)
+    ebay_wallet_lines = [l for l in bs.asset_lines if l.account_type_code == "EBAY_WALLET"]
+    payoneer_lines = [l for l in bs.asset_lines if l.account_type_code == "PAYONEER_WALLET"]
+    bridging_lines = [l for l in bs.asset_lines if l.account_type_code == "BCA_BRIDGING"]
+    bca_main_lines = [l for l in bs.asset_lines if l.account_type_code == "BCA_MAIN"]
+    assert len(ebay_wallet_lines) == 3
+    assert len(payoneer_lines) == 2
+    assert len(bridging_lines) == 2
+    assert len(bca_main_lines) == 1
+
+
+def test_balance_sheet_account_instance_drilldown_sums_to_the_line_balance(prototype):
+    conn, topo = prototype
+    posting.post_owner_contribution(conn, entry_date=DAY, amount_idr=Decimal("10000000"))
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=DAY, gross_sale_price_usd=Decimal("100"),
+        ebay_fee_usd=Decimal("10"), kurs_pajak_rate=RATE, ebay_order_ref="BS-DD1",
+    )
+    bs = reporting.balance_sheet_report(conn, period_month=PERIOD)
+    bca_main_line = next(l for l in bs.asset_lines if l.account_type_code == "BCA_MAIN")
+    lines = reporting.account_instance_drilldown(conn, account_id=bca_main_line.account_id, period_month=PERIOD)
+    summed = sum((l.debit_idr - l.credit_idr for l in lines), Decimal("0"))
+    assert summed == bca_main_line.balance_idr

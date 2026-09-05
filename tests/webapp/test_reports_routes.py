@@ -61,3 +61,35 @@ def test_drilldown_route_renders_matching_lines(logged_in_client, wtopology):
 def test_drilldown_unknown_figure_404s(logged_in_client, wtopology):
     resp = logged_in_client.get("/reports/drilldown/not_a_real_figure?period=2026-07")
     assert resp.status_code == 404
+
+
+def test_balance_sheet_renders_empty_period(logged_in_client, wtopology):
+    resp = logged_in_client.get("/reports/balance-sheet?period=2026-07")
+    assert resp.status_code == 200
+    assert b"Provisional" in resp.data
+
+
+def test_balance_sheet_renders_with_data_and_balances(logged_in_client, wtopology):
+    conn, topo = wtopology
+    posting.post_owner_contribution(conn, entry_date=DAY, amount_idr=Decimal("10000000"))
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=DAY, gross_sale_price_usd=Decimal("100"),
+        ebay_fee_usd=Decimal("10"), kurs_pajak_rate=Decimal("16300"), ebay_order_ref="BSROUTE1",
+    )
+    conn.commit()
+    resp = logged_in_client.get("/reports/balance-sheet?period=2026-07")
+    assert resp.status_code == 200
+    assert b"disabled" in resp.data  # account selector locked out — consolidated only
+    assert b"do not equal" not in resp.data  # no imbalance warning rendered
+
+
+def test_balance_sheet_account_drilldown_route_renders(logged_in_client, wtopology):
+    conn, topo = wtopology
+    posting.post_owner_contribution(conn, entry_date=DAY, amount_idr=Decimal("10000000"))
+    conn.commit()
+    from webapp import reporting
+
+    bs = reporting.balance_sheet_report(conn, period_month=PERIOD)
+    bca_main = next(l for l in bs.asset_lines if l.account_type_code == "BCA_MAIN")
+    resp = logged_in_client.get(f"/reports/balance-sheet/drilldown/{bca_main.account_id}?period=2026-07")
+    assert resp.status_code == 200
