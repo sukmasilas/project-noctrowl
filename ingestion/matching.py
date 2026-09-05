@@ -479,9 +479,14 @@ class PostResult:
 # - 'other': deliberately NOT treated as inherently directional — unlike
 #   every category below (each named for one specific, always-one-direction
 #   real-world event), 'other' is this taxonomy's genuine catch-all for a
-#   line that doesn't confidently fit anywhere else. Forcing a direction
-#   check on it would be inventing a rule the category was never designed
-#   to have; out of this fix's scope (see the brief this fix implements).
+#   line that doesn't confidently fit anywhere else, and (2026-09-05, see
+#   OTHER_INCOME in ledger/chart_of_accounts.py and _post_one_row's 'other'
+#   branch below) is now explicitly, correctly BIDIRECTIONAL BY DESIGN, same
+#   as 'interest_income' above: an inflow posts to Other Income, an outflow
+#   posts to General Operating Expenses exactly as before. Forcing a single-
+#   direction check on it would reject a legitimate real transaction in
+#   whichever direction wasn't picked; this dict staying silent on 'other'
+#   is still correct post-fix, not an oversight.
 _DIRECTIONAL_CATEGORY_SIGNS: dict[str, str] = {
     "cogs_purchase": "outflow",
     "operating_expense": "outflow",
@@ -822,7 +827,36 @@ def _post_one_row(conn: Connection, row) -> int | None:
         )
 
     if row.category == "other":
+        # Bidirectional by design (2026-09-05 fix — see
+        # _DIRECTIONAL_CATEGORY_SIGNS's note above and CLAUDE.md's Chart of
+        # accounts, "Other Income" line): a human-labeled 'other' row can be
+        # a real inflow or a real outflow, and each has its own correct
+        # destination. Found against a real historical bad entry — a real
+        # +Rp 50,000 inflow (the account owner moving his own money from a
+        # personal DANA e-wallet into the Bridging Account) was wrongly
+        # labeled 'cogs_purchase' and posted with its direction flipped (see
+        # journal_entry_id=917 / review_queue.id=321); before this fix, even
+        # a CORRECTLY-labeled 'other' inflow had nowhere to post but the
+        # outflow-shaped path below, which would have silently flipped it
+        # the same way.
         paying_code, paying_kwargs = _paying_account_for_row(row)
+        if row.amount_idr > 0:
+            # Genuine inflow that doesn't confidently fit any named category
+            # — e.g. the owner's own money passing through a wallet-group's
+            # bank account. A neutral pass-through, not an Owner's
+            # Contribution (per Main-agent's 2026-09-05 decision) — posts to
+            # OTHER_INCOME, the inflow-side counterpart to GENERAL_OPEX.
+            return posting.post_income_line(
+                conn,
+                entry_date=entry_date,
+                income_account_type_code="OTHER_INCOME",
+                amount_idr=row.amount_idr,
+                paying_account_type_code=paying_code,
+                **paying_kwargs,
+                **_usd_reference_kwargs(row),
+            )
+        # Outflow — unchanged from before this fix (regression-safe): still
+        # posts to General Operating Expenses exactly as always.
         return posting.post_operating_expense(
             conn,
             entry_date=entry_date,

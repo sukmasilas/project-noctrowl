@@ -1050,6 +1050,82 @@ def post_interest_income(
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
 
 
+def post_income_line(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    income_account_type_code: str,
+    amount_idr: Decimal,
+    paying_account_type_code: str = "BCA_MAIN",
+    paying_ebay_account_id: int | None = None,
+    paying_wallet_group_id: int | None = None,
+    amount_usd_ref: Decimal | None = None,
+    fx_rate_used: Decimal | None = None,
+    memo: str | None = None,
+) -> int:
+    """Generic sign-aware "post a single bank/Payoneer-statement line against
+    an Other-Income/Expense-section INCOME account" posting.
+
+    Added 2026-09-05 as the GENERALIZED form of what was originally
+    ``post_interest_income_line`` (hardcoded to INTEREST_INCOME) —
+    ``post_interest_income_line`` now delegates here with
+    ``income_account_type_code="INTEREST_INCOME"`` and is otherwise
+    unchanged (same signature, same behavior, every existing caller
+    unaffected). This mirrors ``post_operating_expense``'s own established
+    "one generic posting function + an ``..._account_type_code`` parameter"
+    reuse pattern (see that function and ``post_ebay_wallet_operating_
+    expense``), just applied on the income side.
+
+    Why sign-aware rather than a plain always-inflow posting: an
+    Other-Income/Expense-section account can legitimately see either
+    direction on different real bank lines — an inflow crediting it (BUNGA
+    interest; a genuine, unclassifiable-but-real 'other' inflow — see
+    ingestion.matching._post_one_row's 'other' branch and the OTHER_INCOME
+    account added alongside this function) or an outflow debiting it back
+    down (PAJAK BUNGA withholding tax on that same interest). See the
+    original ``post_interest_income_line`` design note (2026-09-02) this
+    behavior was first built for.
+
+    - amount_idr > 0 (an inflow): debit the paying/receiving account, credit
+      ``income_account_type_code``.
+    - amount_idr < 0 (an outflow against that same income-account balance):
+      debit ``income_account_type_code``, credit the paying account.
+
+    ``paying_account_type_code``/``paying_ebay_account_id``/
+    ``paying_wallet_group_id`` mirror ``post_operating_expense``'s generic
+    asset-account resolution (default BCA_MAIN — not hardcoded, any
+    wallet/bank account can pay or receive).
+
+    ``amount_usd_ref``/``fx_rate_used`` (same QA-found-bug-fix convention as
+    ``post_consignor_reimbursement``/``post_operating_expense`` above) are
+    OPTIONAL, tagged on BOTH lines, and only meaningful when
+    ``paying_account_type_code`` is ``PAYONEER_WALLET``. Both default None;
+    existing callers are unaffected.
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_idr == 0:
+        raise ValueError("amount_idr must be non-zero (a journal line amount must be > 0).")
+    if amount_usd_ref is not None:
+        _require_decimal(amount_usd_ref, "amount_usd_ref")
+    if fx_rate_used is not None:
+        _require_decimal(fx_rate_used, "fx_rate_used")
+
+    income_id = _singleton(conn, income_account_type_code)
+    paying_id = get_account_id(
+        conn,
+        paying_account_type_code,
+        ebay_account_id=paying_ebay_account_id,
+        wallet_group_id=paying_wallet_group_id,
+    )
+    magnitude = abs(amount_idr)
+    common_kwargs = dict(amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used)
+    if amount_idr > 0:
+        lines = [debit(paying_id, magnitude, **common_kwargs), credit(income_id, magnitude, **common_kwargs)]
+    else:
+        lines = [debit(income_id, magnitude, **common_kwargs), credit(paying_id, magnitude, **common_kwargs)]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
+
+
 def post_interest_income_line(
     conn: Connection,
     *,
@@ -1081,48 +1157,24 @@ def post_interest_income_line(
     have both figures together) is left exactly as it was; nothing here
     replaces it.
 
-    - amount_idr > 0 (BUNGA — bank-credited interest, an inflow): debit the
-      paying/receiving account, credit INTEREST_INCOME.
-    - amount_idr < 0 (PAJAK BUNGA — withholding tax on that interest, an
-      outflow): debit INTEREST_INCOME, credit the paying account.
-
-    ``paying_account_type_code``/``paying_ebay_account_id``/
-    ``paying_wallet_group_id`` mirror ``post_operating_expense``'s generic
-    asset-account resolution (default BCA_MAIN, since every real sample of
-    BUNGA/PAJAK BUNGA seen so far is on the BCA Main Account statement — see
-    docs/design — but not hardcoded to it, in case a future Bridging-account
-    statement's own interest line needs the same treatment).
-
-    ``amount_usd_ref``/``fx_rate_used`` (added 2026-09, QA-found bug fix —
-    see ``post_consignor_reimbursement``'s docstring above for the full
-    explanation) are OPTIONAL, tagged on BOTH lines, and only meaningful
-    when ``paying_account_type_code`` is ``PAYONEER_WALLET`` (a Payoneer
-    -sourced interest-ish line — included here for completeness/defense in
-    depth even though every real sample seen so far is BCA Main). Both
-    default None; existing callers are unaffected.
+    IMPLEMENTATION (2026-09-05): this is now a thin wrapper around the
+    generalized ``post_income_line`` (``income_account_type_code=
+    "INTEREST_INCOME"``) — see that function's docstring for the full
+    sign-aware behavior description. Signature and behavior for every
+    existing caller are unchanged.
     """
-    _require_decimal(amount_idr, "amount_idr")
-    if amount_idr == 0:
-        raise ValueError("amount_idr must be non-zero (a journal line amount must be > 0).")
-    if amount_usd_ref is not None:
-        _require_decimal(amount_usd_ref, "amount_usd_ref")
-    if fx_rate_used is not None:
-        _require_decimal(fx_rate_used, "fx_rate_used")
-
-    interest_income_id = _singleton(conn, "INTEREST_INCOME")
-    paying_id = get_account_id(
+    return post_income_line(
         conn,
-        paying_account_type_code,
-        ebay_account_id=paying_ebay_account_id,
-        wallet_group_id=paying_wallet_group_id,
+        entry_date=entry_date,
+        income_account_type_code="INTEREST_INCOME",
+        amount_idr=amount_idr,
+        paying_account_type_code=paying_account_type_code,
+        paying_ebay_account_id=paying_ebay_account_id,
+        paying_wallet_group_id=paying_wallet_group_id,
+        amount_usd_ref=amount_usd_ref,
+        fx_rate_used=fx_rate_used,
+        memo=memo,
     )
-    magnitude = abs(amount_idr)
-    common_kwargs = dict(amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used)
-    if amount_idr > 0:
-        lines = [debit(paying_id, magnitude, **common_kwargs), credit(interest_income_id, magnitude, **common_kwargs)]
-    else:
-        lines = [debit(interest_income_id, magnitude, **common_kwargs), credit(paying_id, magnitude, **common_kwargs)]
-    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
 
 
 # ---------------------------------------------------------------------------
@@ -1218,3 +1270,108 @@ def post_opening_balance(
         )
     )
     return entry_id
+
+
+# ---------------------------------------------------------------------------
+# Reversal (added 2026-09-05) — a DELIBERATE, NARROW, one-time exception to
+# "corrections to posted transactions are out of scope for the prototype"
+# (see CLAUDE.md's Bank transaction classification section and Definition of
+# done). This is NOT a general reopen/reverse workflow: it exists to close
+# out exactly one real historical bad posting (journal_entry_id=917 /
+# review_queue.id=321 — a real +Rp 50,000 inflow wrongly labeled
+# 'cogs_purchase' and posted with its direction flipped), via
+# scripts/correct_journal_entry_917.py, and is not wired into any
+# app-reachable path (webapp/review_queue_bp.py has no "reverse" action; the
+# 2026-08-31 decision that corrections to already-posted rows are out of
+# scope for the prototype still stands for the general case).
+#
+# ``journal_entries.reversed_by_id`` (see ledger/schema.py) was added in
+# milestone 2 specifically as a documented placeholder for this future need
+# ("the column exists so a future reversal flow is additive, not a
+# migration") — using it here, now that a real one-off correction is
+# actually needed and explicitly authorized, is that placeholder's intended
+# use, not a new ad-hoc mechanism invented to route around the "no
+# corrections" rule.
+# ---------------------------------------------------------------------------
+
+
+def post_reversal_entry(
+    conn: Connection,
+    *,
+    original_journal_entry_id: int,
+    entry_date: _dt.date,
+    memo: str,
+) -> int:
+    """Post a new journal entry that exactly mirrors
+    ``original_journal_entry_id``'s lines with debit/credit swapped on every
+    line (same accounts, same amounts, same USD/category/order/consignor
+    references) — the standard double-entry-bookkeeping definition of a
+    reversal, net effect zero on every account touched. Marks the ORIGINAL
+    entry's ``reversed_by_id`` to point at this new entry (so it's visibly,
+    permanently flagged as reversed and by what) and refuses to reverse an
+    entry that's already been reversed (``reversed_by_id`` already set) —
+    never a double-reversal.
+
+    ``memo`` is REQUIRED (unlike every other posting function here, where
+    it's optional) — a reversal with no stated reason defeats the whole
+    point of this being an audited, deliberate, traceable exception rather
+    than a silent undo. Callers should state exactly what's being corrected
+    and why (see scripts/correct_journal_entry_917.py's usage).
+
+    Reuses the original entry's own ``source_type`` (the reversal is the
+    same class of real-world event, just corrected — this needs no new
+    ``ck_journal_entries_source_type`` value).
+    """
+    if not memo:
+        raise ValueError("post_reversal_entry requires a non-empty memo stating what is being corrected and why.")
+
+    original = conn.execute(
+        select(journal_entries.c.id, journal_entries.c.source_type, journal_entries.c.reversed_by_id).where(
+            journal_entries.c.id == original_journal_entry_id
+        )
+    ).first()
+    if original is None:
+        raise ValueError(f"No journal_entries row with id={original_journal_entry_id}")
+    if original.reversed_by_id is not None:
+        raise ValueError(
+            f"journal_entries id={original_journal_entry_id} has already been reversed "
+            f"(reversed_by_id={original.reversed_by_id}) — refusing to reverse it twice."
+        )
+
+    original_lines = conn.execute(
+        select(
+            journal_lines.c.account_id,
+            journal_lines.c.debit_amount_idr,
+            journal_lines.c.credit_amount_idr,
+            journal_lines.c.amount_usd_ref,
+            journal_lines.c.fx_rate_used,
+            journal_lines.c.category_id,
+            journal_lines.c.ebay_order_ref,
+            journal_lines.c.consignor_item_ref,
+        ).where(journal_lines.c.journal_entry_id == original_journal_entry_id)
+    ).all()
+    if not original_lines:
+        raise ValueError(f"journal_entries id={original_journal_entry_id} has no journal_lines to reverse.")
+
+    reversal_lines = [
+        Line(
+            l.account_id,
+            l.credit_amount_idr,  # swapped: original's credit becomes this line's debit
+            l.debit_amount_idr,  # swapped: original's debit becomes this line's credit
+            amount_usd_ref=l.amount_usd_ref,
+            fx_rate_used=l.fx_rate_used,
+            category_id=l.category_id,
+            ebay_order_ref=l.ebay_order_ref,
+            consignor_item_ref=l.consignor_item_ref,
+        )
+        for l in original_lines
+    ]
+
+    reversal_id = _insert_journal_entry(
+        conn, entry_date=entry_date, source_type=original.source_type, lines=reversal_lines, memo=memo
+    )
+
+    conn.execute(
+        update(journal_entries).where(journal_entries.c.id == original_journal_entry_id).values(reversed_by_id=reversal_id)
+    )
+    return reversal_id

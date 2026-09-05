@@ -1243,6 +1243,147 @@ def test_manually_labeled_contract_labor_row_posts_to_its_own_account_not_genera
 
 
 # ---------------------------------------------------------------------------
+# 'other' — bidirectional by design (2026-09-05 fix). CLAUDE.md's Chart of
+# accounts adds OTHER_INCOME as the inflow-side counterpart to GENERAL_OPEX.
+# Found against a real historical bad entry: a real +Rp 50,000 inflow (the
+# account owner moving his own money from a personal DANA e-wallet into the
+# Bridging Account) was wrongly labeled 'cogs_purchase' and posted with its
+# direction flipped (journal_entry_id=917 / review_queue.id=321) — and even
+# a CORRECTLY-labeled 'other' inflow had nowhere to post but the
+# outflow-shaped path (post_operating_expense), which would have silently
+# flipped it the same way. No auto-match rule ever produces 'other' — like
+# 'contract_labor' above, this is always a human-selected review-queue
+# label, so these tests manually set the category (mirroring
+# test_manually_labeled_contract_labor_row_posts_to_its_own_account_not_
+# general_opex's pattern).
+# ---------------------------------------------------------------------------
+
+
+def test_manually_labeled_other_outflow_still_posts_to_general_opex(iprototype):
+    """Regression: an 'other'-labeled OUTFLOW must behave EXACTLY as it did
+    before this fix — no behavior change for the existing, working case.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 24),
+                raw_description="Transfer antar Mandiri / DARI ESPAY DEBIT INDONESI",
+                amount_idr=Decimal("-30000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    run_auto_match(conn)
+    row = conn.execute(select(review_queue.c.id, review_queue.c.category)).one()
+    assert row.category is None  # no auto-match rule produces 'other' — correctly Needs Review
+
+    conn.execute(
+        update(review_queue).values(category="other", labeled_at=_dt.datetime.now(_dt.timezone.utc)).where(review_queue.c.id == row.id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row.id)).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+    general_opex_id = get_account_id(conn, "GENERAL_OPEX")
+    assert general_opex_id is not None
+    assert lines["GENERAL_OPEX"][0].debit_amount_idr == Decimal("30000")
+    assert lines["BCA_MAIN"][0].credit_amount_idr == Decimal("30000")
+    assert "OTHER_INCOME" not in lines
+    assert_balanced(conn, entry_id)
+
+
+def test_manually_labeled_other_inflow_posts_to_other_income_not_flipped(iprototype):
+    """The fix's core case: a real +Rp 50,000 inflow labeled 'other' must
+    post as an inflow to OTHER_INCOME, never silently flipped into an
+    outflow against GENERAL_OPEX the way the old unconditional
+    post_operating_expense call would have.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 11),
+                raw_description="Transfer BI Fast / Dari / RICO 6283874841900 / DANA",
+                amount_idr=Decimal("50000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    run_auto_match(conn)
+    row = conn.execute(select(review_queue.c.id, review_queue.c.category)).one()
+    assert row.category is None  # correctly Needs Review — no rule confidently matches this
+
+    conn.execute(
+        update(review_queue).values(category="other", labeled_at=_dt.datetime.now(_dt.timezone.utc)).where(review_queue.c.id == row.id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    assert post_result.skipped_sign_mismatch == 0  # 'other' is bidirectional — never flagged as a mismatch
+
+    entry_id = conn.execute(select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row.id)).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+    other_income_id = get_account_id(conn, "OTHER_INCOME")
+    assert other_income_id is not None
+    assert lines["OTHER_INCOME"][0].credit_amount_idr == Decimal("50000")
+    assert lines["OTHER_INCOME"][0].debit_amount_idr == Decimal("0")
+    bridging_id = get_account_id(conn, "BCA_BRIDGING", wallet_group_id=topo["wallet_group_id"])
+    assert lines["BCA_BRIDGING"][0].debit_amount_idr == Decimal("50000")
+    assert "GENERAL_OPEX" not in lines
+    assert "COGS" not in lines  # the historical bug's wrong destination
+    assert_balanced(conn, entry_id)
+
+    # Idempotent: a second sync run must not double-post the same row.
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 0
+
+
+def test_other_inflow_and_outflow_same_period_both_post_correctly(iprototype):
+    """The real Aug 24 sibling pair (review_queue.id=329/330 in the real
+    database): an inflow and an outflow, both labeled 'other', in the SAME
+    statement — each must resolve to its own correct destination
+    independently, not accidentally share one posting decision.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 8, 24), raw_description="inflow sibling", amount_idr=Decimal("30000"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 8, 24), raw_description="outflow sibling", amount_idr=Decimal("-30000"), occurrence_index=2),
+        ],
+    )
+    run_auto_match(conn)
+    conn.execute(update(review_queue).values(category="other", labeled_at=_dt.datetime.now(_dt.timezone.utc)))
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 2
+
+    other_income_id = get_account_id(conn, "OTHER_INCOME")
+    general_opex_id = get_account_id(conn, "GENERAL_OPEX")
+    other_income_credit = conn.execute(
+        select(journal_lines.c.credit_amount_idr).where(journal_lines.c.account_id == other_income_id)
+    ).scalar_one()
+    general_opex_debit = conn.execute(
+        select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == general_opex_id)
+    ).scalar_one()
+    assert other_income_credit == Decimal("30000")
+    assert general_opex_debit == Decimal("30000")
+
+
+# ---------------------------------------------------------------------------
 # Requirement 4 of the 2026-09-01 Bridging Account fix: a Bridging Account
 # line that ISN'T a landing echo or a sweep leg is just a normal bank line —
 # rules (a)/(b)/(d)/(e) must still fire normally on a wallet_group-scoped

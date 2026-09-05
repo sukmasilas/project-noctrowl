@@ -78,6 +78,20 @@ ACCOUNT_TYPES = [
     # a rounding-level opex line for the tax portion. See
     # ledger.posting.post_interest_income.
     ("INTEREST_INCOME", "Interest Income", "other_income_expense", "credit", "consolidated", False),
+    # Added 2026-09-05 — the catch-all counterpart to GENERAL_OPEX, but for
+    # genuine INFLOWS under the review-queue's 'other' category (a bank line
+    # that doesn't confidently fit any of the named categories — see
+    # ingestion.matching._DIRECTIONAL_CATEGORY_SIGNS's note on why 'other' is
+    # deliberately bidirectional). Concrete real case: journal_entry_id=917 /
+    # review_queue.id=321 — a real +Rp 50,000 inflow (the account owner
+    # moving his own money from a personal DANA e-wallet into the Bridging
+    # Account) that has nowhere correct to post, since every OTHER
+    # 'other_income_expense'/revenue account here is either outflow-shaped
+    # (GENERAL_OPEX) or scoped to a specific named event (interest, realized/
+    # unrealized FX). This is a NEUTRAL pass-through, not an Owner's
+    # Contribution — see ledger.posting.post_income_line and
+    # ingestion.matching._post_one_row's 'other' branch.
+    ("OTHER_INCOME", "Other Income", "other_income_expense", "credit", "consolidated", False),
 ]
 
 # Account types whose currency is USD (eBay/Payoneer wallets); everything

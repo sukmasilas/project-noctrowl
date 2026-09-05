@@ -457,6 +457,44 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
         ),
     ),
     MigrationStep(
+        id="account_types_other_income",
+        description=(
+            "account_types row for OTHER_INCOME (2026-09-05) — a new Other "
+            "Income/Expense line, the inflow-side counterpart to GENERAL_OPEX, "
+            "backing a positive (inflow) 'other'-labeled review_queue row (see "
+            "ledger/chart_of_accounts.py's inline note and "
+            "ingestion.matching._post_one_row's 'other' branch — the historical "
+            "bad entry, journal_entry_id=917 / review_queue.id=321, is the "
+            "concrete real case this closes). Same exact pattern/reasoning as "
+            "'account_types_contract_labor' above: account_types.code has a "
+            "UNIQUE constraint and ledger.seed.seed_account_types is a plain "
+            "INSERT with no upsert guard, so a brand-new account_type added to "
+            "the Python catalog after a database was already seeded needs an "
+            "explicit, idempotent INSERT here."
+        ),
+        table="account_types",
+        already_applied_check=(
+            "SELECT 1 FROM account_types WHERE code = 'OTHER_INCOME'"
+        ),
+        apply_sql=(
+            "INSERT INTO account_types (code, name, statement_section, "
+            "normal_balance, scope_kind, is_contra) "
+            "SELECT 'OTHER_INCOME', 'Other Income', 'other_income_expense', "
+            "'credit', 'consolidated', false "
+            "WHERE NOT EXISTS (SELECT 1 FROM account_types WHERE code = "
+            "'OTHER_INCOME')",
+        ),
+    ),
+    # NOTE: same as the account_types_contract_labor step above — this only
+    # creates the account_types CATALOG row. The actual postable `accounts`
+    # row (the consolidated singleton instance OTHER_INCOME needs before
+    # anything can post to it) is deliberately NOT a MIGRATIONS step, for the
+    # identical reason documented there (colliding with
+    # ledger.seed._consolidated_singletons's plain INSERT inside every fresh
+    # test schema's create_schema() call). See scripts/
+    # ensure_other_income_account.py for the one-off, idempotent real
+    # -database equivalent instead.
+    MigrationStep(
         id="review_queue_sign_mismatch_reason",
         description=(
             "review_queue.sign_mismatch_reason (nullable) — 2026-09-05 Fix, "
