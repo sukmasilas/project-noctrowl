@@ -455,6 +455,65 @@ class PostResult:
     # (see CLAUDE.md). Left unposted; a later sync's post_pending_rows call
     # picks it up once the pair does arrive. See _post_internal_transfer.
     skipped_pending_pair: int = 0
+    # A row IS classified, but its category is inherently directional (an
+    # expense/purchase/payout/draw is always an outflow; a contribution/
+    # revenue settlement is always an inflow) and the row's own raw
+    # amount_idr sign disagrees — see _sign_mismatch_reason. Never posted;
+    # flagged back to needs_review with a reason instead. Found against a
+    # real historical bad entry (journal_entry_id=917 / review_queue.id=321
+    # — see CLAUDE.md's Definition of done).
+    skipped_sign_mismatch: int = 0
+
+
+# Category -> the one real-world direction that category inherently implies,
+# for every category where that's actually true. Deliberately excludes:
+# - 'interest_income': legitimately bidirectional BY DESIGN (BUNGA credited
+#   interest is an inflow; PAJAK BUNGA withheld tax on it is an outflow —
+#   see ledger.posting.post_interest_income_line, which is already
+#   sign-aware and never abs()'s its amount).
+# - 'internal_transfer' / 'internal_transfer_landing': already have their
+#   own narrower, structural direction guards (_post_internal_transfer
+#   raises ValueError on a wrong-signed row; rule c-landing's own matching
+#   query only ever considers inflow lines) — this dict would be redundant
+#   for them, not additional safety.
+# - 'other': deliberately NOT treated as inherently directional — unlike
+#   every category below (each named for one specific, always-one-direction
+#   real-world event), 'other' is this taxonomy's genuine catch-all for a
+#   line that doesn't confidently fit anywhere else. Forcing a direction
+#   check on it would be inventing a rule the category was never designed
+#   to have; out of this fix's scope (see the brief this fix implements).
+_DIRECTIONAL_CATEGORY_SIGNS: dict[str, str] = {
+    "cogs_purchase": "outflow",
+    "operating_expense": "outflow",
+    "contract_labor": "outflow",
+    "consignment_payout": "outflow",
+    "owners_draw": "outflow",
+    "owners_contribution": "inflow",
+    "revenue_settlement": "inflow",
+}
+
+
+def _sign_mismatch_reason(category: str, amount_idr: Decimal) -> str | None:
+    """None if ``category`` isn't inherently directional, or its direction
+    agrees with ``amount_idr``'s actual sign. Otherwise a human-readable
+    reason to record on the row (see review_queue.sign_mismatch_reason).
+    """
+    expected = _DIRECTIONAL_CATEGORY_SIGNS.get(category)
+    if expected is None:
+        return None
+    if expected == "outflow" and amount_idr >= 0:
+        return (
+            f"Category '{category}' is inherently an outflow (an expense, purchase, or "
+            f"payout), but this line's amount ({amount_idr}) is a non-negative inflow. "
+            "Not posted — please re-check the classification."
+        )
+    if expected == "inflow" and amount_idr <= 0:
+        return (
+            f"Category '{category}' is inherently an inflow, but this line's amount "
+            f"({amount_idr}) is a non-positive outflow. Not posted — please re-check the "
+            "classification."
+        )
+    return None
 
 
 def _paying_account_for_row(row) -> tuple[str, dict]:
@@ -562,6 +621,23 @@ def post_pending_rows(conn: Connection) -> PostResult:
             result.skipped_unclassified += 1
             continue  # never a silent best-guess post — CLAUDE.md rule 5
 
+        mismatch_reason = _sign_mismatch_reason(row.category, row.amount_idr)
+        if mismatch_reason is not None:
+            # Never silently flip direction via abs() — see
+            # PostResult.skipped_sign_mismatch. Flag back to needs_review
+            # (covers both a human-mislabeled row, which is already
+            # needs_review, and an auto-matched row via rule (e)'s
+            # direction-blind keyword lookup, which needs pulling OUT of
+            # 'matched' so a human actually sees it) with a visible reason,
+            # and leave the row entirely unposted.
+            conn.execute(
+                update(review_queue)
+                .where(review_queue.c.id == row.id)
+                .values(match_status="needs_review", sign_mismatch_reason=mismatch_reason)
+            )
+            result.skipped_sign_mismatch += 1
+            continue
+
         journal_entry_id = _post_one_row(conn, row)
         if journal_entry_id is None:
             # c-sweep, pair not found yet — see PostResult.skipped_pending_pair.
@@ -570,7 +646,14 @@ def post_pending_rows(conn: Connection) -> PostResult:
         conn.execute(
             update(review_queue)
             .where(review_queue.c.id == row.id)
-            .values(posted_at=_dt.datetime.now(_dt.timezone.utc), posted_journal_entry_id=journal_entry_id)
+            .values(
+                posted_at=_dt.datetime.now(_dt.timezone.utc),
+                posted_journal_entry_id=journal_entry_id,
+                # Clear any earlier mismatch flag now that this row posted
+                # correctly (e.g. a human fixed the category after seeing
+                # the flag) — no stale reason left on a resolved row.
+                sign_mismatch_reason=None,
+            )
         )
         if row.linked_invoice_id is not None:
             # QA fix (2026-09): the design doc's traceability chain for a

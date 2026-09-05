@@ -1361,3 +1361,246 @@ def test_rule_e_keyword_fires_normally_on_a_bridging_scoped_line(iprototype):
 
     post_result = post_pending_rows(conn)
     assert post_result.posted == 1
+
+
+# ---------------------------------------------------------------------------
+# Sign-vs-category directional guard (2026-09-05 Fix) — QA found that
+# cogs_purchase/operating_expense/contract_labor (and, on audit, several
+# other directional categories) applied abs(row.amount_idr) unconditionally
+# when posting, with no check that the category's inherent real-world
+# direction (an expense/purchase/payout/draw is always an outflow; a
+# contribution/revenue settlement is always an inflow) actually agreed with
+# the raw signed amount. A real +Rp 50,000 INFLOW manually labeled
+# 'cogs_purchase' posted with its direction silently flipped to look like an
+# outflow — journal_entry_id=917 / review_queue.id=321, the real historical
+# case this fix was found from (see CLAUDE.md's Definition of done).
+# ---------------------------------------------------------------------------
+
+
+def test_regression_correctly_signed_cogs_purchase_still_posts_normally(iprototype):
+    """(a) No regression: a genuine outflow labeled cogs_purchase posts
+    exactly as before — same amount, same accounts, no flag.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 5, 12), raw_description="Transfer to supplier", amount_idr=Decimal("-500000"), occurrence_index=1)
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="cogs_purchase", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    assert post_result.skipped_sign_mismatch == 0
+
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.posted_journal_entry_id, review_queue.c.sign_mismatch_reason)
+        .where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is not None
+    assert row.sign_mismatch_reason is None
+    lines = lines_by_code(conn, row.posted_journal_entry_id)
+    assert lines["COGS"][0].debit_amount_idr == Decimal("500000")
+    assert lines["BCA_MAIN"][0].credit_amount_idr == Decimal("500000")
+    assert_balanced(conn, row.posted_journal_entry_id)
+
+
+def test_sign_mismatch_inflow_labeled_cogs_purchase_never_posts(iprototype):
+    """(b) The real journal_entry_id=917 / review_queue.id=321 case: a
+    +Rp 50,000 inflow manually labeled 'cogs_purchase' (inherently an
+    outflow) must NOT post — no journal entry created, no direction
+    flipped — and must stay flagged, visible, in needs_review with a reason.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 8, 12), raw_description="Setoran tunai", amount_idr=Decimal("50000"), occurrence_index=1)
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="cogs_purchase", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_sign_mismatch == 1
+    assert conn.execute(select(journal_entries.c.id)).all() == []  # nothing posted, no flipped-direction entry
+
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status, review_queue.c.category, review_queue.c.sign_mismatch_reason)
+        .where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is None
+    assert row.match_status == "needs_review"
+    assert row.category == "cogs_purchase"  # left as-is for the human to see/fix, not silently cleared
+    assert row.sign_mismatch_reason is not None
+    assert "cogs_purchase" in row.sign_mismatch_reason
+
+    # A human re-checks and re-classifies it as its actual real direction
+    # (a genuine inflow — 'owners_contribution') — the next sync then posts
+    # it correctly, and the stale mismatch flag is cleared.
+    conn.execute(
+        update(review_queue)
+        .values(category="owners_contribution")
+        .where(review_queue.c.id == row_id)
+    )
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 1
+    row2 = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.sign_mismatch_reason).where(review_queue.c.id == row_id)
+    ).one()
+    assert row2.posted_at is not None
+    assert row2.sign_mismatch_reason is None
+
+
+def test_sign_mismatch_outflow_labeled_owners_contribution_never_posts(iprototype):
+    """Same guard, opposite direction: an outflow can never be a genuine
+    owner's contribution (money coming IN from the owner).
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 8, 15), raw_description="Ambiguous outflow", amount_idr=Decimal("-750000"), occurrence_index=1)
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="owners_contribution", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_sign_mismatch == 1
+    assert conn.execute(select(journal_entries.c.id)).all() == []
+
+
+def test_sign_mismatch_auto_matched_row_reverts_to_needs_review(iprototype):
+    """An auto-matched row (rule e, which is direction-blind) whose category
+    disagrees with the line's actual sign must not silently post — and must
+    be pulled OUT of 'matched' back into 'needs_review' so a human actually
+    sees it, not left showing as a false 'Matched' with a phantom problem.
+    """
+    conn, topo = iprototype
+    conn.execute(
+        bank_keyword_rules.insert().values(
+            keyword="BIAYA ADM", category="operating_expense", expense_account_type_code="GENERAL_OPEX"
+        )
+    )
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            # A genuine inflow whose description happens to contain the
+            # 'BIAYA ADM' keyword (e.g. a reversal/refund of a prior fee) —
+            # rule (e) is a pure substring match with no sign awareness, so
+            # it fires and marks this 'matched'/'operating_expense'.
+            RawLine(transaction_date=_dt.date(2026, 8, 20), raw_description="BIAYA ADM reversal credit", amount_idr=Decimal("10000"), occurrence_index=1)
+        ],
+    )
+    run_auto_match(conn)
+    row = conn.execute(select(review_queue.c.match_status, review_queue.c.category)).one()
+    assert row.match_status == "matched"
+    assert row.category == "operating_expense"
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_sign_mismatch == 1
+    assert conn.execute(select(journal_entries.c.id)).all() == []
+
+    row2 = conn.execute(
+        select(review_queue.c.match_status, review_queue.c.sign_mismatch_reason, review_queue.c.posted_at)
+    ).one()
+    assert row2.match_status == "needs_review"  # pulled out of 'matched'
+    assert row2.posted_at is None
+    assert row2.sign_mismatch_reason is not None
+
+
+def test_regression_correctly_signed_owners_draw_still_posts(iprototype):
+    """(a) No regression, another directional category: a genuine outflow
+    labeled owners_draw still posts exactly as before.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 5, 3), raw_description="Owner withdrawal", amount_idr=Decimal("-2000000"), occurrence_index=1)
+        ],
+    )
+    draw_row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="owners_draw", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == draw_row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    assert post_result.skipped_sign_mismatch == 0
+
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.sign_mismatch_reason).where(review_queue.c.id == draw_row_id)
+    ).one()
+    assert row.posted_at is not None
+    assert row.sign_mismatch_reason is None
+
+
+def test_sign_mismatch_consignment_payout_and_contract_labor_never_post(iprototype):
+    """Regression coverage for the two other categories the brief explicitly
+    named (consignment_payout, contract_labor) — both outflow-only, both
+    must reject a mislabeled inflow the same way cogs_purchase does above.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 8, 4), raw_description="Inbound credit A", amount_idr=Decimal("120000"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 8, 5), raw_description="Inbound credit B", amount_idr=Decimal("340000"), occurrence_index=1),
+        ],
+    )
+    rows = conn.execute(select(review_queue.c.id, review_queue.c.raw_description).order_by(review_queue.c.id)).all()
+    consignment_row_id = rows[0].id
+    contract_labor_row_id = rows[1].id
+    conn.execute(
+        update(review_queue)
+        .values(category="consignment_payout", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == consignment_row_id)
+    )
+    conn.execute(
+        update(review_queue)
+        .values(category="contract_labor", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == contract_labor_row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_sign_mismatch == 2
+    assert conn.execute(select(journal_entries.c.id)).all() == []

@@ -313,6 +313,26 @@ review_queue = Table(
     # accepted for the rest of review_queue's posting-idempotency columns;
     # not a new gap this fix introduces.
     Column("paired_review_queue_id", Integer, ForeignKey("review_queue.id", use_alter=True, name="fk_review_queue_paired_review_queue_id"), nullable=True),
+    # Fix (2026-09-05, QA-found gap): every expense/purchase/payout/draw
+    # category is an inherently-directional real-world event (always an
+    # outflow), and 'owners_contribution'/'revenue_settlement' are always an
+    # inflow — but before this fix, ingestion.matching._post_one_row applied
+    # abs(row.amount_idr) unconditionally for those categories, with no check
+    # that the raw signed amount actually agreed with the direction the
+    # category implies. A real +Rp 50,000 INFLOW manually labeled
+    # 'cogs_purchase' (inherently an outflow) posted with its direction
+    # silently flipped to look like an outflow — see journal_entry_id=917 /
+    # review_queue.id=321, the real historical case this fix was found from.
+    # ``ingestion.matching.post_pending_rows`` now checks sign-vs-category
+    # BEFORE posting for every directional category; a genuine mismatch is
+    # never posted (stays/returns to needs_review) and the reason is
+    # recorded here for a human to see in the Review Queue UI and
+    # re-classify correctly. NULL for every row that never hit a mismatch —
+    # the overwhelming majority. Deliberately NOT cleared automatically on a
+    # later successful post from a DIFFERENT category (see
+    # ingestion/matching.py's post_pending_rows) so a genuinely already-fixed
+    # row doesn't carry stale text: it IS cleared at that point.
+    Column("sign_mismatch_reason", Text, nullable=True),
     Column("labeled_at", DateTime(timezone=True), nullable=True),
     Column("posted_at", DateTime(timezone=True), nullable=True),
     Column("posted_journal_entry_id", Integer, ForeignKey("journal_entries.id"), nullable=True),

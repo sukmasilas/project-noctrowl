@@ -457,6 +457,29 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
         ),
     ),
     MigrationStep(
+        id="review_queue_sign_mismatch_reason",
+        description=(
+            "review_queue.sign_mismatch_reason (nullable) — 2026-09-05 Fix, "
+            "backs ingestion.matching.post_pending_rows' new sign-vs-category "
+            "directional guard (a directional category — cogs_purchase/"
+            "operating_expense/contract_labor/consignment_payout/owners_draw/"
+            "owners_contribution/revenue_settlement — paired with a raw "
+            "amount_idr of the wrong sign is never posted; the reason is "
+            "recorded here instead, for a human to see and re-classify). "
+            "Found against a real historical bad entry, journal_entry_id=917 "
+            "/ review_queue.id=321 — see ingestion/schema.py's inline note."
+        ),
+        table="review_queue",
+        already_applied_check=(
+            "SELECT 1 FROM information_schema.columns WHERE table_name="
+            "'review_queue' AND column_name='sign_mismatch_reason'"
+        ),
+        apply_sql=(
+            "ALTER TABLE review_queue ADD COLUMN IF NOT EXISTS "
+            "sign_mismatch_reason TEXT",
+        ),
+    ),
+    MigrationStep(
         id="bank_keyword_rules_category_check_widen",
         description=(
             "ck_bank_keyword_rules_category widened to add 'interest_income' "

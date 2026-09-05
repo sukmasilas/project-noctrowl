@@ -54,10 +54,16 @@
         <td>{{ row.category or '—' }}</td>
         <td>
           {% if row.posted_at %}<span class="badge green">✓ {{ row.posted_at.strftime('%Y-%m-%d %H:%M') }}</span>
+          {% elif row.sign_mismatch_reason %}<span class="badge red" title="{{ row.sign_mismatch_reason }}">⚠ Not posted — sign/category mismatch</span>
           {% elif row.labeled_at %}<span class="small">Queued for next sync</span>
           {% else %}—{% endif %}
         </td>
       </tr>
+      {% if row.sign_mismatch_reason and not row.posted_at %}
+      <tr class="figure-row">
+        <td colspan="7"><span class="small">{{ row.sign_mismatch_reason }}</span></td>
+      </tr>
+      {% endif %}
       {% if row.match_status == 'needs_review' and not row.posted_at %}
       <tr id="rq-editor-{{ row.id }}" class="inline-editor hidden-row">
         <td colspan="7">
