@@ -34,6 +34,13 @@ CATEGORY_OPTIONS = [
     # netting it against INTEREST_INCOME as CLAUDE.md's Chart of accounts
     # section requires.
     ("interest_income", "Interest Income"),
+    # Added 2026-09-05 alongside the new CONTRACT_LABOR operating-expense
+    # account (see ledger/chart_of_accounts.py and CLAUDE.md) — same reason
+    # 'interest_income' needed its own category above: a plain
+    # 'operating_expense' label always resolves to GENERAL_OPEX (see
+    # ingestion.matching._post_one_row), which would misclassify a real
+    # contract-labor cost instead of posting it to its own dedicated line.
+    ("contract_labor", "Contract Labor"),
     ("other", "Other"),
 ]
 

@@ -133,7 +133,7 @@ _DRILLDOWN_CODES = {
     "consignment_commission": (["CONSIGNMENT_COMMISSION_INCOME"], False),
     "cogs": (["COGS"], False),
     "opex": (
-        ["EBAY_SELLING_FEES", "PAYOUT_FEE", "PAYROLL", "GENERAL_OPEX", "SHIPPING_COST"],
+        ["EBAY_SELLING_FEES", "PAYOUT_FEE", "PAYROLL", "GENERAL_OPEX", "SHIPPING_COST", "CONTRACT_LABOR"],
         False,
     ),
     "realized_fx": (["REALIZED_FX"], False),
@@ -159,6 +159,7 @@ _DRILLDOWN_CODES = {
             "PAYROLL",
             "GENERAL_OPEX",
             "SHIPPING_COST",
+            "CONTRACT_LABOR",
             "REALIZED_FX",
             "UNREALIZED_FX",
             "INTEREST_INCOME",

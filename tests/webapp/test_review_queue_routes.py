@@ -76,3 +76,35 @@ def test_review_queue_page_renders_with_empty_state(logged_in_client, wtopology)
     resp = logged_in_client.get("/review-queue/?period=2026-07")
     assert resp.status_code == 200
     assert b"No bank statement uploaded yet" in resp.data
+
+
+def test_contract_labor_is_a_selectable_category(logged_in_client, wtopology):
+    """2026-09-05: the new CONTRACT_LABOR operating-expense account (see
+    ledger/chart_of_accounts.py) must be selectable from the Review Queue
+    UI, same interaction pattern as every other category — a human can pick
+    it directly rather than it always falling back to Operating Expense/
+    GENERAL_OPEX (see ingestion.matching._post_one_row's dedicated branch).
+    """
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_wallet_group", period_month=PERIOD, wallet_group_id=topo["wallet_group_id"])
+    row_id = make_review_queue_row(
+        conn, source_document_id=src_id, transaction_date=DAY, wallet_group_id=topo["wallet_group_id"]
+    )
+    conn.commit()
+
+    # The option is actually present in the rendered page, not just defined
+    # in Python — a real functional check, not just a code-reading one.
+    index_resp = logged_in_client.get(f"/review-queue/?period={PERIOD.isoformat()[:7]}")
+    assert index_resp.status_code == 200
+    assert b"Contract Labor" in index_resp.data
+
+    resp = logged_in_client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "contract_labor", "consignor_item_ref": "", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "contract_labor"
+    assert row.labeled_at is not None
+    assert row.posted_at is None  # saving a label never posts by itself

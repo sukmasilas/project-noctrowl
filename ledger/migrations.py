@@ -349,10 +349,12 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
         description=(
             "ck_review_queue_category widened to its current full value set "
             "(originally missing 'internal_transfer_landing', added "
-            "2026-09-01, and 'interest_income', added 2026-09-02) — brings "
-            "the constraint to whatever the LATEST code defines in one step, "
-            "regardless of which of those two historical widenings a given "
-            "database happens to be missing."
+            "2026-09-01; 'interest_income', added 2026-09-02; and "
+            "'contract_labor', added 2026-09-05 for the new CONTRACT_LABOR "
+            "expense account — see ingestion/matching.py's _post_one_row) — "
+            "brings the constraint to whatever the LATEST code defines in "
+            "one step, regardless of which of those historical widenings a "
+            "given database happens to be missing."
         ),
         table="review_queue",
         apply_sql=(
@@ -361,7 +363,7 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "(category IS NULL OR category IN ('revenue_settlement','cogs_purchase',"
             "'consignment_payout','internal_transfer','internal_transfer_landing',"
             "'operating_expense','owners_draw','owners_contribution',"
-            "'interest_income','other'))",
+            "'interest_income','contract_labor','other'))",
         ),
     ),
     MigrationStep(
@@ -386,6 +388,50 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "'opening_balance'))",
         ),
     ),
+    MigrationStep(
+        id="account_types_contract_labor",
+        description=(
+            "account_types row for CONTRACT_LABOR (2026-09-05) — a new "
+            "Operating Expenses line for the outside IT contractor paid "
+            "per-listing to create eBay listings (see ledger/chart_of_"
+            "accounts.py's inline note). account_types.code has a UNIQUE "
+            "constraint and ledger.seed.seed_account_types is a plain "
+            "INSERT with no upsert guard, so a brand-new account_type added "
+            "to the Python catalog after a database was already seeded "
+            "needs an explicit, idempotent INSERT here — the same class of "
+            "gap this whole module exists to close for columns/indexes/"
+            "CHECK constraints, just for one seed-catalog row instead. Uses "
+            "INSERT ... WHERE NOT EXISTS (rather than ON CONFLICT DO "
+            "NOTHING) so it works even if a target database's account_types "
+            "table predates the UNIQUE constraint on code for some reason."
+        ),
+        table="account_types",
+        already_applied_check=(
+            "SELECT 1 FROM account_types WHERE code = 'CONTRACT_LABOR'"
+        ),
+        apply_sql=(
+            "INSERT INTO account_types (code, name, statement_section, "
+            "normal_balance, scope_kind, is_contra) "
+            "SELECT 'CONTRACT_LABOR', 'Contract Labor', 'opex', 'debit', "
+            "'consolidated', false "
+            "WHERE NOT EXISTS (SELECT 1 FROM account_types WHERE code = "
+            "'CONTRACT_LABOR')",
+        ),
+    ),
+    # NOTE: this step only creates the account_types CATALOG row (the GL
+    # line item concept). The actual postable `accounts` row (the
+    # consolidated singleton instance CONTRACT_LABOR needs before anything
+    # can post to it) is deliberately NOT a MIGRATIONS step — unlike
+    # account_types/CHECK-constraint/column changes, `accounts` rows are
+    # normal SEED DATA (ledger.seed._consolidated_singletons's job, via
+    # ledger.entities.create_account, which is a plain INSERT with no
+    # ON CONFLICT guard). Inserting it here too would fire automatically
+    # inside ledger.schema.create_schema()'s own run_migrations() call on
+    # EVERY fresh test schema, colliding with that plain INSERT the moment
+    # a test's seed_prototype_topology/seed_full_topology tries to create
+    # the exact same consolidated singleton. See scripts/
+    # ensure_contract_labor_account.py for the one-off, idempotent
+    # real-database equivalent instead.
     MigrationStep(
         id="opening_balances_account_id_unique_index",
         description=(

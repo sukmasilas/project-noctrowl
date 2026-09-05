@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
 from ledger.chart_of_accounts import ACCOUNT_TYPES, CATEGORIES, CONSIGNOR_PAYOUT_TIERS
@@ -25,9 +26,27 @@ from ledger.schema import account_types, categories, consignor_payout_tiers
 
 
 def seed_account_types(conn: Connection) -> None:
+    """Insert every row in ACCOUNT_TYPES, skipping any ``code`` that's
+    already present (ON CONFLICT DO NOTHING on the table's unique ``code``
+    constraint — same pattern already used by ingestion/ebay_csv.py and
+    ingestion/matching.py for their own idempotent inserts).
+
+    This guard exists specifically so this function stays safe to call on a
+    freshly-created schema regardless of whether ledger.migrations.
+    run_migrations() (called automatically at the end of
+    ledger.schema.create_schema(), BEFORE this function ever runs) has
+    already seeded a brand-new account_type row added after some earlier
+    account_types were only ever seeded by hand against the real database
+    (e.g. CONTRACT_LABOR, added 2026-09-05 — see ledger/migrations.py's
+    account_types_contract_labor step). Without this guard, a fresh test
+    schema would hit a duplicate-key IntegrityError here the moment ANY
+    such migration-seeded row exists, since this function was previously a
+    plain unconditional INSERT.
+    """
     for code, name, statement_section, normal_balance, scope_kind, is_contra in ACCOUNT_TYPES:
         conn.execute(
-            account_types.insert().values(
+            pg_insert(account_types)
+            .values(
                 code=code,
                 name=name,
                 statement_section=statement_section,
@@ -35,6 +54,7 @@ def seed_account_types(conn: Connection) -> None:
                 scope_kind=scope_kind,
                 is_contra=is_contra,
             )
+            .on_conflict_do_nothing(index_elements=[account_types.c.code])
         )
 
 

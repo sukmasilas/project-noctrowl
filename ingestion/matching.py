@@ -678,6 +678,23 @@ def _post_one_row(conn: Connection, row) -> int | None:
             **_usd_reference_kwargs(row),
         )
 
+    if row.category == "contract_labor":
+        # A human reviewing a bank/invoice line selected "Contract Labor"
+        # directly (see webapp/review_queue_bp.py's CATEGORY_OPTIONS) —
+        # posts straight to its own dedicated CONTRACT_LABOR account via the
+        # same generic post_operating_expense used for cogs_purchase/
+        # operating_expense/other above, never GENERAL_OPEX's default.
+        paying_code, paying_kwargs = _paying_account_for_row(row)
+        return posting.post_operating_expense(
+            conn,
+            entry_date=entry_date,
+            expense_account_type_code="CONTRACT_LABOR",
+            amount_idr=abs(row.amount_idr),
+            paying_account_type_code=paying_code,
+            **paying_kwargs,
+            **_usd_reference_kwargs(row),
+        )
+
     if row.category == "interest_income":
         # BUNGA (credit inflow) / PAJAK BUNGA (debit outflow) — see
         # ledger.posting.post_interest_income_line's docstring. Sign-aware,

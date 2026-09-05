@@ -22,6 +22,7 @@ from ingestion.schema import bank_keyword_rules, ebay_expected_payouts, invoice_
 from ledger import posting
 from ledger.entities import get_account_id
 from ledger.schema import consignment_sales, journal_entries, journal_lines
+from tests.helpers import assert_balanced, lines_by_code
 from tests.ingestion.conftest import make_source_document
 
 
@@ -1181,6 +1182,64 @@ def test_never_posts_unlabeled_needs_review_row(iprototype):
     conn.execute(update(review_queue).values(category="operating_expense", labeled_at=_dt.datetime.now(_dt.timezone.utc)).where(review_queue.c.id == row_id))
     post_result2 = post_pending_rows(conn)
     assert post_result2.posted == 1
+
+
+# ---------------------------------------------------------------------------
+# 'contract_labor' — a human-selected review-queue category (2026-09-05,
+# added alongside the new CONTRACT_LABOR operating-expense account for the
+# outside IT contractor paid per-listing to create eBay listings — see
+# ledger/chart_of_accounts.py and CLAUDE.md). No real sample invoice/bank
+# line exists yet for this cost (forward-looking capacity only, per the
+# brief), so there's no keyword-rule/rule-(e) auto-match coverage here — only
+# the manual-label -> post path a human actually uses, mirroring
+# test_never_posts_unlabeled_needs_review_row's pattern above.
+# ---------------------------------------------------------------------------
+
+
+def test_manually_labeled_contract_labor_row_posts_to_its_own_account_not_general_opex(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 15),
+                raw_description="Transfer to IT contractor - listing work",
+                amount_idr=Decimal("-4500000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    run_auto_match(conn)
+    row = conn.execute(select(review_queue.c.id, review_queue.c.category)).one()
+    assert row.category is None  # no keyword rule for this yet — correctly Needs Review
+
+    conn.execute(
+        update(review_queue)
+        .values(category="contract_labor", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row.id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row.id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+
+    contract_labor_id = get_account_id(conn, "CONTRACT_LABOR")
+    assert contract_labor_id is not None  # the account instance genuinely exists (not just the catalog row)
+    assert "CONTRACT_LABOR" in lines
+    assert lines["CONTRACT_LABOR"][0].debit_amount_idr == Decimal("4500000")
+    assert "GENERAL_OPEX" not in lines  # must NOT fall back to the generic default
+    assert lines["BCA_MAIN"][0].credit_amount_idr == Decimal("4500000")
+    assert_balanced(conn, entry_id)
+
+    # Idempotent: a second sync run must not double-post the same row.
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 0
 
 
 # ---------------------------------------------------------------------------

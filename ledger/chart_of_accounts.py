@@ -59,6 +59,15 @@ ACCOUNT_TYPES = [
     ("PAYROLL", "Payroll", "opex", "debit", "consolidated", False),
     ("GENERAL_OPEX", "General Operating Expenses", "opex", "debit", "consolidated", False),
     ("SHIPPING_COST", "Shipping Cost", "opex", "debit", "consolidated", False),
+    # Added 2026-09-05 — the outside IT contractor paid per-listing to
+    # create eBay listings is a real, recurring labor/service cost, but paid
+    # to a contractor rather than a salaried employee, so it doesn't belong
+    # under PAYROLL. Not COGS either (SAK Indonesia / SAK EMKM both treat
+    # listing/promotional-type activity as a period expense, never
+    # inventory-preparation cost — the same reasoning that already keeps
+    # eBay's Promoted Listings fee out of COGS). Given its own line for
+    # visibility, same reasoning as SHIPPING_COST/INTEREST_INCOME above.
+    ("CONTRACT_LABOR", "Contract Labor", "opex", "debit", "consolidated", False),
     # Other Income / Expense
     ("REALIZED_FX", "Realized FX Gain/Loss", "other_income_expense", "credit", "consolidated", False),
     ("UNREALIZED_FX", "Unrealized FX Gain/Loss", "other_income_expense", "credit", "consolidated", False),
