@@ -33,6 +33,7 @@ def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
     from webapp.auth import bp as auth_bp
     from webapp.data_quality_bp import bp as data_quality_bp
     from webapp.documents_bp import bp as documents_bp
+    from webapp.general_ledger_bp import bp as general_ledger_bp
     from webapp.report_extras import register_template_filters
     from webapp.reports_bp import bp as reports_bp
     from webapp.review_queue_bp import bp as review_queue_bp
@@ -46,6 +47,7 @@ def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
     app.register_blueprint(reports_bp)
     app.register_blueprint(data_quality_bp)
     app.register_blueprint(wallet_bp)
+    app.register_blueprint(general_ledger_bp)
 
     register_template_filters(app)
 

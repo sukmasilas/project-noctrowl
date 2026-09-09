@@ -12,6 +12,7 @@
     <a class="nav-item {% if request.endpoint == 'documents.index' %}active{% endif %}" href="{{ url_for('documents.index') }}">Documents</a>
     <a class="nav-item {% if request.endpoint == 'review_queue.index' %}active{% endif %}" href="{{ url_for('review_queue.index') }}">Review Queue</a>
     <a class="nav-item {% if request.endpoint == 'wallet.index' %}active{% endif %}" href="{{ url_for('wallet.index') }}">Wallet</a>
+    <a class="nav-item {% if request.endpoint == 'general_ledger.index' %}active{% endif %}" href="{{ url_for('general_ledger.index') }}">General Ledger</a>
     <a class="nav-item {% if request.endpoint == 'data_quality.index' %}active{% endif %}" href="{{ url_for('data_quality.index') }}">Data Quality</a>
     <div class="nav-item {% if request.blueprint == 'reports' %}active{% endif %}">Reports</div>
     {# Revenue link removed from nav 2026-09-09 (parked, not deleted — see
