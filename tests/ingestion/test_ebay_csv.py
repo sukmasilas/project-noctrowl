@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from ingestion.ebay_csv import parse_ebay_csv_rows, process_transaction_report
-from ingestion.schema import ebay_expected_payouts
+from ingestion.schema import ebay_csv_transactions, ebay_expected_payouts
 from ledger.schema import consignment_sales, journal_entries, journal_lines
 from tests.ingestion.conftest import make_source_document
 
@@ -97,6 +97,176 @@ def test_real_sample_end_to_end_ingest_no_crash_and_expected_counts(iprototype):
     assert all(amt > 0 for _pid, amt in payouts)
 
 
+def test_real_sample_stages_one_ebay_csv_transactions_row_per_raw_csv_row(iprototype):
+    """Every one of the 202 raw CSV rows (see test_parse_locates_header_
+    and_returns_all_data_rows) gets its own ebay_csv_transactions staging
+    record — including Hold rows (never posted) and every raw row inside a
+    merged multi-item Order group (which share one journal_entry_id) — so
+    the Wallet screen can browse eBay Wallet activity at the same level of
+    row-level detail as the other three wallets.
+    """
+    conn, topo = iprototype
+    _, rows = _load_real_sample_rows()
+    src_id = make_source_document(
+        conn,
+        document_type="ebay_sales_csv",
+        period_month=_dt.date(2026, 7, 1),
+        ebay_account_id=topo["ebay_account_id"],
+    )
+
+    process_transaction_report(conn, ebay_account_id=topo["ebay_account_id"], source_document_id=src_id, rows=rows)
+
+    staged = conn.execute(
+        select(ebay_csv_transactions).where(ebay_csv_transactions.c.source_document_id == src_id)
+    ).all()
+    assert len(staged) == 202
+
+    # Every row_index 0..201 appears exactly once — no row silently dropped,
+    # none double-staged.
+    assert sorted(r.row_index for r in staged) == list(range(202))
+
+    by_type: dict[str, list] = {}
+    for r in staged:
+        by_type.setdefault(r.row_type, []).append(r)
+    assert {t: len(rs) for t, rs in by_type.items()} == {
+        "Order": 100,
+        "Other fee": 83,
+        "Refund": 11,
+        "Hold": 4,
+        "Payout": 4,
+    }
+
+    # Order/Refund/Other fee rows that actually posted carry a
+    # journal_entry_id; Hold and Payout rows never do (Holds are always
+    # skipped; Payout rows only ever populate ebay_expected_payouts).
+    assert all(r.journal_entry_id is not None for r in by_type["Refund"])
+    assert all(r.journal_entry_id is not None for r in by_type["Other fee"])
+    assert all(r.journal_entry_id is None for r in by_type["Hold"])
+    assert all(r.journal_entry_id is None for r in by_type["Payout"])
+    # 91 distinct posted orders across 100 raw Order rows (13 rows merge
+    # into 4 multi-item orders) -> 91 distinct journal_entry_ids among the
+    # 100 staged Order rows.
+    order_entry_ids = {r.journal_entry_id for r in by_type["Order"]}
+    assert len(order_entry_ids) == 91
+    assert None not in order_entry_ids
+
+    # Re-running the same document is a no-op for staging (idempotent on
+    # (source_document_id, row_index), same as the rest of this pipeline's
+    # idempotency guards) — never doubles the row count.
+    process_transaction_report(conn, ebay_account_id=topo["ebay_account_id"], source_document_id=src_id, rows=rows)
+    staged_again = conn.execute(
+        select(ebay_csv_transactions).where(ebay_csv_transactions.c.source_document_id == src_id)
+    ).all()
+    assert len(staged_again) == 202
+
+
+def test_staging_still_populates_when_rows_were_already_posted_on_a_prior_run(iprototype):
+    """QA BUG FIX regression test, 2026-09-09: reproduces the exact real-
+    world failure mode a freshly-created test schema can never exercise —
+    a database that already has months of prior postings (real
+    ebay_csv_posted_transactions / ebay_expected_payouts rows) from BEFORE
+    ebay_csv_transactions existed, then gets re-synced. Every one of the
+    four idempotency early-return paths (Order, Refund, Other fee, Payout)
+    used to discard the id ``_already_posted_ebay_csv_row``/the payout
+    existence check found and return WITHOUT staging — leaving
+    ebay_csv_transactions silently empty for every already-processed month,
+    even though the real posted data was completely correct. Confirmed by
+    QA against the real ``noctrowl`` database: 0 of 198 already-posted rows
+    got staged on a re-run before this fix.
+    """
+    conn, topo = iprototype
+    _, rows = _load_real_sample_rows()
+    src_id = make_source_document(
+        conn,
+        document_type="ebay_sales_csv",
+        period_month=_dt.date(2026, 7, 1),
+        ebay_account_id=topo["ebay_account_id"],
+    )
+
+    # First run: posts everything normally (this also happens to populate
+    # ebay_csv_transactions, but we deliberately wipe it below to simulate
+    # "this table didn't exist yet when these months were first processed"
+    # — the real ebay_csv_posted_transactions / ebay_expected_payouts rows
+    # are what's left over from that, exactly like the real database.
+    process_transaction_report(conn, ebay_account_id=topo["ebay_account_id"], source_document_id=src_id, rows=rows)
+    conn.execute(ebay_csv_transactions.delete())
+    assert conn.execute(select(ebay_csv_transactions.c.id)).all() == []
+
+    # Second run against the SAME already-posted data (nothing new posts —
+    # every row hits an idempotency early-return path) must still stage
+    # all 202 rows, correctly linked back to what already posted.
+    result = process_transaction_report(
+        conn, ebay_account_id=topo["ebay_account_id"], source_document_id=src_id, rows=rows
+    )
+    assert result.orders_posted == 0
+    assert result.refunds_posted == 0
+    assert result.other_fees_posted == 0
+    assert result.payouts_recorded == 0
+
+    staged = conn.execute(select(ebay_csv_transactions)).all()
+    assert len(staged) == 202
+    by_type: dict[str, list] = {}
+    for r in staged:
+        by_type.setdefault(r.row_type, []).append(r)
+    assert {t: len(rs) for t, rs in by_type.items()} == {
+        "Order": 100,
+        "Other fee": 83,
+        "Refund": 11,
+        "Hold": 4,
+        "Payout": 4,
+    }
+    assert all(r.journal_entry_id is not None for r in by_type["Refund"])
+    assert all(r.journal_entry_id is not None for r in by_type["Other fee"])
+    assert len({r.journal_entry_id for r in by_type["Order"]} - {None}) == 91
+    assert all(r.journal_entry_id is None for r in by_type["Hold"])
+    assert all(r.journal_entry_id is None for r in by_type["Payout"])
+
+
+def test_reconciliation_mismatch_stages_existing_review_queue_id_on_rerun(iprototype):
+    """Same fix shape, smaller-scope sibling bug QA flagged: when
+    ``_make_review_queue_row`` returns None (a row for this external_ref
+    already exists), the reconciliation-mismatch branch used to stage
+    review_queue_id=None instead of looking up and using the real id.
+    """
+    conn, topo = iprototype
+    header, _ = _load_real_sample_rows()
+    row = {col: "--" for col in header}
+    row.update(
+        {
+            "Transaction creation date": "Jul 15, 2026",
+            "Type": "Order",
+            "Order number": "88-88888-88888",
+            "Transaction ID": "TXN-MISMATCH-1",
+            "Item title": "Mismatched Item",
+            "Item subtotal": "50",
+            "Shipping and handling": "5",
+            "Gross transaction amount": "999",  # doesn't reconcile with subtotal+shipping
+            "Net amount": "900",
+            "Transaction currency": "USD",
+        }
+    )
+    src_id = make_source_document(
+        conn,
+        document_type="ebay_sales_csv",
+        period_month=_dt.date(2026, 7, 1),
+        ebay_account_id=topo["ebay_account_id"],
+    )
+
+    process_transaction_report(conn, ebay_account_id=topo["ebay_account_id"], source_document_id=src_id, rows=[row])
+    first_staged = conn.execute(select(ebay_csv_transactions)).one()
+    assert first_staged.review_queue_id is not None
+    real_rq_id = first_staged.review_queue_id
+
+    # Wipe staging only (simulating the real-world "table didn't exist yet"
+    # gap) and reprocess — the review_queue row from the first run still
+    # exists (external_ref conflict), so _make_review_queue_row returns
+    # None on this second pass; the fix must look up and use the real id.
+    conn.execute(ebay_csv_transactions.delete())
+    process_transaction_report(conn, ebay_account_id=topo["ebay_account_id"], source_document_id=src_id, rows=[row])
+    second_staged = conn.execute(select(ebay_csv_transactions)).one()
+    assert second_staged.review_queue_id == real_rq_id
+
+
 def test_reprocessing_same_payout_rows_is_idempotent(iprototype):
     """Re-parsing the same CSV (e.g. a re-sync) must never create duplicate
     ebay_expected_payouts rows for the same (ebay_account_id, payout_id).
@@ -115,15 +285,15 @@ def test_reprocessing_same_payout_rows_is_idempotent(iprototype):
 
     r1 = EbayIngestResult()
     r2 = EbayIngestResult()
-    for row in payout_rows:
+    for i, row in enumerate(payout_rows):
         entry_date = _dt.date(2026, 7, 28)  # arbitrary, not exercised in this narrow test
         _process_payout_row(
-            conn, row=row, ebay_account_id=topo["ebay_account_id"], source_document_id=src_id, entry_date=entry_date, result=r1
+            conn, row=row, row_index=i, ebay_account_id=topo["ebay_account_id"], source_document_id=src_id, entry_date=entry_date, result=r1
         )
-    for row in payout_rows:
+    for i, row in enumerate(payout_rows):
         entry_date = _dt.date(2026, 7, 28)
         _process_payout_row(
-            conn, row=row, ebay_account_id=topo["ebay_account_id"], source_document_id=src_id, entry_date=entry_date, result=r2
+            conn, row=row, row_index=i, ebay_account_id=topo["ebay_account_id"], source_document_id=src_id, entry_date=entry_date, result=r2
         )
 
     assert r1.payouts_recorded == 4
@@ -268,6 +438,16 @@ def test_consign_prefixed_order_creates_unconfirmed_consignment_sale_not_posted(
     assert cs.tier_rate_percent == Decimal("82.00")  # $100-2499.99 tier
     assert cs.confirmed_at is None
     assert cs.consignor_item_ref == "CONSIGN-SELLER42-001:99-99999-99999"
+
+    # The staged row links back to the unconfirmed consignment_sales row
+    # (not a journal_entry_id, since nothing posted yet) — see
+    # ingestion/schema.py's ebay_csv_transactions docstring.
+    staged = conn.execute(select(ebay_csv_transactions)).one()
+    assert staged.journal_entry_id is None
+    assert staged.review_queue_id is None
+    assert staged.consignment_sale_id is not None
+    assert staged.row_type == "Order"
+    assert staged.order_number == "99-99999-99999"
 
 
 def test_consign_order_requiring_manual_tier_contact_is_not_staged(iprototype):

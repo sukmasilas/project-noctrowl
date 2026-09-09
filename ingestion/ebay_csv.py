@@ -34,7 +34,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
 from ingestion.kurs_pajak import lookup_kurs_pajak_rate
-from ingestion.schema import ebay_csv_posted_transactions, ebay_expected_payouts, review_queue
+from ingestion.schema import (
+    ebay_csv_posted_transactions,
+    ebay_csv_transactions,
+    ebay_expected_payouts,
+    review_queue,
+)
 from ledger import posting
 from ledger.consignment import calc_tier_payout_usd, lookup_tier_rate
 from ledger.schema import consignment_sales
@@ -84,6 +89,22 @@ def _clean_ref(raw: str | None) -> str | None:
         return None
     raw = raw.strip()
     return None if raw in ("", "--") else raw
+
+
+def _raw_money_or_none(raw: str | None) -> Decimal | None:
+    """Like ``_parse_money`` but returns None (not Decimal('0')) for a
+    blank/'--' field — used only for the Wallet screen's raw-row staging
+    (``ebay_csv_transactions``), where "this field wasn't present on this
+    particular row" (e.g. Item subtotal on a multi-item order's totals row)
+    is meaningfully different from "this field was present and genuinely
+    zero." Never used anywhere posting/money-math reads from.
+    """
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if raw in ("", "--"):
+        return None
+    return _parse_money(raw)
 
 
 def _parse_ebay_date(raw: str) -> _dt.date:
@@ -188,6 +209,30 @@ def _make_review_queue_row(
     return row.id if row is not None else None
 
 
+def _lookup_review_queue_id_by_external_ref(conn: Connection, external_ref: str | None) -> int | None:
+    """Fallback lookup for when ``_make_review_queue_row`` returns None (a
+    row for this ``external_ref`` already existed from an earlier run, so
+    ON CONFLICT DO NOTHING skipped the insert) — so a staging call still
+    links to the REAL existing review_queue row instead of leaving
+    ``review_queue_id`` NULL (QA BUG FIX, 2026-09-09: same "look up and use
+    the existing id instead of discarding it" pattern as
+    ``_already_posted_ebay_csv_row``'s use below — the pattern was already
+    understood there but not applied here). Only meaningful when
+    ``external_ref`` is actually set — the ON CONFLICT target is a partial
+    index (WHERE external_ref IS NOT NULL), so a None external_ref can never
+    have caused the conflict in the first place.
+    """
+    if external_ref is None:
+        return None
+    row = conn.execute(
+        select(review_queue.c.id).where(
+            review_queue.c.source_type == "ebay_sales_csv",
+            review_queue.c.external_ref == external_ref,
+        )
+    ).first()
+    return row.id if row is not None else None
+
+
 def _already_posted_ebay_csv_row(conn: Connection, ebay_account_id: int, row_key: str) -> int | None:
     """Posting idempotency (BUG FIX, QA 2026-09) for the eBay CSV's DIRECT
     -posting rows (Order/Refund/Other fee — Payout rows already had their
@@ -214,22 +259,107 @@ def _mark_ebay_csv_row_posted(conn: Connection, ebay_account_id: int, row_key: s
     )
 
 
+def _stage_raw_row(
+    conn: Connection,
+    *,
+    ebay_account_id: int,
+    source_document_id: int,
+    row_index: int,
+    row: dict[str, str],
+    journal_entry_id: int | None = None,
+    review_queue_id: int | None = None,
+    consignment_sale_id: int | None = None,
+) -> None:
+    """Preserve one raw eBay CSV row in ``ebay_csv_transactions`` — see that
+    table's docstring in ingestion/schema.py. Idempotent on
+    (source_document_id, row_index): safe to call more than once for the
+    same row (e.g. on a re-sync, or if a caller stages defensively at more
+    than one exit point) — a later call never overwrites an earlier one's
+    outcome links, it just no-ops.
+    """
+    row_type = (row.get("Type") or "").strip()
+    entry_date = _parse_ebay_date(row["Transaction creation date"])
+    order_number = _clean_ref(row.get("Order number"))
+    description = _clean_ref(row.get("Item title")) or _clean_ref(row.get("Description"))
+    currency = (row.get("Transaction currency") or "").strip() or None
+    external_ref = _clean_ref(row.get("Transaction ID")) or _clean_ref(row.get("Reference ID"))
+
+    stmt = (
+        pg_insert(ebay_csv_transactions)
+        .values(
+            ebay_account_id=ebay_account_id,
+            source_document_id=source_document_id,
+            row_index=row_index,
+            row_type=row_type,
+            transaction_date=entry_date,
+            order_number=order_number,
+            description=description,
+            amount_gross_usd=_raw_money_or_none(row.get("Gross transaction amount")),
+            amount_net_usd=_raw_money_or_none(row.get("Net amount")),
+            currency=currency,
+            external_ref=external_ref,
+            journal_entry_id=journal_entry_id,
+            review_queue_id=review_queue_id,
+            consignment_sale_id=consignment_sale_id,
+        )
+        .on_conflict_do_nothing(
+            index_elements=[ebay_csv_transactions.c.source_document_id, ebay_csv_transactions.c.row_index]
+        )
+    )
+    conn.execute(stmt)
+
+
+def _stage_raw_rows(
+    conn: Connection,
+    *,
+    ebay_account_id: int,
+    source_document_id: int,
+    indexed_rows: list[tuple[int, dict[str, str]]],
+    journal_entry_id: int | None = None,
+    review_queue_id: int | None = None,
+    consignment_sale_id: int | None = None,
+) -> None:
+    """Stage every (row_index, row) pair in ``indexed_rows`` with the SAME
+    outcome links — used for a merged multi-row Order group, where every raw
+    row in the group shares the group's single eventual outcome (one posted
+    sale, one review_queue flag, or one staged consignment sale).
+    """
+    for row_index, row in indexed_rows:
+        _stage_raw_row(
+            conn,
+            ebay_account_id=ebay_account_id,
+            source_document_id=source_document_id,
+            row_index=row_index,
+            row=row,
+            journal_entry_id=journal_entry_id,
+            review_queue_id=review_queue_id,
+            consignment_sale_id=consignment_sale_id,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Order-row grouping/merging — see the module docstring's "real-sample
 # discovery" note above for why this exists.
 # ---------------------------------------------------------------------------
 
 
-def _group_order_rows(rows: list[dict[str, str]]) -> list[list[dict[str, str]]]:
-    """Group Type='Order' rows by Order number, preserving first-seen order."""
+def _group_order_rows(
+    indexed_rows: list[tuple[int, dict[str, str]]]
+) -> list[list[tuple[int, dict[str, str]]]]:
+    """Group Type='Order' rows by Order number, preserving first-seen order.
+
+    Operates on (row_index, row) pairs (not bare rows) so callers can stage
+    each raw row individually in ``ebay_csv_transactions`` after merging —
+    see that table's docstring in ingestion/schema.py.
+    """
     order_numbers_seen: list[str] = []
-    groups: dict[str, list[dict[str, str]]] = {}
-    for row in rows:
+    groups: dict[str, list[tuple[int, dict[str, str]]]] = {}
+    for idx, row in indexed_rows:
         key = row.get("Order number") or ""
         if key not in groups:
             groups[key] = []
             order_numbers_seen.append(key)
-        groups[key].append(row)
+        groups[key].append((idx, row))
     return [groups[k] for k in order_numbers_seen]
 
 
@@ -335,13 +465,26 @@ def _process_order_group(
     conn: Connection,
     *,
     group: list[dict[str, str]],
+    group_indices: list[int],
     ebay_account_id: int,
     source_document_id: int,
     result: EbayIngestResult,
 ) -> None:
+    indexed_group = list(zip(group_indices, group))
+
+    def _stage(**outcome) -> None:
+        _stage_raw_rows(
+            conn,
+            ebay_account_id=ebay_account_id,
+            source_document_id=source_document_id,
+            indexed_rows=indexed_group,
+            **outcome,
+        )
+
     merged = _merge_order_group(group)
     if isinstance(merged, str):
         result.parse_warnings.append(merged)
+        _stage()
         return
 
     order_number = merged.order_number
@@ -350,10 +493,19 @@ def _process_order_group(
 
     # Posting idempotency (BUG FIX, QA 2026-09) — see
     # ingestion/schema.py's ebay_csv_posted_transactions docstring. If this
-    # order already posted on a previous sync run, there is nothing left to
-    # do for it at all; skip before re-running any lookups/side effects.
+    # order already posted on a previous sync run, there's nothing left to
+    # POST for it — but on a real database (unlike a freshly-created test
+    # schema), THIS run may be the very first time ``ebay_csv_transactions``
+    # staging exists at all, so the raw rows still need staging now, linked
+    # to the journal_entry_id that already posted them (QA BUG FIX,
+    # 2026-09-09 — found staging was silently empty for every real
+    # already-processed month: this used to be a bare ``return``, discarding
+    # the id ``_already_posted_ebay_csv_row`` returns instead of passing it
+    # to ``_stage``).
     row_key = f"Order:{order_number}"
-    if _already_posted_ebay_csv_row(conn, ebay_account_id, row_key) is not None:
+    already_posted_entry_id = _already_posted_ebay_csv_row(conn, ebay_account_id, row_key)
+    if already_posted_entry_id is not None:
+        _stage(journal_entry_id=already_posted_entry_id)
         return
 
     if merged.currency != "USD":
@@ -361,6 +513,7 @@ def _process_order_group(
             f"Order {order_number!r} has non-USD Transaction currency ({merged.currency!r}) — "
             "not ingested, needs manual handling (no defined non-USD conversion path yet)."
         )
+        _stage()
         return
 
     if abs((merged.item_subtotal_sum + merged.shipping_sum) - merged.gross) > _RECONCILIATION_TOLERANCE_USD:
@@ -380,6 +533,12 @@ def _process_order_group(
         )
         if rqid is not None:
             result.review_queue_rows_created += 1
+        else:
+            # QA BUG FIX, 2026-09-09: rqid is None here whenever a
+            # review_queue row for this txn_id already existed (e.g. a
+            # re-run) — look it up instead of staging a NULL link.
+            rqid = _lookup_review_queue_id_by_external_ref(conn, txn_id)
+        _stage(review_queue_id=rqid)
         return
 
     if merged.charity != 0:
@@ -417,6 +576,7 @@ def _process_order_group(
                 f"CONSIGN- order {order_number!r} (item price {item_price_usd} USD) requires "
                 "manual tier contact — not staged as a consignment_sales row, needs manual entry."
             )
+            _stage()
             return
 
         consignor_item_ref = f"{merged.custom_labels[0]}:{order_number}"
@@ -428,10 +588,11 @@ def _process_order_group(
             select(consignment_sales.c.id).where(consignment_sales.c.consignor_item_ref == consignor_item_ref)
         ).first()
         if already_staged is not None:
+            _stage(consignment_sale_id=already_staged.id)
             return
 
         suggested_payout_usd = calc_tier_payout_usd(item_price_usd, tier.rate_percent)
-        posting.create_consignment_sale(
+        consignment_sale_id = posting.create_consignment_sale(
             conn,
             item_price_usd=item_price_usd,
             payout_model="tier",
@@ -445,6 +606,7 @@ def _process_order_group(
         # Deliberately NOT posted — milestone 2's two-phase flow requires an
         # explicit human confirmation before any consignment payout posts,
         # even one detected via the CONSIGN- SKU convention. See design §2.
+        _stage(consignment_sale_id=consignment_sale_id)
         return
 
     entry_id = posting.post_ebay_sale(
@@ -460,23 +622,37 @@ def _process_order_group(
     )
     _mark_ebay_csv_row_posted(conn, ebay_account_id, row_key, entry_id)
     result.orders_posted += 1
+    _stage(journal_entry_id=entry_id)
 
 
 def _process_refund_row(
     conn: Connection,
     *,
     row: dict[str, str],
+    row_index: int,
     ebay_account_id: int,
+    source_document_id: int,
     entry_date: _dt.date,
     order_number: str | None,
     currency: str,
     result: EbayIngestResult,
 ) -> None:
+    def _stage(**outcome) -> None:
+        _stage_raw_row(
+            conn,
+            ebay_account_id=ebay_account_id,
+            source_document_id=source_document_id,
+            row_index=row_index,
+            row=row,
+            **outcome,
+        )
+
     if currency != "USD":
         result.parse_warnings.append(
             f"Refund on order {order_number!r} has non-USD Transaction currency ({currency!r}) — "
             "not ingested, needs manual handling."
         )
+        _stage()
         return
 
     # Posting idempotency (BUG FIX, QA 2026-09) — Refund rows have a blank
@@ -486,7 +662,13 @@ def _process_refund_row(
     # way it is for a single Order group.
     reference_id = _clean_ref(row.get("Reference ID"))
     row_key = f"Refund:{reference_id or order_number}"
-    if _already_posted_ebay_csv_row(conn, ebay_account_id, row_key) is not None:
+    already_posted_entry_id = _already_posted_ebay_csv_row(conn, ebay_account_id, row_key)
+    if already_posted_entry_id is not None:
+        # QA BUG FIX, 2026-09-09: don't discard the id already-posted rows
+        # were found under — stage the raw row now, linked to it, so a
+        # database with prior real postings (not a fresh test schema) still
+        # ends up with a non-empty eBay Wallet register.
+        _stage(journal_entry_id=already_posted_entry_id)
         return
 
     gross = _parse_money(row.get("Gross transaction amount"))  # negative
@@ -521,25 +703,41 @@ def _process_refund_row(
             memo="Final Value Fee credited back on refund",
         )
 
+    _stage(journal_entry_id=entry_id)
+
 
 def _process_other_fee_row(
     conn: Connection,
     *,
     row: dict[str, str],
+    row_index: int,
     ebay_account_id: int,
+    source_document_id: int,
     entry_date: _dt.date,
     order_number: str | None,
     currency: str,
     result: EbayIngestResult,
 ) -> None:
+    def _stage(**outcome) -> None:
+        _stage_raw_row(
+            conn,
+            ebay_account_id=ebay_account_id,
+            source_document_id=source_document_id,
+            row_index=row_index,
+            row=row,
+            **outcome,
+        )
+
     if currency != "USD":
         result.parse_warnings.append(
             f"Other fee on order {order_number!r} has non-USD Transaction currency ({currency!r}) — "
             "not ingested, needs manual handling."
         )
+        _stage()
         return
     net_amount = _parse_money(row.get("Net amount"))
     if net_amount == 0:
+        _stage()
         return
 
     # Posting idempotency (BUG FIX, QA 2026-09) — same story as Refund rows:
@@ -547,7 +745,12 @@ def _process_other_fee_row(
     # "FEE-7250394870018_11") is unique and non-blank.
     reference_id = _clean_ref(row.get("Reference ID"))
     row_key = f"OtherFee:{reference_id or (order_number, entry_date.isoformat(), str(net_amount))}"
-    if _already_posted_ebay_csv_row(conn, ebay_account_id, row_key) is not None:
+    already_posted_entry_id = _already_posted_ebay_csv_row(conn, ebay_account_id, row_key)
+    if already_posted_entry_id is not None:
+        # QA BUG FIX, 2026-09-09: same fix as the Refund/Order idempotency
+        # branches — stage now, linked to the id already found, instead of
+        # discarding it via a bare return.
+        _stage(journal_entry_id=already_posted_entry_id)
         return
 
     rate = lookup_kurs_pajak_rate(conn, entry_date)
@@ -567,20 +770,37 @@ def _process_other_fee_row(
     )
     _mark_ebay_csv_row_posted(conn, ebay_account_id, row_key, entry_id)
     result.other_fees_posted += 1
+    _stage(journal_entry_id=entry_id)
 
 
 def _process_payout_row(
     conn: Connection,
     *,
     row: dict[str, str],
+    row_index: int,
     ebay_account_id: int,
     source_document_id: int,
     entry_date: _dt.date,
     result: EbayIngestResult,
 ) -> None:
+    def _stage() -> None:
+        # Payout rows never post a journal entry directly (see
+        # ebay_expected_payouts' own docstring — they're a reference fact
+        # consumed later by the Payoneer-CSV auto-match rule), so there's
+        # never a journal_entry_id/review_queue_id/consignment_sale_id to
+        # attach here.
+        _stage_raw_row(
+            conn,
+            ebay_account_id=ebay_account_id,
+            source_document_id=source_document_id,
+            row_index=row_index,
+            row=row,
+        )
+
     payout_id = _clean_ref(row.get("Payout ID"))
     net_amount = _parse_money(row.get("Net amount"))
     if payout_id is None or net_amount == 0:
+        _stage()
         return
 
     existing = conn.execute(
@@ -590,6 +810,12 @@ def _process_payout_row(
         )
     ).first()
     if existing is not None:
+        # QA BUG FIX, 2026-09-09: same fix shape as the other three
+        # idempotency early-returns above — stage the raw row even though
+        # there's nothing new to record in ebay_expected_payouts. Payout
+        # rows never link to a journal_entry_id either way (see _stage()
+        # above), so this matches the first-time-processing branch exactly.
+        _stage()
         return  # row-creation idempotency — re-parsing the same CSV is a no-op here
 
     conn.execute(
@@ -602,6 +828,7 @@ def _process_payout_row(
         )
     )
     result.payouts_recorded += 1
+    _stage()
 
 
 def process_transaction_report(
@@ -614,23 +841,33 @@ def process_transaction_report(
     """Branch on Type and post/stage each row per the design doc's §2 rules
     (Order rows are grouped/merged first — see the module docstring).
 
-    ``rows`` is the ``data_rows`` output of ``parse_ebay_csv_rows``.
+    ``rows`` is the ``data_rows`` output of ``parse_ebay_csv_rows``. Every
+    row (indexed by its position in ``rows``) also gets a raw-detail
+    staging record in ``ebay_csv_transactions`` — see that table's
+    docstring in ingestion/schema.py and the Wallet screen it backs
+    (webapp/wallet_bp.py) — regardless of whether it posts directly, is
+    routed to review_queue, is staged as an unconfirmed consignment sale,
+    or nets to zero (a Hold row, an unrecognized/unvalued type).
     """
     result = EbayIngestResult()
 
-    order_rows = [r for r in rows if (r.get("Type") or "").strip() == "Order"]
-    non_order_rows = [r for r in rows if (r.get("Type") or "").strip() != "Order"]
+    indexed_rows = list(enumerate(rows))
+    order_rows = [(i, r) for i, r in indexed_rows if (r.get("Type") or "").strip() == "Order"]
+    non_order_rows = [(i, r) for i, r in indexed_rows if (r.get("Type") or "").strip() != "Order"]
 
     for group in _group_order_rows(order_rows):
+        group_indices = [idx for idx, _row in group]
+        group_dicts = [row for _idx, row in group]
         _process_order_group(
             conn,
-            group=group,
+            group=group_dicts,
+            group_indices=group_indices,
             ebay_account_id=ebay_account_id,
             source_document_id=source_document_id,
             result=result,
         )
 
-    for row in non_order_rows:
+    for row_index, row in non_order_rows:
         row_type = (row.get("Type") or "").strip()
         txn_id = _clean_ref(row.get("Transaction ID"))
         order_number = _clean_ref(row.get("Order number"))
@@ -642,13 +879,22 @@ def process_transaction_report(
             # funds already recognized via the underlying Order row, never
             # a distinct revenue/expense event by itself. See design §2.
             result.holds_skipped += 1
+            _stage_raw_row(
+                conn,
+                ebay_account_id=ebay_account_id,
+                source_document_id=source_document_id,
+                row_index=row_index,
+                row=row,
+            )
             continue
 
         if row_type == "Refund":
             _process_refund_row(
                 conn,
                 row=row,
+                row_index=row_index,
                 ebay_account_id=ebay_account_id,
+                source_document_id=source_document_id,
                 entry_date=entry_date,
                 order_number=order_number,
                 currency=currency,
@@ -660,7 +906,9 @@ def process_transaction_report(
             _process_other_fee_row(
                 conn,
                 row=row,
+                row_index=row_index,
                 ebay_account_id=ebay_account_id,
+                source_document_id=source_document_id,
                 entry_date=entry_date,
                 order_number=order_number,
                 currency=currency,
@@ -672,6 +920,7 @@ def process_transaction_report(
             _process_payout_row(
                 conn,
                 row=row,
+                row_index=row_index,
                 ebay_account_id=ebay_account_id,
                 source_document_id=source_document_id,
                 entry_date=entry_date,
@@ -688,6 +937,7 @@ def process_transaction_report(
         # parse warning (we have no defined conversion path for a
         # non-USD-denominated surprise row).
         net_amount = _parse_money(row.get("Net amount"))
+        rqid = None
         if currency == "USD" and net_amount != 0:
             rate = lookup_kurs_pajak_rate(conn, entry_date)
             rqid = _make_review_queue_row(
@@ -702,10 +952,25 @@ def process_transaction_report(
             )
             if rqid is not None:
                 result.review_queue_rows_created += 1
+            else:
+                # QA BUG FIX, 2026-09-09 — same "look up and use the
+                # existing id instead of discarding it" pattern as the
+                # reconciliation-mismatch branch above: rqid is None here
+                # whenever a review_queue row for this txn_id already
+                # existed (e.g. a re-run).
+                rqid = _lookup_review_queue_id_by_external_ref(conn, txn_id)
         elif net_amount != 0:
             result.parse_warnings.append(
                 f"Unrecognized Type={row_type!r} on order {order_number!r} could not be "
                 f"valued in IDR (currency={currency!r}) — not ingested, needs manual handling."
             )
+        _stage_raw_row(
+            conn,
+            ebay_account_id=ebay_account_id,
+            source_document_id=source_document_id,
+            row_index=row_index,
+            row=row,
+            review_queue_id=rqid,
+        )
 
     return result

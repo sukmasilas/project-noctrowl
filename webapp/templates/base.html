@@ -11,9 +11,14 @@
     <div class="brand">Noctrow<span>l</span></div>
     <a class="nav-item {% if request.endpoint == 'documents.index' %}active{% endif %}" href="{{ url_for('documents.index') }}">Documents</a>
     <a class="nav-item {% if request.endpoint == 'review_queue.index' %}active{% endif %}" href="{{ url_for('review_queue.index') }}">Review Queue</a>
+    <a class="nav-item {% if request.endpoint == 'wallet.index' %}active{% endif %}" href="{{ url_for('wallet.index') }}">Wallet</a>
     <a class="nav-item {% if request.endpoint == 'data_quality.index' %}active{% endif %}" href="{{ url_for('data_quality.index') }}">Data Quality</a>
     <div class="nav-item {% if request.blueprint == 'reports' %}active{% endif %}">Reports</div>
-    <a class="nav-sub {% if request.endpoint == 'reports.revenue' %}active{% endif %}" href="{{ url_for('reports.revenue') }}">Revenue</a>
+    {# Revenue link removed from nav 2026-09-09 (parked, not deleted — see
+       webapp/reports_bp.py's revenue() route/reports/revenue.html, both kept
+       intact). With only one eBay account active, per-account Revenue
+       doesn't yet differentiate from consolidated P&L; revisit once a
+       second/third account is onboarded. #}
     <a class="nav-sub {% if request.endpoint == 'reports.cash_flow' %}active{% endif %}" href="{{ url_for('reports.cash_flow') }}">Cash Flow</a>
     <a class="nav-sub {% if request.endpoint == 'reports.pnl' %}active{% endif %}" href="{{ url_for('reports.pnl') }}">P&amp;L</a>
     <a class="nav-sub {% if request.endpoint == 'reports.equity' %}active{% endif %}" href="{{ url_for('reports.equity') }}">Equity</a>

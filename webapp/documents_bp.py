@@ -9,7 +9,8 @@ import datetime as _dt
 import os
 
 from flask import Blueprint, current_app, flash, redirect, render_template, request, session, url_for
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
+from sqlalchemy.engine import Connection
 
 from ingestion.schema import invoices as invoices_table
 from ingestion.schema import review_queue, source_documents
@@ -32,6 +33,32 @@ INVOICE_PURPOSE_OPTIONS = [
 ]
 
 FIXED_DOCUMENT_TYPES_PER_ACCOUNT = ["ebay_sales_csv", "payoneer_csv", "bank_statement_wallet_group"]
+
+
+def list_untraceable_invoices(conn: Connection, *, period_month=None):
+    """Invoice records with NO ``review_queue`` row anywhere linking back to
+    them via ``linked_invoice_id`` — i.e. the invoice/proof-of-transfer
+    exists (was uploaded and OCR-extracted), but no wallet transaction
+    (Payoneer/bank-statement line) can be traced to it. Shared by the Wallet
+    screen (webapp/wallet_bp.py — see CLAUDE.md's Wallet-screen brief: "all
+    transactions should be traced in the wallet, including the invoices...
+    if there are any invoices that are not traceable... this should be
+    flagged") and available here for Documents to reuse if ever needed.
+
+    Deliberately the REVERSE of ``unmatched_cogs`` in ``index()`` above
+    (review_queue rows with no linked invoice) — this is invoices with no
+    linking review_queue row. Flags only; never explains or auto-classifies
+    WHY (per the brief) — that's for a human to investigate.
+    """
+    query = select(invoices_table).order_by(invoices_table.c.extracted_date)
+    if period_month is not None:
+        query = query.where(invoices_table.c.period_month == period_month)
+    query = query.where(
+        ~exists(
+            select(review_queue.c.id).where(review_queue.c.linked_invoice_id == invoices_table.c.id)
+        )
+    )
+    return conn.execute(query).all()
 
 
 @bp.route("/")

@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Wallet — Noctrowl{% endblock %}
+{% block topbar %}
+<form method="get" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+  <select class="selector" name="account_id" onchange="this.form.submit()">
+    {% for opt in wallet_options %}
+      <option value="{{ opt.account_id }}" {% if selected and selected.account_id == opt.account_id %}selected{% endif %}>{{ opt.label }}</option>
+    {% endfor %}
+  </select>
+  <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
+</form>
+{% endblock %}
+{% block content %}
+<h1>Wallet</h1>
+<div class="subtitle">
+  {% if selected %}{{ selected.label }} — {% endif %}{{ period_month | period }}
+  <div class="small">Literally what came off this wallet's statement/export — including rows that haven't posted yet. Read-only; label a row on the <a href="{{ url_for('review_queue.index', period=period_month.isoformat()) }}">Review Queue</a> instead.</div>
+</div>
+
+{% if no_wallets %}
+<div class="empty-state">No wallet accounts are set up yet.</div>
+{% else %}
+
+<div class="card-row">
+  <div class="card"><strong>{{ opening_balance | idr }}</strong><div class="small">Opening Balance</div></div>
+  <div class="card"><strong style="{% if net_movement < 0 %}color:var(--red-text);{% endif %}">{{ net_movement | idr }}</strong><div class="small">Net Movement (posted)</div></div>
+  <div class="card"><strong>{{ closing_balance | idr }}</strong><div class="small">Closing Balance</div></div>
+</div>
+<div class="small" style="margin-bottom:16px;">Opening/closing balances are computed from posted journal entries only (see Ledger). Rows below still awaiting classification or confirmation haven't moved these figures yet.</div>
+
+{% if untraceable_invoices %}
+<div class="empty-state" style="border-color:var(--red-text);color:var(--red-text);margin-bottom:16px;">
+  <strong>{{ untraceable_invoices | length }} invoice(s) for this period have no matching transaction anywhere in the wallets.</strong>
+  <table style="margin-top:8px;">
+    <thead><tr><th>Date</th><th>Vendor/Description</th><th class="num">Amount (IDR)</th><th>Purpose</th><th>File</th></tr></thead>
+    <tbody>
+      {% for inv in untraceable_invoices %}
+      <tr>
+        <td>{{ inv.extracted_date or '—' }}</td>
+        <td>{{ inv.vendor_description or '—' }}</td>
+        <td class="num">{{ inv.amount_idr | idr }}</td>
+        <td>{{ inv.purpose or '—' }}</td>
+        <td class="small">{{ inv.drive_file_name }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="small" style="margin-top:6px;">No matching wallet transaction found for these — this app doesn't guess why; a human should investigate directly. See <a href="{{ url_for('documents.index', period=period_month.isoformat()) }}">Documents</a> to review/correct these invoice records.</div>
+</div>
+{% endif %}
+
+{% if not transactions %}
+<div class="empty-state">No parsed transactions for this wallet/period yet.</div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Description</th>
+      <th class="num">Amount</th>
+      <th>Category / Type</th>
+      <th>Status</th>
+      <th>Journal Entry</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in transactions %}
+      <tr class="figure-row">
+        <td>{{ t.transaction_date }}</td>
+        <td>{{ t.description }}</td>
+        <td class="num">
+          {% if t.amount_idr is not none %}{{ t.amount_idr | idr }}{% endif %}
+          {% if t.amount_usd is not none %}<div class="small">${{ t.amount_usd }}</div>{% endif %}
+        </td>
+        <td>{{ t.category_label }}</td>
+        <td>
+          {% if t.status == 'posted' %}<span class="badge green">Posted</span>
+          {% elif t.status == 'needs_review' %}<span class="badge amber">Needs Review</span>
+          {% elif t.status == 'matched_pending_post' %}<span class="badge amber">Queued</span>
+          {% elif t.status == 'awaiting_confirmation' %}<span class="badge amber">Awaiting Confirmation</span>
+          {% else %}<span class="badge">Not Posted</span>{% endif %}
+          {% if t.status_detail %}<div class="small">{{ t.status_detail }}</div>{% endif %}
+        </td>
+        <td>{{ t.journal_entry_id or '—' }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+{% endblock %}

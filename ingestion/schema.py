@@ -466,6 +466,69 @@ Index(
 )
 
 # ---------------------------------------------------------------------------
+# ebay_csv_transactions — raw-row staging/archive (Wallet screen feature,
+# added 2026-09-09). Unlike ``ebay_csv_posted_transactions`` above (a bare
+# dedup guard: just ebay_account_id/row_key/journal_entry_id), this table
+# preserves every parsed eBay CSV row's own real detail — transaction date,
+# raw Type, item title/description, order number, gross/net USD amount,
+# currency, and an external reference (Transaction ID or Reference ID) — so
+# the eBay Wallet can be browsed at the same level of detail as the other
+# three wallets (Payoneer Wallet / BCA Bridging / BCA Main), which already
+# get this for free from ``review_queue`` preserving every parsed bank/
+# Payoneer line regardless of match status. ``ingestion.ebay_csv.
+# process_transaction_report`` stages ONE row here for every raw CSV data
+# row it sees — whether that row posted directly (journal_entry_id set),
+# was routed to review_queue instead (review_queue_id set), was staged as an
+# unconfirmed consignment sale (consignment_sale_id set), or resulted in
+# none of those (a Hold row, a merge-failure warning, a non-USD skip, a
+# manual-tier-contact consignment case) — never silently dropped.
+#
+# Idempotency key is deliberately the row's own POSITION in its source file
+# (source_document_id, row_index), not a business field like Transaction ID
+# — several real row shapes have no reliably-unique business key on their
+# own (an order-totals row's Transaction ID is blank; a Hold-placed/
+# Hold-released pair shares the same Transaction ID and Reference ID,
+# distinguished only by sign — see ingestion/ebay_csv.py's module docstring
+# for the real-sample discovery this schema already accounts for elsewhere).
+# Row position within a given, already-uniquely-identified source_documents
+# row is trivially stable and unique on any re-parse of the same file.
+# ---------------------------------------------------------------------------
+
+ebay_csv_transactions = Table(
+    "ebay_csv_transactions",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("ebay_account_id", Integer, ForeignKey("ebay_accounts.id"), nullable=False),
+    Column("source_document_id", Integer, ForeignKey("source_documents.id"), nullable=False),
+    Column("row_index", Integer, nullable=False),
+    Column("row_type", Text, nullable=False),  # raw CSV 'Type' column: Order/Refund/Hold/Other fee/Payout/...
+    Column("transaction_date", Date, nullable=False),
+    Column("order_number", Text, nullable=True),
+    Column("description", Text, nullable=True),  # Item title, or the fee row's own Description
+    Column("amount_gross_usd", Numeric(14, 2), nullable=True),
+    Column("amount_net_usd", Numeric(14, 2), nullable=True),
+    Column("currency", Text, nullable=True),
+    Column("external_ref", Text, nullable=True),  # Transaction ID, else Reference ID
+    # Exactly one of these three (or none, for a Hold/skipped/warned row)
+    # should be set for a given row in practice, but this isn't enforced by
+    # a CHECK constraint — a genuinely rare future shape (e.g. a row that
+    # both flags a review_queue concern AND posts) shouldn't be structurally
+    # blocked from being staged accurately.
+    Column("journal_entry_id", Integer, ForeignKey("journal_entries.id"), nullable=True),
+    Column("review_queue_id", Integer, ForeignKey("review_queue.id"), nullable=True),
+    Column("consignment_sale_id", Integer, ForeignKey("consignment_sales.id"), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+Index(
+    "ux_ebay_csv_transactions_doc_row",
+    ebay_csv_transactions.c.source_document_id,
+    ebay_csv_transactions.c.row_index,
+    unique=True,
+)
+Index("ix_ebay_csv_transactions_ebay_account_id", ebay_csv_transactions.c.ebay_account_id)
+
+# ---------------------------------------------------------------------------
 # payoneer_csv_posted_transactions — the same posting-idempotency fix as
 # ebay_csv_posted_transactions above, for ingestion.payoneer's two DIRECT
 # -posting branches (a "Payment from eBay" row confirmed against an
@@ -568,6 +631,7 @@ def drop_ingestion_schema(engine: Engine) -> None:
         bank_keyword_rules,
         kurs_pajak_rates,
         ebay_expected_payouts,
+        ebay_csv_transactions,
         invoice_journal_links,
         review_queue,
         invoices,
