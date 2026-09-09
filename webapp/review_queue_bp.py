@@ -41,6 +41,14 @@ CATEGORY_OPTIONS = [
     # ingestion.matching._post_one_row), which would misclassify a real
     # contract-labor cost instead of posting it to its own dedicated line.
     ("contract_labor", "Contract Labor"),
+    # Added 2026-09-09 — Kurasi is a confirmed real shipping vendor (every
+    # bank line whose raw description contains "KURASI" is a shipping cost,
+    # no exceptions). Same reason 'contract_labor' needed its own category:
+    # a plain 'operating_expense' label always resolves to GENERAL_OPEX (see
+    # ingestion.matching._post_one_row), which would misclassify a real
+    # shipping cost instead of posting it to the dedicated SHIPPING_COST
+    # account that already exists in the chart of accounts.
+    ("shipping_cost", "Shipping Cost"),
     ("other", "Other"),
 ]
 

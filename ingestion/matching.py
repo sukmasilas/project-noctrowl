@@ -491,6 +491,7 @@ _DIRECTIONAL_CATEGORY_SIGNS: dict[str, str] = {
     "cogs_purchase": "outflow",
     "operating_expense": "outflow",
     "contract_labor": "outflow",
+    "shipping_cost": "outflow",
     "consignment_payout": "outflow",
     "owners_draw": "outflow",
     "owners_contribution": "inflow",
@@ -777,6 +778,27 @@ def _post_one_row(conn: Connection, row) -> int | None:
             conn,
             entry_date=entry_date,
             expense_account_type_code="CONTRACT_LABOR",
+            amount_idr=abs(row.amount_idr),
+            paying_account_type_code=paying_code,
+            **paying_kwargs,
+            **_usd_reference_kwargs(row),
+        )
+
+    if row.category == "shipping_cost":
+        # A human reviewing a bank line selected "Shipping Cost" directly
+        # (see webapp/review_queue_bp.py's CATEGORY_OPTIONS), or the
+        # KURASI keyword rule (rule (e) — see ingestion/seed.py) auto-
+        # matched it — posts straight to its own dedicated SHIPPING_COST
+        # account (already in the chart of accounts, added 2026-08-31 for
+        # the experimental consignment payout model) via the same generic
+        # post_operating_expense used for cogs_purchase/operating_expense/
+        # contract_labor/other above, never GENERAL_OPEX's default. Same
+        # pattern as the CONTRACT_LABOR branch immediately above.
+        paying_code, paying_kwargs = _paying_account_for_row(row)
+        return posting.post_operating_expense(
+            conn,
+            entry_date=entry_date,
+            expense_account_type_code="SHIPPING_COST",
             amount_idr=abs(row.amount_idr),
             paying_account_type_code=paying_code,
             **paying_kwargs,

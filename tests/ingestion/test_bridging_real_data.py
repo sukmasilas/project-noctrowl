@@ -23,6 +23,13 @@ asymmetry this surfaced (Bridging's "Pajak rekening" tax-on-interest line
 does NOT auto-match, since "PAJAK BUNGA" the keyword and "Pajak rekening"
 the real Bridging wording genuinely don't share a substring — left as
 Needs Review, not silently dropped).
+
+Updated 2026-09-09 (KURASI shipping-vendor keyword rule — see
+ingestion/seed.py's BANK_KEYWORD_RULES and CLAUDE.md's confirmed Kurasi
+fact): the real Main Account (BCA) 4-month sample genuinely contains 46
+"KURASI" bank lines (all real shipping-vendor transfers), so this dataset
+now also exercises the new rule too — see part 3b/6 below for the updated
+counts.
 """
 from __future__ import annotations
 
@@ -213,26 +220,37 @@ def test_real_four_month_bridging_and_main_data_no_phantom_double_post(iprototyp
     #     credit and correctly stays Needs Review (see part 6) — a real,
     #     flagged asymmetry, not a bug in this test.
     #   = 8 + 4 = 12 interest_income/'e' rows total.
+    #   - "KURASI" (added 2026-09-09, confirmed directly by the user: Kurasi
+    #     is a real shipping vendor, every bank line whose raw description
+    #     contains "KURASI" is a shipping cost, no exceptions) matches 46
+    #     real Main Account (BCA) lines across the 4 real months — this is
+    #     the exact real-world count independently confirmed against the
+    #     real ``noctrowl`` database's review_queue table before this fix
+    #     (see scripts/relabel_kurasi_shipping_cost.py) -> shipping_cost/
+    #     SHIPPING_COST, never GENERAL_OPEX's default.
+    #   = 46 shipping_cost/'e' rows total.
     keyword_rows = [r for r in rows if r.match_rule == "e"]
-    assert len(keyword_rows) == 28
+    assert len(keyword_rows) == 74  # 16 opex + 12 interest_income + 46 shipping_cost
     opex_keyword_rows = [r for r in keyword_rows if r.category == "operating_expense"]
     interest_keyword_rows = [r for r in keyword_rows if r.category == "interest_income"]
+    shipping_keyword_rows = [r for r in keyword_rows if r.category == "shipping_cost"]
     assert len(opex_keyword_rows) == 16
     assert len(interest_keyword_rows) == 12
+    assert len(shipping_keyword_rows) == 46
 
     # --- 4. Journal-entry-level proof: exactly 11 withdrawal entries (no
     # phantom second one from a landing echo) + exactly 12 sweep transfer
-    # entries (no double-post, none missing) + 28 keyword-matched entries
-    # (16 operating expense + 12 interest income — see part 3b), each its
-    # own separate journal entry (one per real bank line, per
-    # ledger.posting.post_interest_income_line's docstring on why BUNGA/
-    # PAJAK BUNGA are never combined into one entry). ---
+    # entries (no double-post, none missing) + 74 keyword-matched entries
+    # (16 operating expense + 12 interest income + 46 shipping cost — see
+    # part 3b), each its own separate journal entry (one per real bank
+    # line, per ledger.posting.post_interest_income_line's docstring on why
+    # BUNGA/PAJAK BUNGA are never combined into one entry). ---
     all_entries = conn.execute(select(journal_entries.c.id, journal_entries.c.source_type)).all()
     entries_by_type = Counter(e.source_type for e in all_entries)
     assert entries_by_type["payoneer_withdrawal"] == 11
     assert entries_by_type["inter_account_transfer"] == 12
-    assert entries_by_type["bank_other"] == 28
-    assert len(all_entries) == 51  # 11 + 12 + 28 — see above; every one of them accounted for
+    assert entries_by_type["bank_other"] == 74
+    assert len(all_entries) == 97  # 11 + 12 + 74 — see above; every one of them accounted for
 
     # Every landing-echo row's posted_journal_entry_id points at one of the
     # 11 EXISTING withdrawal entries, never a new one.
@@ -257,10 +275,14 @@ def test_real_four_month_bridging_and_main_data_no_phantom_double_post(iprototyp
     # could still satisfy): INTEREST_INCOME's own balance must net to the
     # true net interest actually received across BOTH statements (8 credit
     # lines minus 4 debit lines — see part 3b on why Bridging's "Pajak
-    # rekening" isn't among the debits), and GENERAL_OPEX must carry exactly
-    # the 16 keyword-matched fee amounts, not fewer/more/double-posted.
+    # rekening" isn't among the debits), GENERAL_OPEX must carry exactly
+    # the 16 keyword-matched fee amounts, not fewer/more/double-posted, and
+    # (added 2026-09-09) SHIPPING_COST must carry exactly the 46
+    # KURASI-matched amounts summing to the real total, never bleeding into
+    # GENERAL_OPEX's default path.
     interest_income_id = get_account_id(conn, "INTEREST_INCOME")
     general_opex_id = get_account_id(conn, "GENERAL_OPEX")
+    shipping_cost_id = get_account_id(conn, "SHIPPING_COST")
     interest_lines = conn.execute(
         select(journal_lines.c.debit_amount_idr, journal_lines.c.credit_amount_idr).where(
             journal_lines.c.account_id == interest_income_id
@@ -277,6 +299,18 @@ def test_real_four_month_bridging_and_main_data_no_phantom_double_post(iprototyp
     ).scalars().all()
     assert len(opex_lines_from_keywords) == 16
     assert sum(opex_lines_from_keywords) == Decimal("54000.00")  # 12*2500 (BI Fast) + 4*6000 (admin fee)
+
+    shipping_cost_lines = conn.execute(
+        select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == shipping_cost_id)
+    ).scalars().all()
+    assert len(shipping_cost_lines) == 46
+    # Real total across the 46 real KURASI lines (Rp 512,000-2,638,000 each,
+    # per Main-agent's brief) — independently confirmed against the real
+    # noctrowl database before this fix.
+    assert sum(shipping_cost_lines) == Decimal("56188111.00")
+    # GENERAL_OPEX's own keyword-matched lines (checked above) are ONLY the
+    # 2500/6000 BI-Fast/admin-fee amounts — none of the (much larger)
+    # 512,000-2,638,000 KURASI amounts leaked into GENERAL_OPEX instead.
 
     # --- 6. Every OTHER real Bridging/Main line (the DIFFERENT "Biaya
     # administrasi kartu debit" fee, "Pajak rekening" tax-on-interest,
@@ -306,7 +340,7 @@ def test_real_four_month_bridging_and_main_data_no_phantom_double_post(iprototyp
     assert post_result_2.posted == 0
     assert post_result_2.skipped_pending_pair == 0
     entries_after_rerun = conn.execute(select(journal_entries.c.id)).scalars().all()
-    assert len(entries_after_rerun) == 51  # still exactly 51, not 102
+    assert len(entries_after_rerun) == 97  # still exactly 97, not 194
 
 
 def test_real_data_adversarial_duplicate_landing_line_via_raw_sql_does_not_double_reconcile(iprototype):

@@ -112,6 +112,25 @@ BANK_KEYWORD_RULES = [
         "confirmed twice (a duplicate charge) in the real Aug 2026 Payoneer "
         "'Reports & Statements' export.",
     ),
+    (
+        "KURASI",
+        "shipping_cost",
+        None,  # not used for shipping_cost — see _post_one_row, always SHIPPING_COST
+        "Added 2026-09-09 (confirmed directly by the user): Kurasi is a real "
+        "shipping vendor this business uses — every bank line whose raw "
+        "description contains 'KURASI' is a shipping cost, no exceptions. "
+        "Auto-matches straight to the dedicated 'shipping_cost' review-queue "
+        "category (posts to SHIPPING_COST, never GENERAL_OPEX — see "
+        "_post_one_row's shipping_cost branch), same pattern as "
+        "'BUNGA'/'PAJAK BUNGA' above (a hardcoded posting account, not one "
+        "looked up from this row's expense_account_type_code column). "
+        "Confirmed against the real dev database: 46 real Master Account "
+        "bank lines matched 'raw_description ILIKE %kurasi%' (Rp "
+        "512,000-2,638,000 each), all still needs_review/unposted before "
+        "this fix — see scripts/relabel_kurasi_shipping_cost.py for the "
+        "one-off correction of those already-staged rows; this keyword rule "
+        "only affects rows staged AFTER this fix.",
+    ),
 ]
 
 

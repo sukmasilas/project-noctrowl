@@ -360,10 +360,15 @@ review_queue = Table(
     # category, same pattern as 'interest_income' above, since
     # 'operating_expense' always resolves to GENERAL_OPEX by default (see
     # ingestion.matching._post_one_row) rather than a specific sub-account.
+    # 'shipping_cost' added 2026-09-09 — Kurasi shipping-vendor bank lines
+    # (confirmed by the user: any "KURASI" description is a real shipping
+    # cost, no exceptions) need their own category for the same reason
+    # 'contract_labor' did — posts to the existing SHIPPING_COST account
+    # (see ledger/chart_of_accounts.py), never GENERAL_OPEX's default.
     CheckConstraint(
         "category IS NULL OR category IN ('revenue_settlement','cogs_purchase','consignment_payout',"
         "'internal_transfer','internal_transfer_landing','operating_expense','owners_draw',"
-        "'owners_contribution','interest_income','contract_labor','other')",
+        "'owners_contribution','interest_income','contract_labor','shipping_cost','other')",
         name="ck_review_queue_category",
     ),
     # The idempotency invariant from CLAUDE.md rule 6, structural: a row can

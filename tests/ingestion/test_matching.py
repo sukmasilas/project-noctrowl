@@ -1125,6 +1125,127 @@ def test_seeded_openai_subscription_keyword_matches_on_payoneer_wallet(iprototyp
     assert opex_line.amount_usd_ref == Decimal("20.37")
 
 
+def test_seeded_kurasi_keyword_matches_and_posts_to_shipping_cost(iprototype):
+    """Added 2026-09-09 (confirmed directly by the user): Kurasi is a real
+    shipping vendor — every bank line whose raw description contains
+    "KURASI" is a shipping cost, no exceptions. Must auto-match straight to
+    the dedicated 'shipping_cost' review-queue category and post to the
+    SHIPPING_COST account — NOT 'operating_expense'/GENERAL_OPEX, which is
+    what a plain keyword-rule-with-no-dedicated-category would have
+    produced (see ingestion/matching.py's _post_one_row shipping_cost
+    branch and ingestion/seed.py's BANK_KEYWORD_RULES).
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 8),
+                raw_description="TRSF E-BANKING DB 0805/FTFVA/WS95271 / 15810/KURASI / - / - / 02485376996",
+                amount_idr=Decimal("-948000.00"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    match_result = run_auto_match(conn)
+    assert match_result.matched == 1
+    row = conn.execute(select(review_queue.c.category, review_queue.c.match_rule)).one()
+    assert row.category == "shipping_cost"
+    assert row.match_rule == "e"
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    shipping_cost_id = get_account_id(conn, "SHIPPING_COST")
+    general_opex_id = get_account_id(conn, "GENERAL_OPEX")
+    line = conn.execute(
+        select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == shipping_cost_id)
+    ).scalar_one()
+    assert line == Decimal("948000.00")
+    # Confirms it did NOT fall through to the GENERAL_OPEX default path.
+    assert conn.execute(select(journal_lines.c.id).where(journal_lines.c.account_id == general_opex_id)).all() == []
+
+
+def test_kurasi_keyword_is_case_insensitive_substring_match(iprototype):
+    """Rule (e) matching is case-insensitive substring containment (see
+    _try_rule_e_keyword) — a lowercase, embedded "kurasi" must match too,
+    not just the exact uppercase "KURASI" seeded keyword.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 9),
+                raw_description="transfer to jasa kurasi pengiriman",
+                amount_idr=Decimal("-512000.00"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    run_auto_match(conn)
+    row = conn.execute(select(review_queue.c.category, review_queue.c.match_rule)).one()
+    assert row.category == "shipping_cost"
+    assert row.match_rule == "e"
+
+
+def test_other_seeded_keyword_rules_still_behave_unchanged_alongside_kurasi(iprototype):
+    """Regression test: adding the KURASI rule must not disturb the other
+    real seeded keyword rules (BI Fast, admin fee, BUNGA/PAJAK BUNGA,
+    OpenAI) — each of several DIFFERENT real bank/Payoneer lines, staged
+    together in one pass, must still resolve to its own correct category,
+    not bleed into 'shipping_cost' or each other.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 5, 3), raw_description="Biaya transfer BI Fast", amount_idr=Decimal("-2500"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 5, 31), raw_description="Biaya administrasi rekening", amount_idr=Decimal("-6000"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 5, 20), raw_description="BUNGA", amount_idr=Decimal("1186.92"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 5, 21), raw_description="PAJAK BUNGA", amount_idr=Decimal("-237.38"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 5, 8), raw_description="TRSF DB / KURASI / shipping", amount_idr=Decimal("-948000.00"), occurrence_index=1),
+        ],
+    )
+    match_result = run_auto_match(conn)
+    assert match_result.matched == 5
+    rows = conn.execute(select(review_queue.c.raw_description, review_queue.c.category, review_queue.c.match_rule)).all()
+    by_desc = {r.raw_description: r for r in rows}
+    assert by_desc["Biaya transfer BI Fast"].category == "operating_expense"
+    assert by_desc["Biaya administrasi rekening"].category == "operating_expense"
+    assert by_desc["BUNGA"].category == "interest_income"
+    assert by_desc["PAJAK BUNGA"].category == "interest_income"
+    assert by_desc["TRSF DB / KURASI / shipping"].category == "shipping_cost"
+    for r in rows:
+        assert r.match_rule == "e"
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 5
+    shipping_cost_id = get_account_id(conn, "SHIPPING_COST")
+    general_opex_id = get_account_id(conn, "GENERAL_OPEX")
+    interest_income_id = get_account_id(conn, "INTEREST_INCOME")
+    shipping_line = conn.execute(
+        select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == shipping_cost_id)
+    ).scalar_one()
+    assert shipping_line == Decimal("948000.00")
+    opex_debits = conn.execute(
+        select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == general_opex_id)
+    ).all()
+    assert sorted(d.debit_amount_idr for d in opex_debits) == [Decimal("2500.00"), Decimal("6000.00")]
+    assert conn.execute(select(journal_lines.c.id).where(journal_lines.c.account_id == interest_income_id)).all() != []
+
+
 def test_amount_just_outside_tolerance_does_not_false_match(iprototype):
     """A near-miss (amount off by more than AMOUNT_TOLERANCE_IDR) must fall
     to Needs Review, not fuzzy-match — proves the threshold is a real gate,

@@ -349,12 +349,14 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
         description=(
             "ck_review_queue_category widened to its current full value set "
             "(originally missing 'internal_transfer_landing', added "
-            "2026-09-01; 'interest_income', added 2026-09-02; and "
+            "2026-09-01; 'interest_income', added 2026-09-02; "
             "'contract_labor', added 2026-09-05 for the new CONTRACT_LABOR "
-            "expense account — see ingestion/matching.py's _post_one_row) — "
-            "brings the constraint to whatever the LATEST code defines in "
-            "one step, regardless of which of those historical widenings a "
-            "given database happens to be missing."
+            "expense account; and 'shipping_cost', added 2026-09-09 for the "
+            "confirmed Kurasi shipping-vendor keyword rule and dedicated "
+            "SHIPPING_COST posting path — see ingestion/matching.py's "
+            "_post_one_row) — brings the constraint to whatever the LATEST "
+            "code defines in one step, regardless of which of those "
+            "historical widenings a given database happens to be missing."
         ),
         table="review_queue",
         apply_sql=(
@@ -363,7 +365,7 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "(category IS NULL OR category IN ('revenue_settlement','cogs_purchase',"
             "'consignment_payout','internal_transfer','internal_transfer_landing',"
             "'operating_expense','owners_draw','owners_contribution',"
-            "'interest_income','contract_labor','other'))",
+            "'interest_income','contract_labor','shipping_cost','other'))",
         ),
     ),
     MigrationStep(
@@ -547,8 +549,11 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
         description=(
             "ck_bank_keyword_rules_category widened to add 'interest_income' "
             "(2026-09-02, backs the BUNGA/PAJAK BUNGA auto-match keyword "
-            "rules) — bank_keyword_rules already existed (milestone 3 "
-            "follow-up commit) before this value was added."
+            "rules) and 'shipping_cost' (2026-09-09, backs the new KURASI "
+            "auto-match keyword rule — see ingestion/seed.py's "
+            "BANK_KEYWORD_RULES and CLAUDE.md's confirmed Kurasi "
+            "shipping-vendor fact) — bank_keyword_rules already existed "
+            "(milestone 3 follow-up commit) before either value was added."
         ),
         table="bank_keyword_rules",
         apply_sql=(
@@ -558,7 +563,7 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "ck_bank_keyword_rules_category CHECK (category IN "
             "('revenue_settlement','cogs_purchase','consignment_payout',"
             "'internal_transfer','operating_expense','owners_draw',"
-            "'owners_contribution','interest_income','other'))",
+            "'owners_contribution','interest_income','shipping_cost','other'))",
         ),
     ),
 )
