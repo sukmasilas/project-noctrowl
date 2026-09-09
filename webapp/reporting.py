@@ -44,6 +44,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
+from ledger.balances import account_balance_through as _shared_account_balance_through
 from ledger.entities import get_account_id
 from ledger.schema import account_types, accounts, ebay_accounts, journal_entries, journal_lines, wallet_groups
 
@@ -626,15 +627,12 @@ class BalanceSheetReport:
 
 
 def _account_balance_through(conn: Connection, account_id: int, period_month: _dt.date, normal_balance: str) -> Decimal:
-    rows = conn.execute(
-        select(journal_lines.c.debit_amount_idr, journal_lines.c.credit_amount_idr)
-        .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
-        .where(journal_lines.c.account_id == account_id)
-        .where(journal_entries.c.period_month <= period_month)
-    ).all()
-    if normal_balance == "debit":
-        return sum((r.debit_amount_idr - r.credit_amount_idr for r in rows), ZERO)
-    return sum((r.credit_amount_idr - r.debit_amount_idr for r in rows), ZERO)
+    """Thin wrapper kept for every existing call site in this module —
+    the actual computation now lives in ``ledger.balances.
+    account_balance_through`` (extracted 2026-09 so
+    ``ingestion.reconciliation`` can reuse the identical query instead of
+    re-implementing it; see that module's docstring)."""
+    return _shared_account_balance_through(conn, account_id, period_month, normal_balance)
 
 
 def _account_instance_lines(conn: Connection, period_month: _dt.date, statement_section: str) -> list[BalanceSheetLine]:

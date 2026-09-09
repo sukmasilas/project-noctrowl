@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Data Quality — Noctrowl{% endblock %}
+{% block topbar %}
+<form method="get" style="display:flex;gap:10px;align-items:center;">
+  <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
+</form>
+{% endblock %}
+{% block content %}
+<h1>Data Quality</h1>
+<div class="subtitle">{{ period_month | period }} — automated reconciliation of the ledger's own computed balance against each bank/wallet statement's own printed opening/closing balance.</div>
+<div class="empty-state" style="border-color:#6b7280;color:#6b7280;margin-bottom:16px;">
+  Informational only — this screen never corrects a discrepancy or reopens a posted transaction. A real gap needs a human to investigate outside this app.
+</div>
+
+{% if not cards %}
+<div class="empty-state">No reconciliation check has run yet for this period — this appears once a Bridging Account or Master Account bank statement (a document type with a real printed opening/closing balance) has been synced. Payoneer and eBay Wallet are never checked here — neither source carries a stated balance today.</div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Account</th>
+      <th>Status</th>
+      <th class="num">Expected Opening</th>
+      <th class="num">Ledger Opening</th>
+      <th class="num">Opening Δ</th>
+      <th class="num">Expected Closing</th>
+      <th class="num">Ledger Closing</th>
+      <th class="num">Closing Δ</th>
+      <th>Checked</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for card in cards %}
+      <tr>
+        <td>{{ card.account_label }}</td>
+        <td>
+          {% if card.is_material %}
+            <span class="badge red">Discrepancy found</span>
+          {% else %}
+            <span class="badge green">Matches</span>
+          {% endif %}
+        </td>
+        <td class="num">{{ card.expected_opening_idr | idr }}</td>
+        <td class="num">{{ card.actual_opening_idr | idr }}</td>
+        <td class="num" style="{% if card.opening_discrepancy_idr != 0 %}color:var(--red-text);{% endif %}">{{ card.opening_discrepancy_idr | idr }}</td>
+        <td class="num">{{ card.expected_closing_idr | idr }}</td>
+        <td class="num">{{ card.actual_closing_idr | idr }}</td>
+        <td class="num" style="{% if card.closing_discrepancy_idr != 0 %}color:var(--red-text);{% endif %}">{{ card.closing_discrepancy_idr | idr }}</td>
+        <td class="small">{{ card.checked_at.strftime('%Y-%m-%d %H:%M') if card.checked_at else '—' }}</td>
+      </tr>
+      {% if card.is_material %}
+      <tr>
+        <td colspan="9">
+          {% if card.needs_review_count %}
+            <div class="small" style="color:var(--amber-text);">
+              This account/period still has {{ card.needs_review_count }} outstanding Needs-Review item(s) — labeling those may explain (or close) this gap. See the <a href="{{ url_for('review_queue.index', period=period_month.isoformat()) }}">Review Queue</a>.
+            </div>
+          {% else %}
+            <div class="small" style="color:var(--red-text);">
+              Every transaction for this account/period is already labeled and posted, and it still doesn't match the bank statement. This is a genuine, unexplained gap — it needs a human to investigate directly (this app cannot resolve it further; corrections to already-posted rows are out of scope for this prototype).
+            </div>
+          {% endif %}
+        </td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

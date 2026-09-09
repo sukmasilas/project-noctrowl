@@ -31,6 +31,7 @@ def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
     db_module.init_app(app, engine=engine)
 
     from webapp.auth import bp as auth_bp
+    from webapp.data_quality_bp import bp as data_quality_bp
     from webapp.documents_bp import bp as documents_bp
     from webapp.report_extras import register_template_filters
     from webapp.reports_bp import bp as reports_bp
@@ -42,6 +43,7 @@ def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
     app.register_blueprint(review_queue_bp)
     app.register_blueprint(settings_bp)
     app.register_blueprint(reports_bp)
+    app.register_blueprint(data_quality_bp)
 
     register_template_filters(app)
 

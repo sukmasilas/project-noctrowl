@@ -11,6 +11,7 @@
     <div class="brand">Noctrow<span>l</span></div>
     <a class="nav-item {% if request.endpoint == 'documents.index' %}active{% endif %}" href="{{ url_for('documents.index') }}">Documents</a>
     <a class="nav-item {% if request.endpoint == 'review_queue.index' %}active{% endif %}" href="{{ url_for('review_queue.index') }}">Review Queue</a>
+    <a class="nav-item {% if request.endpoint == 'data_quality.index' %}active{% endif %}" href="{{ url_for('data_quality.index') }}">Data Quality</a>
     <div class="nav-item {% if request.blueprint == 'reports' %}active{% endif %}">Reports</div>
     <a class="nav-sub {% if request.endpoint == 'reports.revenue' %}active{% endif %}" href="{{ url_for('reports.revenue') }}">Revenue</a>
     <a class="nav-sub {% if request.endpoint == 'reports.cash_flow' %}active{% endif %}" href="{{ url_for('reports.cash_flow') }}">Cash Flow</a>

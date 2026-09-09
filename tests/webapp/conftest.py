@@ -27,7 +27,7 @@ import webapp.schema as _wschema  # noqa: F401
 from ingestion.kurs_pajak import seed_kurs_pajak_rate
 from ingestion.schema import review_queue, source_documents
 from ledger.db import get_engine
-from ledger.schema import create_schema, drop_schema
+from ledger.schema import create_schema, drop_schema, reconciliation_checks
 from ledger.seed import seed_catalogs, seed_prototype_topology
 from tests._db_safety import resolve_test_database_url
 from webapp import create_app
@@ -101,6 +101,35 @@ def make_source_document(conn, *, document_type: str, period_month: _dt.date, in
             drive_file_name="test-fixture",
             ingested_at=_dt.datetime.now(_dt.timezone.utc) if ingested else None,
             **scope,
+        )
+    )
+    return result.inserted_primary_key[0]
+
+
+def make_reconciliation_check(
+    conn,
+    *,
+    account_id: int,
+    period_month: _dt.date,
+    is_material: bool,
+    expected_opening_idr: Decimal = Decimal("1000000"),
+    actual_opening_idr: Decimal = Decimal("1000000"),
+    expected_closing_idr: Decimal = Decimal("1000000"),
+    actual_closing_idr: Decimal = Decimal("1000000"),
+) -> int:
+    opening_discrepancy = actual_opening_idr - expected_opening_idr
+    closing_discrepancy = actual_closing_idr - expected_closing_idr
+    result = conn.execute(
+        reconciliation_checks.insert().values(
+            account_id=account_id,
+            period_month=period_month,
+            expected_opening_idr=expected_opening_idr,
+            actual_opening_idr=actual_opening_idr,
+            opening_discrepancy_idr=opening_discrepancy,
+            expected_closing_idr=expected_closing_idr,
+            actual_closing_idr=actual_closing_idr,
+            closing_discrepancy_idr=closing_discrepancy,
+            is_material=is_material,
         )
     )
     return result.inserted_primary_key[0]

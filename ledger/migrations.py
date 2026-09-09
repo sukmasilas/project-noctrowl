@@ -518,6 +518,31 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
         ),
     ),
     MigrationStep(
+        id="reconciliation_checks_source_document_fk",
+        description=(
+            "reconciliation_checks.source_document_id gets its real FK to "
+            "source_documents (ingestion/schema.py) — deliberately NOT "
+            "declared inline on the ledger.schema.py table definition (see "
+            "that table's own comment) so ledger.schema.create_schema() "
+            "stays safe to call standalone (milestone-2-only use, before "
+            "ingestion.schema has ever been imported) — same cross-schema "
+            "-FK-via-migration precedent as payoneer_withdrawals."
+            "bridging_landing_reconciled_review_queue_id above. DROP+ADD "
+            "unconditionally re-run (Postgres has no 'ADD CONSTRAINT IF "
+            "NOT EXISTS'), same idempotency pattern as the CHECK "
+            "-constraint-widening steps above."
+        ),
+        table="reconciliation_checks",
+        requires_tables=("source_documents",),
+        apply_sql=(
+            "ALTER TABLE reconciliation_checks DROP CONSTRAINT IF EXISTS "
+            "fk_reconciliation_checks_source_document",
+            "ALTER TABLE reconciliation_checks ADD CONSTRAINT "
+            "fk_reconciliation_checks_source_document FOREIGN KEY "
+            "(source_document_id) REFERENCES source_documents(id)",
+        ),
+    ),
+    MigrationStep(
         id="bank_keyword_rules_category_check_widen",
         description=(
             "ck_bank_keyword_rules_category widened to add 'interest_income' "

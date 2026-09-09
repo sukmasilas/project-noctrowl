@@ -42,6 +42,15 @@ _TAIL_AMOUNT_RE = re.compile(
 _PERIODE_RE = re.compile(r"PERIODE\s*:\s*([A-Z]+)\s+(\d{4})")
 _FOOTER_CR_RE = re.compile(r"MUTASI CR\s*:\s*([\d,]+\.\d{2})\s+(\d+)")
 _FOOTER_DB_RE = re.compile(r"MUTASI DB\s*:\s*([\d,]+\.\d{2})\s+(\d+)")
+# Reconciliation-gap-detection feature (added 2026-09): the same footer
+# summary block already yielding MUTASI CR/DB above also prints a closing
+# balance line — "SALDO AKHIR : <amount>" — right after MUTASI DB.
+# Confirmed against all 4 real monthly samples (May-Aug 2026, see
+# tests/ingestion/test_bank_statement.py). Deliberately a separate regex
+# from _FOOTER_SALDO_AWAL_MARKER above: that one is used only to find where
+# to CUT the transaction-body text (no capture group needed there), while
+# this one actually captures the printed closing-balance figure itself.
+_FOOTER_SALDO_AKHIR_RE = re.compile(r"SALDO AKHIR\s*:\s*([\d,]+\.\d{2})")
 
 
 def _parse_idr_amount(raw: str) -> Decimal:
@@ -60,6 +69,14 @@ class BankStatementLine:
 class BcaStatementParseResult:
     period_month: _dt.date | None
     opening_balance_idr: Decimal | None
+    # Added for reconciliation-gap detection (2026-09): the statement's own
+    # printed "SALDO AKHIR :" footer figure — see _FOOTER_SALDO_AKHIR_RE
+    # above. None only if that footer line genuinely couldn't be found
+    # (never guessed/derived from opening + CR - DB — this is the
+    # statement's OWN stated figure, kept independent so a real extraction
+    # miss on either one is visible rather than papered over by deriving
+    # one from the other).
+    closing_balance_idr: Decimal | None = None
     lines: list[BankStatementLine] = field(default_factory=list)
     reported_credit_total: Decimal | None = None
     reported_credit_count: int | None = None
@@ -74,17 +91,30 @@ class BcaStatementParseResult:
         document-level "did extraction actually work" signal per design
         doc §4 (never posted as a per-line Needs Review guess; surfaced as
         a source_documents.parse_warning at the document level instead).
+
+        Strengthened (2026-09) now that closing_balance_idr is parsed too:
+        when both opening_balance_idr and closing_balance_idr are present,
+        also require the additive identity (opening + credits - debits ==
+        closing) to hold — a second, independent cross-check using the
+        statement's own printed balance figures, not just its CR/DB totals.
         """
         if self.reported_credit_total is None or self.reported_debit_total is None:
             return False
         credits = [l for l in self.lines if l.amount_idr > 0]
         debits = [l for l in self.lines if l.amount_idr < 0]
-        return (
-            sum((l.amount_idr for l in credits), Decimal("0")) == self.reported_credit_total
+        credit_sum = sum((l.amount_idr for l in credits), Decimal("0"))
+        debit_sum = -sum((l.amount_idr for l in debits), Decimal("0"))
+        base_ok = (
+            credit_sum == self.reported_credit_total
             and len(credits) == self.reported_credit_count
-            and -sum((l.amount_idr for l in debits), Decimal("0")) == self.reported_debit_total
+            and debit_sum == self.reported_debit_total
             and len(debits) == self.reported_debit_count
         )
+        if not base_ok:
+            return False
+        if self.opening_balance_idr is not None and self.closing_balance_idr is not None:
+            return self.opening_balance_idr + credit_sum - debit_sum == self.closing_balance_idr
+        return True
 
 
 def extract_pdf_text_per_page(pdf_path_or_file) -> list[str]:
@@ -142,6 +172,7 @@ def parse_bca_statement_text(pages_text: list[str]) -> BcaStatementParseResult:
 
     reported_credit_total = reported_credit_count = None
     reported_debit_total = reported_debit_count = None
+    closing_balance_idr = None
     for page_text in pages_text:
         m = _FOOTER_CR_RE.search(page_text)
         if m:
@@ -151,17 +182,23 @@ def parse_bca_statement_text(pages_text: list[str]) -> BcaStatementParseResult:
         if m:
             reported_debit_total = _parse_idr_amount(m.group(1))
             reported_debit_count = int(m.group(2))
+        m = _FOOTER_SALDO_AKHIR_RE.search(page_text)
+        if m:
+            closing_balance_idr = _parse_idr_amount(m.group(1))
 
     body_lines = _extract_transaction_body_lines(pages_text)
 
     result = BcaStatementParseResult(
         period_month=period_month,
         opening_balance_idr=None,
+        closing_balance_idr=closing_balance_idr,
         reported_credit_total=reported_credit_total,
         reported_credit_count=reported_credit_count,
         reported_debit_total=reported_debit_total,
         reported_debit_count=reported_debit_count,
     )
+    if closing_balance_idr is None:
+        result.parse_warnings.append("Could not find 'SALDO AKHIR :' anywhere in the statement's footer summary.")
     if period_month is None:
         result.parse_warnings.append("Could not find 'PERIODE : <MONTH> <YEAR>' anywhere in the statement.")
 

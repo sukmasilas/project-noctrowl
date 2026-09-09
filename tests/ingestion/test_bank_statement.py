@@ -42,6 +42,7 @@ def test_real_sample_reconciles_against_statements_own_printed_totals():
 
     assert result.period_month == _dt.date(2026, 7, 1)
     assert result.opening_balance_idr == Decimal("75620613.34")
+    assert result.closing_balance_idr == Decimal("91085883.60")
     assert result.parse_warnings == []
     assert result.reconciles is True
 
@@ -72,6 +73,52 @@ def test_all_four_real_monthly_samples_reconcile_cleanly():
         result = parse_bca_statement(sample)
         assert result.parse_warnings == [], f"{sample.name}: {result.parse_warnings}"
         assert result.reconciles is True, f"{sample.name} did not reconcile"
+
+
+def test_closing_balance_idr_extracted_and_chains_across_all_four_real_months():
+    """Reconciliation-gap-detection feature (2026-09): closing_balance_idr
+    must be parsed correctly for every real month AND each month's closing
+    balance must equal the NEXT month's opening balance — the real-world
+    invariant of one continuous bank account across consecutive statements,
+    an even stronger cross-file check than any single statement's own
+    self-reconciliation.
+    """
+    expected = {
+        MAY_SAMPLE: (Decimal("10102959.83"), Decimal("62470973.37")),
+        JUN_SAMPLE: (Decimal("62470973.37"), Decimal("75620613.34")),
+        REAL_SAMPLE: (Decimal("75620613.34"), Decimal("91085883.60")),
+        AUG_SAMPLE: (Decimal("91085883.60"), Decimal("74884102.06")),
+    }
+    for sample, (opening, closing) in expected.items():
+        result = parse_bca_statement(sample)
+        assert result.opening_balance_idr == opening, sample.name
+        assert result.closing_balance_idr == closing, sample.name
+
+    may = parse_bca_statement(MAY_SAMPLE)
+    jun = parse_bca_statement(JUN_SAMPLE)
+    jul = parse_bca_statement(REAL_SAMPLE)
+    aug = parse_bca_statement(AUG_SAMPLE)
+    assert may.closing_balance_idr == jun.opening_balance_idr
+    assert jun.closing_balance_idr == jul.opening_balance_idr
+    assert jul.closing_balance_idr == aug.opening_balance_idr
+
+
+def test_closing_balance_missing_produces_a_parse_warning():
+    """If the footer's SALDO AKHIR line genuinely can't be found, this must
+    be surfaced as a parse warning, not silently left as None with no
+    signal anything went wrong (same "never silently guess" discipline as
+    every other extraction gap in this module)."""
+    page_without_saldo_akhir = """
+PERIODE : MEI 2026
+TANGGAL KETERANGAN CBG MUTASI SALDO
+01/05 SALDO AWAL 0.00
+SALDO AWAL : 0.00
+MUTASI CR : 0.00 0
+MUTASI DB : 0.00 0
+"""
+    result = parse_bca_statement_text([page_without_saldo_akhir])
+    assert result.closing_balance_idr is None
+    assert any("SALDO AKHIR" in w for w in result.parse_warnings)
 
 
 def test_reprocessing_same_pages_text_produces_identical_occurrence_indices():

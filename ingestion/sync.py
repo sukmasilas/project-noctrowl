@@ -43,8 +43,11 @@ from sqlalchemy.engine import Connection
 from ingestion import bank_statement, ebay_csv, invoices as invoices_module, mandiri_statement, matching, payoneer
 from ingestion.drive_client import FOLDER_MIME_TYPE, DriveFile
 from ingestion.kurs_pajak import lookup_most_recent_rate_as_of
+from ingestion.reconciliation import check_account_reconciliation
 from ingestion.schema import invoices as invoices_table
 from ingestion.schema import source_documents
+from ledger.entities import get_account_id
+from ledger.errors import UnknownAccountInstanceError
 
 UPLOADS_ROOT_NAME = "01 - Uploads"
 EBAY_SALES_SUBFOLDER = "eBay Sales Export (CSV)"
@@ -324,6 +327,21 @@ def sync_payoneer(
 _MANDIRI_MARKER = "Bank Mandiri"
 _BCA_MARKER = "TANGGAL KETERANGAN CBG MUTASI SALDO"
 
+# Reconciliation-gap detection (added 2026-09) — which ledger account_type
+# code (and scoping) each bank-statement document_type's own printed
+# opening/closing balance should be checked against. See
+# ingestion/reconciliation.py's module docstring for why this is a small,
+# explicit mapping rather than something dynamically discovered: there is
+# no way to know WHICH ledger account a brand-new document type's balance
+# belongs to without a human wiring that up once — the reconciliation
+# MECHANISM itself (the table, the computation, the materiality threshold,
+# the Provisional gating, the Data Quality screen) is what's generic and
+# reusable, not this one-line mapping.
+_RECONCILIATION_ACCOUNT_CODE_BY_DOCUMENT_TYPE = {
+    "bank_statement_wallet_group": "BCA_BRIDGING",
+    "bank_statement_master": "BCA_MAIN",
+}
+
 
 def _detect_bank_statement_format(pages_text: list[str]) -> str:
     """Sniff which bank actually issued this statement from its own
@@ -437,7 +455,6 @@ def sync_bank_statement(
         drive_file_name=chosen.name,
         row_count=len(parsed.lines),
     )
-    _set_parse_warning(conn, src_id, warnings)
 
     raw_lines = [
         matching.RawLine(
@@ -455,6 +472,45 @@ def sync_bank_statement(
         wallet_group_id=wallet_group_id,
         lines=raw_lines,
     )
+
+    # Reconciliation-gap detection (added 2026-09), run right after this
+    # bank statement has been parsed and its rows staged — per this
+    # feature's brief: "right after a bank statement for a period has been
+    # parsed and its rows processed". Only runs when the statement actually
+    # carries BOTH a printed opening AND closing balance (never forced —
+    # see ingestion/reconciliation.py's module docstring) and when this
+    # scope already has a ledger account set up to check against.
+    if parsed.opening_balance_idr is not None and parsed.closing_balance_idr is not None:
+        account_code = _RECONCILIATION_ACCOUNT_CODE_BY_DOCUMENT_TYPE.get(document_type)
+        if account_code is not None:
+            try:
+                reconciliation_account_id = get_account_id(
+                    conn, account_code, wallet_group_id=wallet_group_id
+                )
+            except UnknownAccountInstanceError:
+                warnings.append(
+                    f"No {account_code} ledger account set up yet for this scope — skipped the automated "
+                    "reconciliation check against the statement's own printed opening/closing balance."
+                )
+            else:
+                outcome = check_account_reconciliation(
+                    conn,
+                    account_id=reconciliation_account_id,
+                    period_month=period_month,
+                    statement_opening_idr=parsed.opening_balance_idr,
+                    statement_closing_idr=parsed.closing_balance_idr,
+                    source_document_id=src_id,
+                )
+                if outcome.is_material:
+                    warnings.append(
+                        "Reconciliation discrepancy: the ledger's own computed balance for this account "
+                        f"does not match the statement's own printed balance (opening off by Rp "
+                        f"{outcome.opening_discrepancy_idr}, closing off by Rp {outcome.closing_discrepancy_idr}) "
+                        "— see the Data Quality screen. This needs a human to investigate; nothing in this "
+                        "pipeline corrects it automatically."
+                    )
+    _set_parse_warning(conn, src_id, warnings)
+
     return StepResult(document_type=document_type, found_file=True, row_count=len(parsed.lines), warnings=warnings)
 
 

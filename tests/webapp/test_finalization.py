@@ -4,10 +4,18 @@ lean on (per Main-agent's explicit instruction this needs real coverage).
 from __future__ import annotations
 
 import datetime as _dt
+from decimal import Decimal
 
-from webapp.finalization import expected_by, missing_source_documents, report_status, review_queue_status
+from ledger.entities import get_account_id
+from webapp.finalization import (
+    expected_by,
+    material_reconciliation_discrepancies,
+    missing_source_documents,
+    report_status,
+    review_queue_status,
+)
 
-from tests.webapp.conftest import make_review_queue_row, make_source_document
+from tests.webapp.conftest import make_reconciliation_check, make_review_queue_row, make_source_document
 
 
 def test_expected_by_is_seven_days_after_month_end():
@@ -164,3 +172,104 @@ def test_report_provisional_on_zero_uploads_not_indistinguishable_from_clean_per
     assert status.is_final is False
     assert status.needs_review_count == 0
     assert len(status.missing_documents) > 0
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation-gap-detection gating (added 2026-09) — the third Provisional
+# condition: a material reconciliation_checks row blocks Final even when
+# every review-queue row is resolved and every fixed-expectation document
+# has arrived (see ingestion/reconciliation.py and this module's docstring).
+# ---------------------------------------------------------------------------
+
+
+def _fully_clean_docs_and_review(conn, topo, period):
+    """Seed conditions 1 and 2 (review queue clean, all docs ingested) so a
+    test can isolate condition 3 (reconciliation) as the only thing left
+    that could flip a report Provisional.
+    """
+    for document_type, scope in [
+        ("ebay_sales_csv", {"ebay_account_id": topo["ebay_account_id"]}),
+        ("payoneer_csv", {"wallet_group_id": topo["wallet_group_id"]}),
+        ("bank_statement_wallet_group", {"wallet_group_id": topo["wallet_group_id"]}),
+        ("bank_statement_master", {}),
+    ]:
+        make_source_document(conn, document_type=document_type, period_month=period, **scope)
+
+
+def test_material_reconciliation_discrepancy_blocks_final_even_with_clean_review_and_docs(wtopology):
+    conn, topo = wtopology
+    period = _dt.date(2026, 7, 1)
+    _fully_clean_docs_and_review(conn, topo, period)
+    bridging_id = get_account_id(conn, "BCA_BRIDGING", wallet_group_id=topo["wallet_group_id"])
+    make_reconciliation_check(
+        conn,
+        account_id=bridging_id,
+        period_month=period,
+        is_material=True,
+        expected_closing_idr=Decimal("1000000"),
+        actual_closing_idr=Decimal("1500000"),
+    )
+    conn.commit()
+
+    status = report_status(conn, period_month=period, ebay_account_id=topo["ebay_account_id"])
+    assert status.is_final is False
+    assert status.needs_review_count == 0
+    assert status.missing_documents == []
+    assert len(status.reconciliation_discrepancies) == 1
+    assert any("doesn't match the bank statement" in r for r in status.reasons)
+    assert any("Rp" in r for r in status.reasons)
+
+
+def test_immaterial_reconciliation_row_does_not_block_final(wtopology):
+    conn, topo = wtopology
+    period = _dt.date(2026, 7, 1)
+    _fully_clean_docs_and_review(conn, topo, period)
+    bridging_id = get_account_id(conn, "BCA_BRIDGING", wallet_group_id=topo["wallet_group_id"])
+    make_reconciliation_check(conn, account_id=bridging_id, period_month=period, is_material=False)
+    conn.commit()
+
+    status = report_status(conn, period_month=period, ebay_account_id=topo["ebay_account_id"])
+    assert status.is_final is True
+    assert status.reconciliation_discrepancies == []
+
+
+def test_consolidated_scoped_only_material_row_blocks_only_consolidated_not_the_wallet_group(wtopology):
+    """A BCA_MAIN (consolidated-only) discrepancy must not block the single
+    prototype account's own report — CLAUDE.md's P&L/equity are
+    consolidated-only, and BCA Main's activity doesn't trace to one eBay
+    account. It DOES block the consolidated report itself.
+    """
+    conn, topo = wtopology
+    period = _dt.date(2026, 7, 1)
+    _fully_clean_docs_and_review(conn, topo, period)
+    bca_main_id = topo["BCA_MAIN"]
+    make_reconciliation_check(
+        conn,
+        account_id=bca_main_id,
+        period_month=period,
+        is_material=True,
+        expected_closing_idr=Decimal("1000000"),
+        actual_closing_idr=Decimal("2000000"),
+    )
+    conn.commit()
+
+    per_account_status = report_status(conn, period_month=period, ebay_account_id=topo["ebay_account_id"])
+    assert per_account_status.reconciliation_discrepancies == []
+    assert per_account_status.is_final is True
+
+    consolidated_status = report_status(conn, period_month=period)
+    assert consolidated_status.is_final is False
+    assert len(consolidated_status.reconciliation_discrepancies) == 1
+
+
+def test_material_reconciliation_discrepancies_scoped_by_period(wtopology):
+    conn, topo = wtopology
+    bridging_id = get_account_id(conn, "BCA_BRIDGING", wallet_group_id=topo["wallet_group_id"])
+    make_reconciliation_check(
+        conn, account_id=bridging_id, period_month=_dt.date(2026, 7, 1), is_material=True,
+        expected_closing_idr=Decimal("1"), actual_closing_idr=Decimal("2"),
+    )
+    conn.commit()
+
+    assert len(material_reconciliation_discrepancies(conn, period_month=_dt.date(2026, 7, 1), ebay_account_id=topo["ebay_account_id"])) == 1
+    assert len(material_reconciliation_discrepancies(conn, period_month=_dt.date(2026, 8, 1), ebay_account_id=topo["ebay_account_id"])) == 0

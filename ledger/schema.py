@@ -361,6 +361,59 @@ Index(
     unique=True,
 )
 
+# Reconciliation-gap detection (added 2026-09) — compares the ledger's own
+# computed opening/closing balance for an account against what the SOURCE
+# bank statement document itself printed, for the accounts/periods where a
+# real parsed statement actually carries both figures (currently: BCA Main
+# Account and Mandiri Bridging Account statements — see
+# ingestion/reconciliation.py's module docstring for why Payoneer/eBay
+# Wallet are never checked here). Detection and surfacing ONLY: nothing in
+# this project ever writes a correcting entry from this table — see
+# CLAUDE.md's "Correcting a posted review-queue row" deferred item, which
+# this feature deliberately does not reopen.
+reconciliation_checks = Table(
+    "reconciliation_checks",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("account_id", Integer, ForeignKey("accounts.id"), nullable=False),
+    Column("period_month", Date, nullable=False),
+    Column("expected_opening_idr", Numeric(20, 2), nullable=False),
+    Column("actual_opening_idr", Numeric(20, 2), nullable=False),
+    # actual - expected, signed (positive = ledger shows MORE than the
+    # statement states).
+    Column("opening_discrepancy_idr", Numeric(20, 2), nullable=False),
+    Column("expected_closing_idr", Numeric(20, 2), nullable=False),
+    Column("actual_closing_idr", Numeric(20, 2), nullable=False),
+    Column("closing_discrepancy_idr", Numeric(20, 2), nullable=False),
+    # True if either discrepancy is >= the materiality threshold (see
+    # ingestion.reconciliation.MATERIALITY_THRESHOLD_IDR) — the single flag
+    # webapp.finalization checks to gate a report to Provisional.
+    Column("is_material", Boolean, nullable=False),
+    # Plain integer, deliberately WITHOUT a ForeignKey declared inline here:
+    # source_documents lives in ingestion/schema.py, which is not
+    # guaranteed to be imported (and therefore not guaranteed to exist in
+    # this shared MetaData) when ledger.schema.create_schema() runs
+    # standalone for milestone-2-only use. The real FK constraint is added
+    # by ledger/migrations.py once source_documents actually exists in the
+    # target database — same precedent as payoneer_withdrawals.
+    # bridging_landing_reconciled_review_queue_id above.
+    Column("source_document_id", Integer, nullable=True),
+    Column("checked_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+# Real DB-level backstop making "at most one reconciliation_checks row per
+# account/period" a structural guarantee, not just an app-layer SELECT
+# -before-write convention — same class of protection already applied to
+# fx_revaluations/opening_balances above. A re-run for the same account/
+# period UPDATEs the existing row (see ingestion.reconciliation) rather
+# than ever accumulating duplicates.
+Index(
+    "ux_reconciliation_checks_account_period",
+    reconciliation_checks.c.account_id,
+    reconciliation_checks.c.period_month,
+    unique=True,
+)
+
 
 # ---------------------------------------------------------------------------
 # Postgres-only structural triggers (defense-in-depth: hold even if a

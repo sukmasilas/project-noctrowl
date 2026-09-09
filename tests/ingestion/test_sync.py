@@ -40,7 +40,7 @@ from ingestion.sync import (
     sync_invoices,
     sync_payoneer,
 )
-from ledger.schema import journal_entries
+from ledger.schema import journal_entries, reconciliation_checks
 
 SAMPLES = Path(__file__).resolve().parents[2] / "sample-documents"
 # Real sample layout replaced 2026-09-01 — see sample-documents/README.md's
@@ -266,13 +266,25 @@ def test_sync_payoneer_real_sample_downloads_both_csv_and_confirmation(drive):
 
 
 def test_sync_bank_statement_master_real_sample_reconciles_no_warning(drive):
+    """Note (2026-09, reconciliation-gap-detection feature): this test's
+    name/original assertion was about the BCA statement's OWN internal
+    CR/DB reconciliation (parse_bca_statement's ``reconciles`` signal),
+    which is still clean here. It is now ALSO expected to raise a separate
+    ledger-vs-statement reconciliation warning, because this fixture never
+    posts any real BCA_MAIN ledger activity for July — the ledger's
+    computed balance (Rp 0) genuinely doesn't match the real statement's
+    nonzero printed balance, which is the CORRECT thing for
+    ingestion.reconciliation to flag. See tests/ingestion/test_reconciliation.py
+    for the "ledger actually matches" clean case with real posted data.
+    """
     conn, topo, client, period_month = drive
     step = sync_bank_statement(
         conn, client, root_folder_id=client.root_id, period_month=period_month, master_folder_name="Master Account"
     )
     assert step.found_file is True
     assert step.row_count == 70
-    assert step.warnings == []  # reconciles cleanly against the statement's own printed totals
+    assert not any("do NOT reconcile" in w for w in step.warnings)  # the statement's own internal CR/DB check
+    assert any("Reconciliation discrepancy" in w for w in step.warnings)  # ledger vs. statement — see docstring above
 
     doc = conn.execute(
         select(source_documents.c.row_count, source_documents.c.parse_warning).where(
@@ -280,10 +292,17 @@ def test_sync_bank_statement_master_real_sample_reconciles_no_warning(drive):
         )
     ).one()
     assert doc.row_count == 70
-    assert doc.parse_warning is None
+    assert doc.parse_warning is not None
+    assert "Reconciliation discrepancy" in doc.parse_warning
 
     staged = conn.execute(select(review_queue.c.id).where(review_queue.c.source_type == "bank_statement")).all()
     assert len(staged) == 70
+
+    check = conn.execute(
+        select(reconciliation_checks.c.is_material, reconciliation_checks.c.expected_closing_idr)
+    ).one()
+    assert check.is_material is True
+    assert check.expected_closing_idr == Decimal("91085883.60")
 
 
 def test_sync_bank_statement_missing_folder_records_not_yet_uploaded(iprototype):
