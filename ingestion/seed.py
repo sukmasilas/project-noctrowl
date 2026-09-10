@@ -131,6 +131,27 @@ BANK_KEYWORD_RULES = [
         "one-off correction of those already-staged rows; this keyword rule "
         "only affects rows staged AFTER this fix.",
     ),
+    (
+        "BIAYA ADM",
+        "operating_expense",
+        "GENERAL_OPEX",
+        "Added 2026-09-10 (real gap fix): the real BCA Main Account "
+        "statement's own bank-admin-fee line is literally 'BIAYA ADM' (May "
+        "2026) or 'BIAYA ADM 0998' (Jun-Aug 2026) — Rp 10,000 each, once a "
+        "month — SHORTER than, and never matched by, the existing 'Biaya "
+        "administrasi rekening' keyword above (that keyword is longer than "
+        "the whole description it needs to match against). Relies on "
+        "ingestion.matching._keyword_matches's word-boundary-at-the-end "
+        "refinement to correctly match both real Master-statement forms "
+        "WITHOUT also matching the textually similar but genuinely "
+        "different Bridging (Mandiri) 'Biaya administrasi rekening'/'Biaya "
+        "administrasi kartu debit' lines (both immediately followed by the "
+        "letter 'I', not a space/digit/end-of-string) — see that function's "
+        "docstring for the full explanation. Confirmed against the real dev "
+        "database: 3 real Master Account rows (May/Jun/Jul 2026) were "
+        "sitting needs_review/uncategorized before this fix (Aug's was "
+        "already manually labeled and posted).",
+    ),
 ]
 
 

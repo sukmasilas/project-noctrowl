@@ -351,12 +351,20 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "(originally missing 'internal_transfer_landing', added "
             "2026-09-01; 'interest_income', added 2026-09-02; "
             "'contract_labor', added 2026-09-05 for the new CONTRACT_LABOR "
-            "expense account; and 'shipping_cost', added 2026-09-09 for the "
+            "expense account; 'shipping_cost', added 2026-09-09 for the "
             "confirmed Kurasi shipping-vendor keyword rule and dedicated "
-            "SHIPPING_COST posting path — see ingestion/matching.py's "
-            "_post_one_row) — brings the constraint to whatever the LATEST "
-            "code defines in one step, regardless of which of those "
-            "historical widenings a given database happens to be missing."
+            "SHIPPING_COST posting path; 'payroll' / "
+            "'employee_loan_disbursement', added 2026-09-10 for the new "
+            "PAYROLL posting path and the new EMPLOYEE_LOAN_RECEIVABLE asset "
+            "account; and 'item_purchase' / 'inbound_shipping' / "
+            "'item_purchase_and_inbound_shipping', added 2026-09-10 as more "
+            "specific COGS sub-labels (all three still post to the existing "
+            "COGS account — a labeling/traceability improvement, not a new "
+            "expense type; 'cogs_purchase' itself is kept, unchanged) — see "
+            "ingestion/matching.py's _post_one_row) — brings the constraint "
+            "to whatever the LATEST code defines in one step, regardless of "
+            "which of those historical widenings a given database happens "
+            "to be missing."
         ),
         table="review_queue",
         apply_sql=(
@@ -365,7 +373,9 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "(category IS NULL OR category IN ('revenue_settlement','cogs_purchase',"
             "'consignment_payout','internal_transfer','internal_transfer_landing',"
             "'operating_expense','owners_draw','owners_contribution',"
-            "'interest_income','contract_labor','shipping_cost','other'))",
+            "'interest_income','contract_labor','shipping_cost','payroll',"
+            "'employee_loan_disbursement','item_purchase','inbound_shipping',"
+            "'item_purchase_and_inbound_shipping','other'))",
         ),
     ),
     MigrationStep(
@@ -496,6 +506,93 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
     # test schema's create_schema() call). See scripts/
     # ensure_other_income_account.py for the one-off, idempotent real
     # -database equivalent instead.
+    MigrationStep(
+        id="account_types_employee_loan_receivable",
+        description=(
+            "account_types row for EMPLOYEE_LOAN_RECEIVABLE (2026-09-10) — a "
+            "new Assets line for no-interest loans the company gives "
+            "employees, repaid via salary deduction (see ledger/chart_of_"
+            "accounts.py's inline note; the real Fariz Pradana loan, Rp "
+            "27,000,000 disbursed 2026-08-17, is the concrete real case this "
+            "backs). Same exact pattern/reasoning as "
+            "'account_types_contract_labor'/'account_types_other_income' "
+            "above: account_types.code has a UNIQUE constraint and "
+            "ledger.seed.seed_account_types is a plain INSERT with no "
+            "upsert guard, so a brand-new account_type added to the Python "
+            "catalog after a database was already seeded needs an explicit, "
+            "idempotent INSERT here."
+        ),
+        table="account_types",
+        already_applied_check=(
+            "SELECT 1 FROM account_types WHERE code = 'EMPLOYEE_LOAN_RECEIVABLE'"
+        ),
+        apply_sql=(
+            "INSERT INTO account_types (code, name, statement_section, "
+            "normal_balance, scope_kind, is_contra) "
+            "SELECT 'EMPLOYEE_LOAN_RECEIVABLE', 'Employee Loan Receivable', "
+            "'asset', 'debit', 'consolidated', false "
+            "WHERE NOT EXISTS (SELECT 1 FROM account_types WHERE code = "
+            "'EMPLOYEE_LOAN_RECEIVABLE')",
+        ),
+    ),
+    # NOTE: same as the account_types_contract_labor/account_types_other_income
+    # steps above — this only creates the account_types CATALOG row. The
+    # actual postable `accounts` row (the consolidated singleton instance
+    # EMPLOYEE_LOAN_RECEIVABLE needs before anything can post to it) is
+    # deliberately NOT a MIGRATIONS step, for the identical reason documented
+    # there. See scripts/ensure_employee_loan_receivable_account.py for the
+    # one-off, idempotent real-database equivalent instead.
+    MigrationStep(
+        id="review_queue_loan_repayment_amount_idr",
+        description=(
+            "review_queue.loan_repayment_amount_idr (nullable) — 2026-09-10, "
+            "backs the 'payroll' category's optional embedded employee-loan "
+            "-repayment split (see ingestion.matching._post_one_row and "
+            "ledger.posting.post_payroll_with_loan_repayment). When a human "
+            "reviewing a Payroll bank line also specifies a repayment amount "
+            "here, the row posts as a 3-line entry (gross Payroll expense / "
+            "credit EMPLOYEE_LOAN_RECEIVABLE for the repayment / credit the "
+            "paying account for the actual net transfer) instead of a flat "
+            "2-line expense. NULL (the overwhelming default) means a plain "
+            "Payroll line with no embedded loan deduction. The employee this "
+            "repayment applies to is identified via the row's existing, "
+            "already-generic ``consignor_item_ref`` field (same field reused "
+            "for the employee-loan-disbursement category's employee "
+            "reference) — no separate employee-name column needed."
+        ),
+        table="review_queue",
+        already_applied_check=(
+            "SELECT 1 FROM information_schema.columns WHERE table_name="
+            "'review_queue' AND column_name='loan_repayment_amount_idr'"
+        ),
+        apply_sql=(
+            "ALTER TABLE review_queue ADD COLUMN IF NOT EXISTS "
+            "loan_repayment_amount_idr NUMERIC(20,2)",
+        ),
+    ),
+    MigrationStep(
+        id="review_queue_missing_reference_reason",
+        description=(
+            "review_queue.missing_reference_reason (nullable) — 2026-09-10, "
+            "QA-found gap fix: backs ingestion.matching.post_pending_rows' "
+            "new employee-reference guard (see _missing_employee_ref_reason) "
+            "— an 'employee_loan_disbursement' row (always) or a 'payroll' "
+            "row with a loan_repayment_amount_idr set (only then) with a "
+            "blank consignor_item_ref is never posted with a silently "
+            "substituted placeholder reference; the reason is recorded here "
+            "instead, for a human to see and fill in the reference. Same "
+            "pattern as sign_mismatch_reason above."
+        ),
+        table="review_queue",
+        already_applied_check=(
+            "SELECT 1 FROM information_schema.columns WHERE table_name="
+            "'review_queue' AND column_name='missing_reference_reason'"
+        ),
+        apply_sql=(
+            "ALTER TABLE review_queue ADD COLUMN IF NOT EXISTS "
+            "missing_reference_reason TEXT",
+        ),
+    ),
     MigrationStep(
         id="review_queue_sign_mismatch_reason",
         description=(

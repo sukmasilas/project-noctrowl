@@ -55,6 +55,7 @@
         <td>
           {% if row.posted_at %}<span class="badge green">✓ {{ row.posted_at.strftime('%Y-%m-%d %H:%M') }}</span>
           {% elif row.sign_mismatch_reason %}<span class="badge red" title="{{ row.sign_mismatch_reason }}">⚠ Not posted — sign/category mismatch</span>
+          {% elif row.missing_reference_reason %}<span class="badge red" title="{{ row.missing_reference_reason }}">⚠ Not posted — missing employee reference</span>
           {% elif row.labeled_at %}<span class="small">Queued for next sync</span>
           {% else %}—{% endif %}
         </td>
@@ -62,6 +63,11 @@
       {% if row.sign_mismatch_reason and not row.posted_at %}
       <tr class="figure-row">
         <td colspan="7"><span class="small">{{ row.sign_mismatch_reason }}</span></td>
+      </tr>
+      {% endif %}
+      {% if row.missing_reference_reason and not row.posted_at %}
+      <tr class="figure-row">
+        <td colspan="7"><span class="small">{{ row.missing_reference_reason }}</span></td>
       </tr>
       {% endif %}
       {% if row.match_status == 'needs_review' and not row.posted_at %}
@@ -79,6 +85,10 @@
               </select>
             </label>
             <label>Consignor/Item Ref <input type="text" name="consignor_item_ref" value="{{ row.consignor_item_ref or '' }}"></label>
+            <label>Loan repayment (IDR, Payroll only)
+              <input type="number" step="1" min="1" name="loan_repayment_amount_idr" value="{{ row.loan_repayment_amount_idr or '' }}" placeholder="e.g. 1500000">
+            </label>
+            <span class="small">For a Payroll row that includes an employee-loan installment deduction — leave blank for a plain payroll payment. Use the Consignor/Item Ref field above for the employee's name.</span>
             <button type="submit">Save</button>
           </form>
         </td>

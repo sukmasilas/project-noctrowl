@@ -1375,3 +1375,160 @@ def post_reversal_entry(
         update(journal_entries).where(journal_entries.c.id == original_journal_entry_id).values(reversed_by_id=reversal_id)
     )
     return reversal_id
+
+
+# ---------------------------------------------------------------------------
+# Employee loans (added 2026-09-10) — no-interest loans the company gives
+# employees, repaid via a salary deduction. Tracked as ONE aggregate asset
+# account (EMPLOYEE_LOAN_RECEIVABLE, see ledger/chart_of_accounts.py), same
+# "one aggregate account + per-transaction reference" pattern already used
+# for CONSIGNOR_PAYABLE — the employee reference reuses the existing,
+# already-generic ``consignor_item_ref`` Line field (never touches P&L or
+# equity, only ever this asset account and whatever paid/received it).
+# ---------------------------------------------------------------------------
+
+
+def post_employee_loan_disbursement(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    employee_ref: str,
+    paying_account_type_code: str = "BCA_MAIN",
+    paying_ebay_account_id: int | None = None,
+    paying_wallet_group_id: int | None = None,
+    amount_usd_ref: Decimal | None = None,
+    fx_rate_used: Decimal | None = None,
+    memo: str | None = None,
+) -> int:
+    """A one-off loan disbursement to an employee — debits
+    EMPLOYEE_LOAN_RECEIVABLE (the company is now owed this money back, via
+    payroll deduction) and credits whatever account actually paid it out
+    (default BCA_MAIN, same generic asset-account resolution as
+    ``post_operating_expense``). Never touches P&L or equity.
+
+    ``employee_ref`` is REQUIRED (unlike most optional reference kwargs
+    elsewhere in this module) — the whole point of retaining it is
+    traceability for an aggregate account with no per-employee sub-ledger
+    (see CLAUDE.md's Core accounting rules, Consignor Payable's identical
+    reasoning); an unlabeled disbursement would defeat that.
+
+    ``amount_usd_ref``/``fx_rate_used`` follow this module's established
+    optional-USD-reference convention (see ``post_consignor_reimbursement``'s
+    docstring) — only meaningful when ``paying_account_type_code`` is a
+    USD-denominated account (i.e. ``PAYONEER_WALLET``); both default None.
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_idr <= 0:
+        raise ValueError("amount_idr must be > 0 — a disbursement is a real, positive amount lent out.")
+    if not employee_ref:
+        raise ValueError("employee_ref is required (traceability, same pattern as consignor_item_ref).")
+    if amount_usd_ref is not None:
+        _require_decimal(amount_usd_ref, "amount_usd_ref")
+    if fx_rate_used is not None:
+        _require_decimal(fx_rate_used, "fx_rate_used")
+
+    receivable_id = _singleton(conn, "EMPLOYEE_LOAN_RECEIVABLE")
+    paying_id = get_account_id(
+        conn,
+        paying_account_type_code,
+        ebay_account_id=paying_ebay_account_id,
+        wallet_group_id=paying_wallet_group_id,
+    )
+    common_kwargs = dict(
+        consignor_item_ref=employee_ref, amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used
+    )
+    lines = [
+        debit(receivable_id, amount_idr, **common_kwargs),
+        credit(paying_id, amount_idr, **common_kwargs),
+    ]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
+
+
+def post_payroll_with_loan_repayment(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    net_transfer_idr: Decimal,
+    loan_repayment_idr: Decimal,
+    employee_ref: str,
+    paying_account_type_code: str = "BCA_MAIN",
+    paying_ebay_account_id: int | None = None,
+    paying_wallet_group_id: int | None = None,
+    amount_usd_ref: Decimal | None = None,
+    fx_rate_used: Decimal | None = None,
+    memo: str | None = None,
+) -> int:
+    """A payroll bank transaction that has an employee-loan installment
+    deducted from it before the transfer went out — the real, common case
+    this exists for is a payroll line whose transferred amount is LESS than
+    the employee's normal salary because part of it was withheld to repay a
+    loan (see CLAUDE.md's Core accounting rules / the real Fariz Pradana
+    loan example). There is no separate payroll record system this can be
+    derived from — a human reviewing the transaction supplies
+    ``loan_repayment_idr`` directly (see webapp/review_queue_bp.py and
+    ingestion.matching._post_one_row's 'payroll' branch).
+
+    Posts a 3-line entry, per Main-agent's brief exactly:
+      debit  PAYROLL for the full GROSS amount (net_transfer_idr + loan_repayment_idr)
+      credit EMPLOYEE_LOAN_RECEIVABLE for loan_repayment_idr
+      credit the paying account for the actual net amount transferred
+
+    This correctly shows the employee's full gross salary cost as a real
+    Payroll expense (not understated by the deduction) while the loan
+    balance draws down by exactly the installment amount — never touches
+    P&L via EMPLOYEE_LOAN_RECEIVABLE (only the PAYROLL line does, same as
+    any other payroll cost).
+
+    ``employee_ref`` is REQUIRED — same traceability reasoning as
+    ``post_employee_loan_disbursement`` above; there is no other way to know
+    which employee's loan balance this repayment should draw down against
+    an aggregate receivable account.
+
+    ``amount_usd_ref``/``fx_rate_used`` (added 2026-09-10, QA-found gap — the
+    same bug class Milestone 5 already found and fixed elsewhere in this
+    module, see ``post_consignor_reimbursement``'s docstring: a posting
+    function missing this threading silently corrupts
+    ``scheduling.fx_revaluation.compute_payoneer_wallet_balance``'s USD sum
+    for any line that touches a Payoneer Wallet) follow this module's
+    established optional-USD-reference convention — positive magnitude,
+    tagged on ALL THREE lines (matching the "reference on the whole
+    TRANSACTION, not just the USD-currency side" convention already used
+    elsewhere), only meaningful when ``paying_account_type_code`` is
+    ``PAYONEER_WALLET``. Both default None; existing callers unaffected.
+    """
+    _require_decimal(net_transfer_idr, "net_transfer_idr")
+    _require_decimal(loan_repayment_idr, "loan_repayment_idr")
+    if net_transfer_idr <= 0:
+        raise ValueError("net_transfer_idr must be > 0 — the real amount actually transferred to the employee.")
+    if loan_repayment_idr <= 0:
+        raise ValueError(
+            "loan_repayment_idr must be > 0 — call post_operating_expense(expense_account_type_code="
+            "'PAYROLL', ...) instead for a plain payroll line with no embedded loan repayment."
+        )
+    if not employee_ref:
+        raise ValueError("employee_ref is required (traceability, same pattern as consignor_item_ref).")
+    if amount_usd_ref is not None:
+        _require_decimal(amount_usd_ref, "amount_usd_ref")
+    if fx_rate_used is not None:
+        _require_decimal(fx_rate_used, "fx_rate_used")
+
+    gross_idr = net_transfer_idr + loan_repayment_idr
+    payroll_id = _singleton(conn, "PAYROLL")
+    receivable_id = _singleton(conn, "EMPLOYEE_LOAN_RECEIVABLE")
+    paying_id = get_account_id(
+        conn,
+        paying_account_type_code,
+        ebay_account_id=paying_ebay_account_id,
+        wallet_group_id=paying_wallet_group_id,
+    )
+
+    common_kwargs = dict(
+        consignor_item_ref=employee_ref, amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used
+    )
+    lines = [
+        debit(payroll_id, gross_idr, **common_kwargs),
+        credit(receivable_id, loan_repayment_idr, **common_kwargs),
+        credit(paying_id, net_transfer_idr, **common_kwargs),
+    ]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)

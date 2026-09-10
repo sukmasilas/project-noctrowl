@@ -23,7 +23,9 @@
     <a class="nav-sub {% if request.endpoint == 'reports.cash_flow' %}active{% endif %}" href="{{ url_for('reports.cash_flow') }}">Cash Flow</a>
     <a class="nav-sub {% if request.endpoint == 'reports.pnl' %}active{% endif %}" href="{{ url_for('reports.pnl') }}">P&amp;L</a>
     <a class="nav-sub {% if request.endpoint == 'reports.equity' %}active{% endif %}" href="{{ url_for('reports.equity') }}">Equity</a>
-    <a class="nav-item {% if request.endpoint == 'settings.payout_tiers' %}active{% endif %}" href="{{ url_for('settings.payout_tiers') }}">Settings</a>
+    <div class="nav-item {% if request.blueprint == 'settings' %}active{% endif %}">Settings</div>
+    <a class="nav-sub {% if request.endpoint == 'settings.payout_tiers' %}active{% endif %}" href="{{ url_for('settings.payout_tiers') }}">Payout Tiers</a>
+    <a class="nav-sub {% if request.endpoint == 'settings.employee_loans_index' %}active{% endif %}" href="{{ url_for('settings.employee_loans_index') }}">Employee Loans</a>
     <form method="post" action="{{ url_for('auth.logout') }}" style="margin-top:auto;padding:12px 18px;">
       <button type="submit" class="btn-secondary" style="width:100%;">Log out</button>
     </form>

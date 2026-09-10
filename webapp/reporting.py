@@ -249,7 +249,36 @@ def revenue_report(conn: Connection, *, period_month: _dt.date, ebay_account_id:
 #     for QA/Main-agent to double-check.
 # ---------------------------------------------------------------------------
 
-CASH_STATEMENT_SECTION = "asset"  # EBAY_WALLET/PAYONEER_WALLET/BCA_BRIDGING/BCA_MAIN — see docstring above.
+CASH_STATEMENT_SECTION = "asset"  # kept for backward-compatible reference only — see CASH_ACCOUNT_TYPE_CODES below.
+
+# BUG FIX (2026-09-10, found while adding EMPLOYEE_LOAN_RECEIVABLE — a new,
+# genuine Assets-section account per CLAUDE.md's Chart of accounts, but NOT
+# a wallet/bank cash account): this module's "Cash" concept was defined as
+# "every account under statement_section='asset'", with an explicit comment
+# above claiming that's "confirmed to be exactly and only" the 4 wallet/bank
+# accounts. That was only ever true because, until now, those 4 WERE the
+# entire Assets section. Adding any other Assets-section account type (like
+# EMPLOYEE_LOAN_RECEIVABLE) breaks that assumption silently: it gets swept
+# into Beginning/Ending Cash (via _cash_account_rows below, previously
+# filtered on statement_section alone) while ALSO being correctly bucketed
+# as a non-cash Operating line (_CASH_FLOW_CODE_TO_KEY) — double-counting it
+# and breaking the Beginning+NetChange=Ending identity (confirmed by a real
+# failing test: a lone employee-loan disbursement produced a
+# ``difference_idr`` of the full disbursed amount, not 0).
+#
+# Fixed by defining "Cash" as an explicit account-TYPE-CODE whitelist
+# instead of a broad statement_section match. For every account type that
+# existed before this fix, this produces IDENTICAL results (same 4 codes)
+# — every existing Balance Sheet/Cash Flow number for EBAY_WALLET/
+# PAYONEER_WALLET/BCA_BRIDGING/BCA_MAIN is completely unchanged. The ONLY
+# practical effect is that a genuinely non-cash Assets-section account
+# (EMPLOYEE_LOAN_RECEIVABLE now, and any future one) is correctly excluded
+# from "Cash" instead of silently corrupting it. The Balance Sheet's own
+# asset-section listing (webapp.reporting._account_instance_lines) is
+# UNAFFECTED — it still correctly lists EMPLOYEE_LOAN_RECEIVABLE as its own
+# Assets line, exactly as it should; only THIS module's separate, narrower
+# "which accounts count as Cash for the Cash Flow Statement" concept changes.
+CASH_ACCOUNT_TYPE_CODES = {"EBAY_WALLET", "PAYONEER_WALLET", "BCA_BRIDGING", "BCA_MAIN"}
 
 # account_type code -> cash-flow line key, for every non-cash account type
 # that can appear in Operating or Financing. CONSIGNOR_PAYABLE is handled
@@ -270,6 +299,22 @@ _CASH_FLOW_CODE_TO_KEY = {
     "OTHER_INCOME": "other_income",
     "OWNERS_CAPITAL": "owners_capital",
     "OWNERS_DRAW": "owners_draw",
+    # Added 2026-09-10 alongside the new EMPLOYEE_LOAN_RECEIVABLE asset
+    # account (see ledger/chart_of_accounts.py). REQUIRED here, not
+    # optional decoration: this dict is a WHITELIST — any cash-touching
+    # entry's non-cash counterpart line that ISN'T in this dict silently
+    # drops out of the Operating/Financing totals entirely, which would
+    # break the Beginning+NetChange=Ending identity (difference_idr) the
+    # moment a real employee-loan disbursement or an embedded-in-payroll
+    # repayment posts (both touch a cash account on one side and
+    # EMPLOYEE_LOAN_RECEIVABLE on the other). Bucketed under Operating (a
+    # single net "employee_loans" line — disbursements net outflow,
+    # repayments received net inflow) rather than inventing a new Investing
+    # section (this module's Investing bucket is explicitly unbuilt/always
+    # empty — see the docstring above) — a reasonable, disclosed judgment
+    # call for a single small-dollar real loan, flagged for QA/Main-agent
+    # to confirm rather than silently assumed as the only valid treatment.
+    "EMPLOYEE_LOAN_RECEIVABLE": "employee_loans",
 }
 
 # side: 'credit' = the accrual (a consignment sale) -> bucketed with
@@ -292,6 +337,7 @@ _CASH_FLOW_LINE_LABELS = {
     "other_income": "Other Income (owner's e-wallet pass-through)",
     "owners_capital": "Owner's Capital contributions",
     "owners_draw": "Owner's Draw",
+    "employee_loans": "Employee Loans, net (disbursed / repaid)",
 }
 
 _OPERATING_KEY_ORDER = [
@@ -307,6 +353,7 @@ _OPERATING_KEY_ORDER = [
     "interest_income",
     "realized_fx",
     "other_income",
+    "employee_loans",
 ]
 _FINANCING_KEY_ORDER = ["owners_capital", "owners_draw"]
 
@@ -353,7 +400,7 @@ def _cash_account_rows(conn: Connection):
     return conn.execute(
         select(accounts.c.id, account_types.c.normal_balance)
         .join(account_types, account_types.c.id == accounts.c.account_type_id)
-        .where(account_types.c.statement_section == CASH_STATEMENT_SECTION)
+        .where(account_types.c.code.in_(CASH_ACCOUNT_TYPE_CODES))
     ).all()
 
 
@@ -405,7 +452,7 @@ def _fx_revaluation_cash_effect(conn: Connection, period_month: _dt.date) -> Dec
         .join(accounts, accounts.c.id == journal_lines.c.account_id)
         .join(account_types, account_types.c.id == accounts.c.account_type_id)
         .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
-        .where(account_types.c.statement_section == CASH_STATEMENT_SECTION)
+        .where(account_types.c.code.in_(CASH_ACCOUNT_TYPE_CODES))
         .where(journal_entries.c.source_type == "fx_revaluation")
         .where(journal_entries.c.period_month == period_month)
     ).all()
@@ -539,7 +586,7 @@ def cash_flow_fx_effect_drilldown(conn: Connection, *, period_month: _dt.date) -
         .join(accounts, accounts.c.id == journal_lines.c.account_id)
         .join(account_types, account_types.c.id == accounts.c.account_type_id)
         .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
-        .where(account_types.c.statement_section == CASH_STATEMENT_SECTION)
+        .where(account_types.c.code.in_(CASH_ACCOUNT_TYPE_CODES))
         .where(journal_entries.c.source_type == "fx_revaluation")
         .where(journal_entries.c.period_month == period_month)
         .order_by(journal_entries.c.entry_date)

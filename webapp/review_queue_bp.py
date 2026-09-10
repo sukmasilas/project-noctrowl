@@ -5,6 +5,7 @@ docs/design/milestone-4-web-app-design.md §3.
 from __future__ import annotations
 
 import datetime as _dt
+from decimal import Decimal, InvalidOperation
 
 from flask import Blueprint, flash, redirect, render_template, request, url_for
 from sqlalchemy import func, select, update
@@ -48,7 +49,39 @@ CATEGORY_OPTIONS = [
     # ingestion.matching._post_one_row), which would misclassify a real
     # shipping cost instead of posting it to the dedicated SHIPPING_COST
     # account that already exists in the chart of accounts.
-    ("shipping_cost", "Shipping Cost"),
+    #
+    # Label only (2026-09-10, Main-agent's brief): renamed from plain
+    # "Shipping Cost" to make the OUTBOUND direction explicit in the
+    # dropdown, now that COGS also has its own "Inbound Shipping" label
+    # below — the category CODE and the account it posts to (SHIPPING_COST)
+    # are UNCHANGED, this is purely a display-label clarity improvement, not
+    # a reclassification. Kurasi (and this category generally) is confirmed
+    # genuinely outbound (to customers) — never touched by this change.
+    ("shipping_cost", "Outbound Shipping (to Customer)"),
+    # Added 2026-09-10 — more specific COGS sub-labels (see CLAUDE.md and
+    # ledger/chart_of_accounts.py's COGS account). All three post to the
+    # SAME existing COGS account as 'cogs_purchase' below (kept, unchanged,
+    # for when the distinction isn't relevant/known) — a labeling/
+    # traceability improvement only, not a new expense type. "Inbound"
+    # here means freight-in (getting PURCHASED inventory delivered to the
+    # business) — never confused with 'shipping_cost' above, which is
+    # OUTBOUND shipping to a customer.
+    ("item_purchase", "COGS — Item Purchase"),
+    ("inbound_shipping", "COGS — Inbound Shipping / Freight-In"),
+    ("item_purchase_and_inbound_shipping", "COGS — Item Purchase + Inbound Shipping"),
+    # Added 2026-09-10 — the existing PAYROLL account had no review-queue
+    # category/posting path at all until now (same pre-existing gap
+    # CONTRACT_LABOR/SHIPPING_COST each had before their own category was
+    # added). Selecting this reveals an optional "loan repayment" field in
+    # the editor below (see review_queue.html) — see CLAUDE.md's Core
+    # accounting rules and ledger.posting.post_payroll_with_loan_repayment.
+    ("payroll", "Payroll"),
+    # Added 2026-09-10 — a real, one-off loan disbursement to an employee
+    # (see ledger/chart_of_accounts.py's EMPLOYEE_LOAN_RECEIVABLE note).
+    # Posts to that new asset account, never P&L. Uses the same "Consignor/
+    # Item Ref" field below for the employee's name (traceability only, one
+    # aggregate account, same pattern as Consignor Payable).
+    ("employee_loan_disbursement", "Employee Loan Disbursement"),
     ("other", "Other"),
 ]
 
@@ -119,10 +152,60 @@ def _next_month(d: _dt.date) -> _dt.date:
 def label_row(row_id: int):
     conn = get_db()
     category = request.form.get("category") or None
-    consignor_item_ref = request.form.get("consignor_item_ref") or None
+    # QA-found gap (2026-09-10): stripped, same as loan_repayment_amount_idr
+    # below — a whitespace-only submission ("   ") is truthy and previously
+    # passed every "if not consignor_item_ref" check here unstripped,
+    # letting a row save as falsely "labeled" with no real employee
+    # reference (the post_pending_rows backstop still caught it before
+    # posting, but the row misleadingly looked done in the UI until the
+    # next sync re-flagged it).
+    consignor_item_ref = (request.form.get("consignor_item_ref") or "").strip() or None
     valid_categories = {c for c, _ in CATEGORY_OPTIONS}
     if category not in valid_categories:
         flash("Please choose a valid category.", "error")
+        return _back_to_queue(request)
+
+    # Added 2026-09-10 — the optional embedded employee-loan-repayment split
+    # on a 'payroll' row (see CLAUDE.md's Core accounting rules and
+    # ledger.posting.post_payroll_with_loan_repayment). Deliberately only
+    # ever set by an explicit human entry here, never inferred — matches
+    # every other "never silently guess" rule in this file.
+    raw_loan_repayment = (request.form.get("loan_repayment_amount_idr") or "").strip()
+    loan_repayment_amount_idr = None
+    if raw_loan_repayment:
+        if category != "payroll":
+            flash("Loan repayment amount only applies to the Payroll category.", "error")
+            return _back_to_queue(request)
+        try:
+            loan_repayment_amount_idr = Decimal(raw_loan_repayment)
+        except InvalidOperation:
+            flash("Loan repayment amount must be a number (e.g. 1500000).", "error")
+            return _back_to_queue(request)
+        if loan_repayment_amount_idr <= 0:
+            flash("Loan repayment amount must be greater than zero.", "error")
+            return _back_to_queue(request)
+        if not consignor_item_ref:
+            flash(
+                "Please also fill in the employee's name (Consignor/Item Ref field) "
+                "when specifying a loan repayment amount — it's needed to know whose "
+                "loan balance to draw down.",
+                "error",
+            )
+            return _back_to_queue(request)
+
+    # QA-found gap (2026-09-10): 'employee_loan_disbursement' ALWAYS needs a
+    # real employee reference — same reasoning as the loan-repayment check
+    # above, and CLAUDE.md's existing Consignor Payable traceability rule.
+    # Without this, a blank Consignor/Item Ref would previously have been
+    # silently posted as a placeholder "unspecified" employee reference
+    # (see ingestion/matching.py's _missing_employee_ref_reason, the
+    # matching defense-in-depth backstop for this same requirement).
+    if category == "employee_loan_disbursement" and not consignor_item_ref:
+        flash(
+            "Please fill in the employee's name (Consignor/Item Ref field) for an "
+            "Employee Loan Disbursement — it's needed to know whose loan this is.",
+            "error",
+        )
         return _back_to_queue(request)
 
     # The posted_at IS NULL guard is a deliberate, explicit match to
@@ -137,6 +220,7 @@ def label_row(row_id: int):
         .values(
             category=category,
             consignor_item_ref=consignor_item_ref,
+            loan_repayment_amount_idr=loan_repayment_amount_idr,
             labeled_at=_dt.datetime.now(_dt.timezone.utc),
         )
     )

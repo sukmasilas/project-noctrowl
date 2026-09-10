@@ -22,7 +22,7 @@ from ingestion.schema import bank_keyword_rules, ebay_expected_payouts, invoice_
 from ledger import posting
 from ledger.entities import get_account_id
 from ledger.schema import consignment_sales, journal_entries, journal_lines
-from tests.helpers import assert_balanced, lines_by_code
+from tests.helpers import assert_balanced, get_lines, lines_by_code
 from tests.ingestion.conftest import make_source_document
 
 
@@ -1866,3 +1866,530 @@ def test_sign_mismatch_consignment_payout_and_contract_labor_never_post(iprototy
     assert post_result.posted == 0
     assert post_result.skipped_sign_mismatch == 2
     assert conn.execute(select(journal_entries.c.id)).all() == []
+
+
+# ---------------------------------------------------------------------------
+# Expanded COGS sub-categories (2026-09-10) — 'item_purchase' /
+# 'inbound_shipping' / 'item_purchase_and_inbound_shipping' all post
+# IDENTICALLY to the existing COGS account as plain 'cogs_purchase' — a
+# labeling/traceability improvement only, never a new expense type.
+# ---------------------------------------------------------------------------
+
+
+def test_item_purchase_and_inbound_shipping_sub_categories_all_post_to_cogs(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 5, 3), raw_description="Item purchase A", amount_idr=Decimal("-1000000"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 5, 4), raw_description="Freight-in B", amount_idr=Decimal("-200000"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 5, 5), raw_description="Item + shipping C", amount_idr=Decimal("-500000"), occurrence_index=1),
+        ],
+    )
+    rows = conn.execute(select(review_queue.c.id).order_by(review_queue.c.id)).scalars().all()
+    categories = ["item_purchase", "inbound_shipping", "item_purchase_and_inbound_shipping"]
+    for row_id, category in zip(rows, categories):
+        conn.execute(
+            update(review_queue)
+            .values(category=category, labeled_at=_dt.datetime.now(_dt.timezone.utc))
+            .where(review_queue.c.id == row_id)
+        )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 3
+
+    cogs_id = get_account_id(conn, "COGS")
+    cogs_debits = conn.execute(
+        select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == cogs_id)
+    ).scalars().all()
+    assert sorted(cogs_debits) == [Decimal("200000"), Decimal("500000"), Decimal("1000000")]
+
+    # None of these leaked into GENERAL_OPEX.
+    general_opex_id = get_account_id(conn, "GENERAL_OPEX")
+    assert conn.execute(select(journal_lines.c.id).where(journal_lines.c.account_id == general_opex_id)).all() == []
+
+    # Categories themselves are preserved on the (now-posted) rows — the
+    # actual traceability improvement this feature exists for.
+    posted_categories = conn.execute(select(review_queue.c.category).order_by(review_queue.c.id)).scalars().all()
+    assert posted_categories == categories
+
+    # Plain 'cogs_purchase' still works unchanged, side by side (same
+    # source document — a consolidated bank_statement_master source is a
+    # fixed once-per-period expectation, see ux_source_documents_consolidated).
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[RawLine(transaction_date=_dt.date(2026, 5, 6), raw_description="Plain COGS", amount_idr=Decimal("-300000"), occurrence_index=1)],
+    )
+    plain_row_id = conn.execute(
+        select(review_queue.c.id).where(review_queue.c.raw_description == "Plain COGS")
+    ).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="cogs_purchase", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == plain_row_id)
+    )
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 1
+    cogs_debits2 = conn.execute(
+        select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == cogs_id)
+    ).scalars().all()
+    assert Decimal("300000") in cogs_debits2
+
+
+# ---------------------------------------------------------------------------
+# Payroll + optional embedded employee-loan repayment (2026-09-10). See
+# CLAUDE.md's Core accounting rules and ledger.posting.
+# post_payroll_with_loan_repayment. The real motivating case: Fariz
+# Pradana's Rp 27,000,000 loan disbursed 2026-08-17, repaid Rp 1,500,000/
+# month via a reduced payroll transfer.
+# ---------------------------------------------------------------------------
+
+
+def test_plain_payroll_row_posts_flat_expense_to_payroll_account(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[RawLine(transaction_date=_dt.date(2026, 5, 25), raw_description="gaji / DENNY WIJAYA", amount_idr=Decimal("-10000000"), occurrence_index=1)],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="payroll", consignor_item_ref="Denny Wijaya", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+    assert lines["PAYROLL"][0].debit_amount_idr == Decimal("10000000")
+    assert "EMPLOYEE_LOAN_RECEIVABLE" not in lines
+    assert lines["BCA_MAIN"][0].credit_amount_idr == Decimal("10000000")
+    assert_balanced(conn, entry_id)
+
+
+def test_payroll_row_with_loan_repayment_posts_three_line_entry(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 9, 25),
+                raw_description="gaji / FARIZ PRADANA",
+                amount_idr=Decimal("-8500000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="payroll",
+            consignor_item_ref="Fariz Pradana",
+            loan_repayment_amount_idr=Decimal("1500000"),
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+    assert lines["PAYROLL"][0].debit_amount_idr == Decimal("10000000")  # gross, not the reduced net transfer
+    assert lines["PAYROLL"][0].consignor_item_ref == "Fariz Pradana"
+    assert lines["EMPLOYEE_LOAN_RECEIVABLE"][0].credit_amount_idr == Decimal("1500000")
+    assert lines["EMPLOYEE_LOAN_RECEIVABLE"][0].consignor_item_ref == "Fariz Pradana"
+    assert lines["BCA_MAIN"][0].credit_amount_idr == Decimal("8500000")  # the real amount transferred
+    assert_balanced(conn, entry_id)
+
+    # Idempotent: a second sync run must not double-post.
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 0
+
+
+def test_payroll_sign_mismatch_still_caught(iprototype):
+    """'payroll' is directional (always an outflow) — a wrongly-signed
+    inflow must never silently post, same guard as every other directional
+    category."""
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[RawLine(transaction_date=_dt.date(2026, 5, 25), raw_description="gaji misclassified", amount_idr=Decimal("10000000"), occurrence_index=1)],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="payroll", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_sign_mismatch == 1
+    assert conn.execute(select(journal_entries.c.id)).all() == []
+
+
+# ---------------------------------------------------------------------------
+# Employee loan disbursement (2026-09-10) — the real Fariz Pradana loan.
+# ---------------------------------------------------------------------------
+
+
+def test_employee_loan_disbursement_posts_to_receivable_account(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 17),
+                raw_description="TRSF E-BANKING DB 1708/FTSCY/WS95271 / 27000000.00 / rab Angel / FARIZ PRADANA",
+                amount_idr=Decimal("-27000000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="employee_loan_disbursement",
+            consignor_item_ref="Fariz Pradana",
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+    assert lines["EMPLOYEE_LOAN_RECEIVABLE"][0].debit_amount_idr == Decimal("27000000")
+    assert lines["EMPLOYEE_LOAN_RECEIVABLE"][0].consignor_item_ref == "Fariz Pradana"
+    assert lines["BCA_MAIN"][0].credit_amount_idr == Decimal("27000000")
+    assert_balanced(conn, entry_id)
+
+    # Idempotent: a second sync run must not double-post.
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 0
+
+
+def test_employee_loan_disbursement_sign_mismatch_still_caught(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[RawLine(transaction_date=_dt.date(2026, 8, 17), raw_description="misclassified inflow", amount_idr=Decimal("27000000"), occurrence_index=1)],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="employee_loan_disbursement", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_sign_mismatch == 1
+
+
+# ---------------------------------------------------------------------------
+# QA-found gap fix (2026-09-10): a blank employee reference must NEVER
+# silently post as a placeholder "unspecified" employee_ref — the sole
+# reason a per-transaction reference is retained on an aggregate account at
+# all (same reasoning CLAUDE.md already applies to Consignor Payable) is
+# defeated if it can be blank. This is the defense-in-depth backstop for
+# webapp/review_queue_bp.py::label_row's own equivalent validation — these
+# tests bypass that route entirely (direct SQL, like every other matching
+# test) to prove ingestion.matching itself refuses to post, independent of
+# the UI layer.
+# ---------------------------------------------------------------------------
+
+
+def test_employee_loan_disbursement_with_blank_employee_ref_never_posts(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[RawLine(transaction_date=_dt.date(2026, 8, 17), raw_description="no employee ref given", amount_idr=Decimal("-27000000"), occurrence_index=1)],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="employee_loan_disbursement", consignor_item_ref=None, labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_missing_employee_ref == 1
+    assert conn.execute(select(journal_entries.c.id)).all() == []  # nothing posted, definitely not to "unspecified"
+
+    row = conn.execute(select(review_queue.c.match_status, review_queue.c.missing_reference_reason).where(review_queue.c.id == row_id)).first()
+    assert row.match_status == "needs_review"
+    assert row.missing_reference_reason is not None
+
+
+def test_employee_loan_disbursement_with_blank_string_employee_ref_never_posts(iprototype):
+    """A blank/whitespace-only string (not just SQL NULL) must be treated
+    the same as no reference at all."""
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[RawLine(transaction_date=_dt.date(2026, 8, 17), raw_description="blank string ref", amount_idr=Decimal("-27000000"), occurrence_index=1)],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="employee_loan_disbursement", consignor_item_ref="   ", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_missing_employee_ref == 1
+
+
+def test_payroll_with_loan_repayment_and_blank_employee_ref_never_posts(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[RawLine(transaction_date=_dt.date(2026, 9, 25), raw_description="gaji no ref", amount_idr=Decimal("-8500000"), occurrence_index=1)],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="payroll",
+            consignor_item_ref=None,
+            loan_repayment_amount_idr=Decimal("1500000"),
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_missing_employee_ref == 1
+    assert conn.execute(select(journal_entries.c.id)).all() == []
+
+
+def test_plain_payroll_with_no_loan_repayment_and_blank_ref_still_posts(iprototype):
+    """A plain payroll line with NO embedded loan repayment never touches
+    EMPLOYEE_LOAN_RECEIVABLE at all, so it has nothing to need a reference
+    for — the missing-ref guard must not over-reach and block it."""
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[RawLine(transaction_date=_dt.date(2026, 5, 25), raw_description="gaji / RICO", amount_idr=Decimal("-6000000"), occurrence_index=1)],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="payroll", consignor_item_ref=None, labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    assert post_result.skipped_missing_employee_ref == 0
+
+
+def test_missing_employee_ref_flag_clears_once_reference_is_filled_in_and_posted(iprototype):
+    """Once a human fills in the reference and the row posts successfully,
+    the stale missing_reference_reason must not linger."""
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[RawLine(transaction_date=_dt.date(2026, 8, 17), raw_description="fix me", amount_idr=Decimal("-27000000"), occurrence_index=1)],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="employee_loan_disbursement", consignor_item_ref=None, labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+    first_pass = post_pending_rows(conn)
+    assert first_pass.skipped_missing_employee_ref == 1
+
+    conn.execute(
+        update(review_queue).values(consignor_item_ref="Fariz Pradana").where(review_queue.c.id == row_id)
+    )
+    second_pass = post_pending_rows(conn)
+    assert second_pass.posted == 1
+
+    row = conn.execute(select(review_queue.c.missing_reference_reason).where(review_queue.c.id == row_id)).first()
+    assert row.missing_reference_reason is None
+
+
+def test_payroll_with_loan_repayment_carries_usd_reference_when_paid_from_payoneer(iprototype):
+    """QA-found gap fix (2026-09-10): post_payroll_with_loan_repayment must
+    thread amount_usd_ref/fx_rate_used through, same as every other posting
+    function a Payoneer-wallet-sourced review-queue row can reach — see
+    scheduling.fx_revaluation.compute_payoneer_wallet_balance's dependence
+    on every real line touching a Payoneer Wallet having a USD reference.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="payoneer_csv",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 9, 25),
+                raw_description="Payroll paid from Payoneer",
+                amount_idr=Decimal("-8500000"),
+                amount_usd_ref=Decimal("-535.32"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="payroll",
+            consignor_item_ref="Fariz Pradana",
+            loan_repayment_amount_idr=Decimal("1500000"),
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)).scalar_one()
+    lines = get_lines(conn, entry_id)
+    payoneer_wallet_id = get_account_id(conn, "PAYONEER_WALLET", wallet_group_id=topo["wallet_group_id"])
+    payoneer_line = next(l for l in lines if l.account_id == payoneer_wallet_id)
+    # Always a positive USD magnitude, direction encoded structurally by
+    # debit/credit side — same convention as every other posting function.
+    assert payoneer_line.amount_usd_ref == Decimal("535.32")
+
+
+# ---------------------------------------------------------------------------
+# Keyword-matching word-boundary fix (2026-09-10) — "BIAYA ADM" must match
+# the real, shorter BCA Main Account admin-fee line WITHOUT also matching
+# the textually similar but genuinely different Bridging "Biaya
+# administrasi rekening"/"Biaya administrasi kartu debit" lines. See
+# ingestion/matching.py's _keyword_matches docstring.
+# ---------------------------------------------------------------------------
+
+
+def test_biaya_adm_keyword_matches_real_master_statement_forms(iprototype):
+    conn, topo = iprototype
+    conn.execute(
+        bank_keyword_rules.insert().values(
+            keyword="BIAYA ADM", category="operating_expense", expense_account_type_code="GENERAL_OPEX"
+        )
+    )
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 5, 15), raw_description="BIAYA ADM", amount_idr=Decimal("-10000"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 6, 1), raw_description="BIAYA ADM 0998", amount_idr=Decimal("-10000"), occurrence_index=1),
+        ],
+    )
+    match_result = run_auto_match(conn)
+    assert match_result.matched == 2
+    rows = conn.execute(select(review_queue.c.category, review_queue.c.match_rule)).all()
+    assert all(r.category == "operating_expense" and r.match_rule == "e" for r in rows)
+
+
+def test_biaya_adm_keyword_does_not_match_bridging_administrasi_lines(iprototype):
+    """The exact regression this fix must never introduce: the pre-existing,
+    deliberate decision that 'Biaya administrasi kartu debit' stays Needs
+    Review (see ingestion/seed.py's own note) must hold even with the new
+    bare 'BIAYA ADM' keyword seeded alongside it.
+    """
+    conn, topo = iprototype
+    conn.execute(
+        bank_keyword_rules.insert().values(
+            keyword="BIAYA ADM", category="operating_expense", expense_account_type_code="GENERAL_OPEX"
+        )
+    )
+    conn.execute(
+        bank_keyword_rules.insert().values(
+            keyword="Biaya administrasi rekening", category="operating_expense", expense_account_type_code="GENERAL_OPEX"
+        )
+    )
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 5, 31), raw_description="Biaya administrasi rekening", amount_idr=Decimal("-6000"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 5, 14), raw_description="Biaya administrasi kartu debit", amount_idr=Decimal("-6000"), occurrence_index=1),
+        ],
+    )
+    match_result = run_auto_match(conn)
+    assert match_result.matched == 1
+    assert match_result.needs_review == 1
+    rows = conn.execute(select(review_queue.c.raw_description, review_queue.c.category)).all()
+    rekening_row = next(r for r in rows if r.raw_description == "Biaya administrasi rekening")
+    kartu_debit_row = next(r for r in rows if r.raw_description == "Biaya administrasi kartu debit")
+    assert rekening_row.category == "operating_expense"
+    assert kartu_debit_row.category is None  # still correctly left for Needs Review
+
+
+def test_real_seeded_biaya_adm_keyword_matches_real_master_data(iprototype):
+    """End-to-end against ingestion.seed's actual seeded BANK_KEYWORD_RULES
+    (not a test-local ad hoc rule) — proves the real fix, not just the
+    matching primitive."""
+    from ingestion.seed import seed_bank_keyword_rules
+
+    conn, topo = iprototype
+    seed_bank_keyword_rules(conn)
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 5, 15), raw_description="BIAYA ADM", amount_idr=Decimal("-10000"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 6, 1), raw_description="BIAYA ADM 0998", amount_idr=Decimal("-10000"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 7, 1), raw_description="BIAYA ADM 0998", amount_idr=Decimal("-10000"), occurrence_index=1),
+        ],
+    )
+    run_auto_match(conn)
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 3
+    general_opex_id = get_account_id(conn, "GENERAL_OPEX")
+    debits = conn.execute(
+        select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == general_opex_id)
+    ).scalars().all()
+    assert debits == [Decimal("10000"), Decimal("10000"), Decimal("10000")]

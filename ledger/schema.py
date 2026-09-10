@@ -188,6 +188,37 @@ consignor_payout_tiers = Table(
 )
 
 # ---------------------------------------------------------------------------
+# Employee Loans — admin-editable tracking table (added 2026-09-10), same
+# "simple admin-editable table in the app" pattern as consignor_payout_tiers
+# above (see webapp/settings_bp.py's Employee Loans screen). This table is
+# master data about the LOAN TERMS (who, how much, the installment, when it
+# started) — it does not itself post anything to the ledger; the actual
+# disbursement/repayment journal entries are posted via the Review Queue
+# ('employee_loan_disbursement' / 'payroll' categories — see
+# ingestion/matching.py) and reference the employee by the SAME
+# ``consignor_item_ref`` text field used elsewhere for a non-consignor
+# traceability reference. Remaining balance is deliberately NOT stored here
+# — it's computed live (original_amount_idr minus cumulative repayment
+# credits posted to EMPLOYEE_LOAN_RECEIVABLE for this employee_name, matched
+# via journal_lines.consignor_item_ref) so it can never drift out of sync
+# with what's actually been posted — see webapp/settings_bp.py's
+# employee_loans() route.
+# ---------------------------------------------------------------------------
+
+employee_loans = Table(
+    "employee_loans",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("employee_name", Text, nullable=False),
+    Column("original_amount_idr", Numeric(20, 2), nullable=False),
+    Column("monthly_installment_idr", Numeric(20, 2), nullable=False),
+    Column("loan_start_date", Date, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("original_amount_idr > 0", name="ck_employee_loans_original_amount_positive"),
+    CheckConstraint("monthly_installment_idr > 0", name="ck_employee_loans_installment_positive"),
+)
+
+# ---------------------------------------------------------------------------
 # Journal entries (headers) and journal lines (the double-entry detail)
 # ---------------------------------------------------------------------------
 

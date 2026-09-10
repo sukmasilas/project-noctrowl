@@ -205,7 +205,15 @@ def test_real_four_month_bridging_and_main_data_no_phantom_double_post(iprototyp
     #     also catch the Bridging statement's textually distinct "Biaya
     #     administrasi kartu debit" lines (a different real fee) — those
     #     stay Needs Review, see part 6 below.
-    #   = 16 operating_expense/'e' rows total.
+    #   - "BIAYA ADM" (added 2026-09-10, real gap fix: the Main Account's own
+    #     admin-fee line is literally "BIAYA ADM"/"BIAYA ADM 0998", shorter
+    #     than — and never matched by — the "Biaya administrasi rekening"
+    #     keyword above) matches x4 across the 4 real months (once a month,
+    #     Rp10,000 each) -> operating_expense/GENERAL_OPEX, WITHOUT also
+    #     catching the Bridging statement's "Biaya administrasi rekening"/
+    #     "kartu debit" lines (see ingestion.matching._keyword_matches's
+    #     word-boundary refinement).
+    #   = 16 + 4 = 20 operating_expense/'e' rows total.
     #   - "BUNGA" matches BOTH BCA Main's own exact "BUNGA" line (x4, once a
     #     month) AND the Bridging statement's differently-worded "Bunga
     #     rekening" line (x4, once a month) — "BUNGA" is a substring of
@@ -230,18 +238,18 @@ def test_real_four_month_bridging_and_main_data_no_phantom_double_post(iprototyp
     #     SHIPPING_COST, never GENERAL_OPEX's default.
     #   = 46 shipping_cost/'e' rows total.
     keyword_rows = [r for r in rows if r.match_rule == "e"]
-    assert len(keyword_rows) == 74  # 16 opex + 12 interest_income + 46 shipping_cost
+    assert len(keyword_rows) == 78  # 20 opex + 12 interest_income + 46 shipping_cost
     opex_keyword_rows = [r for r in keyword_rows if r.category == "operating_expense"]
     interest_keyword_rows = [r for r in keyword_rows if r.category == "interest_income"]
     shipping_keyword_rows = [r for r in keyword_rows if r.category == "shipping_cost"]
-    assert len(opex_keyword_rows) == 16
+    assert len(opex_keyword_rows) == 20
     assert len(interest_keyword_rows) == 12
     assert len(shipping_keyword_rows) == 46
 
     # --- 4. Journal-entry-level proof: exactly 11 withdrawal entries (no
     # phantom second one from a landing echo) + exactly 12 sweep transfer
-    # entries (no double-post, none missing) + 74 keyword-matched entries
-    # (16 operating expense + 12 interest income + 46 shipping cost — see
+    # entries (no double-post, none missing) + 78 keyword-matched entries
+    # (20 operating expense + 12 interest income + 46 shipping cost — see
     # part 3b), each its own separate journal entry (one per real bank
     # line, per ledger.posting.post_interest_income_line's docstring on why
     # BUNGA/PAJAK BUNGA are never combined into one entry). ---
@@ -249,8 +257,8 @@ def test_real_four_month_bridging_and_main_data_no_phantom_double_post(iprototyp
     entries_by_type = Counter(e.source_type for e in all_entries)
     assert entries_by_type["payoneer_withdrawal"] == 11
     assert entries_by_type["inter_account_transfer"] == 12
-    assert entries_by_type["bank_other"] == 74
-    assert len(all_entries) == 97  # 11 + 12 + 74 — see above; every one of them accounted for
+    assert entries_by_type["bank_other"] == 78
+    assert len(all_entries) == 101  # 11 + 12 + 78 — see above; every one of them accounted for
 
     # Every landing-echo row's posted_journal_entry_id points at one of the
     # 11 EXISTING withdrawal entries, never a new one.
@@ -294,11 +302,14 @@ def test_real_four_month_bridging_and_main_data_no_phantom_double_post(iprototyp
 
     opex_lines_from_keywords = conn.execute(
         select(journal_lines.c.debit_amount_idr).where(
-            journal_lines.c.account_id == general_opex_id, journal_lines.c.debit_amount_idr.in_([Decimal("2500.00"), Decimal("6000.00")])
+            journal_lines.c.account_id == general_opex_id,
+            journal_lines.c.debit_amount_idr.in_([Decimal("2500.00"), Decimal("6000.00"), Decimal("10000.00")]),
         )
     ).scalars().all()
-    assert len(opex_lines_from_keywords) == 16
-    assert sum(opex_lines_from_keywords) == Decimal("54000.00")  # 12*2500 (BI Fast) + 4*6000 (admin fee)
+    assert len(opex_lines_from_keywords) == 20
+    assert sum(opex_lines_from_keywords) == Decimal(
+        "94000.00"
+    )  # 12*2500 (BI Fast) + 4*6000 (admin fee, rekening) + 4*10000 (admin fee, BIAYA ADM)
 
     shipping_cost_lines = conn.execute(
         select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == shipping_cost_id)
@@ -340,7 +351,7 @@ def test_real_four_month_bridging_and_main_data_no_phantom_double_post(iprototyp
     assert post_result_2.posted == 0
     assert post_result_2.skipped_pending_pair == 0
     entries_after_rerun = conn.execute(select(journal_entries.c.id)).scalars().all()
-    assert len(entries_after_rerun) == 97  # still exactly 97, not 194
+    assert len(entries_after_rerun) == 101  # still exactly 101, not 202
 
 
 def test_real_data_adversarial_duplicate_landing_line_via_raw_sql_does_not_double_reconcile(iprototype):

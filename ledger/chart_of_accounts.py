@@ -27,6 +27,21 @@ ACCOUNT_TYPES = [
     ("PAYONEER_WALLET", "Payoneer Wallet", "asset", "debit", "per_wallet_group", False),
     ("BCA_BRIDGING", "BCA Bridging Account", "asset", "debit", "per_wallet_group", False),
     ("BCA_MAIN", "BCA Main Account", "asset", "debit", "consolidated", False),
+    # Added 2026-09-10 — the company gives no-interest loans to employees,
+    # repaid via a salary deduction over a fixed number of months (e.g. the
+    # real Fariz Pradana loan: Rp 27,000,000 disbursed 2026-08-17, repaid
+    # Rp 1,500,000/month for 18 months, no interest). Tracked as ONE
+    # aggregate asset account (same pattern as CONSIGNOR_PAYABLE's one
+    # aggregate liability) — a per-transaction employee-name reference is
+    # retained on the posted journal line for traceability (reusing the
+    # existing generic consignor_item_ref field, same as how rule (b)
+    # already reuses it for "invoice:<id>" on a non-consignor match), not a
+    # full per-employee GL sub-ledger. See webapp/settings_bp.py's Employee
+    # Loans screen for the admin-editable tracking table (loan amount,
+    # installment, start date) that sits alongside this account, and
+    # ingestion/matching.py's 'employee_loan_disbursement'/'payroll'
+    # categories for how it's posted to.
+    ("EMPLOYEE_LOAN_RECEIVABLE", "Employee Loan Receivable", "asset", "debit", "consolidated", False),
     # Liabilities
     ("CONSIGNOR_PAYABLE", "Consignor Payable", "liability", "credit", "consolidated", False),
     # Equity

@@ -108,3 +108,175 @@ def test_contract_labor_is_a_selectable_category(logged_in_client, wtopology):
     assert row.category == "contract_labor"
     assert row.labeled_at is not None
     assert row.posted_at is None  # saving a label never posts by itself
+
+
+def test_employee_loan_disbursement_and_cogs_subcategories_are_selectable(logged_in_client, wtopology):
+    """2026-09-10: new categories must be selectable from the UI, same
+    interaction pattern as every other category."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    index_resp = logged_in_client.get(f"/review-queue/?period={PERIOD.isoformat()[:7]}")
+    assert index_resp.status_code == 200
+    assert b"Employee Loan Disbursement" in index_resp.data
+    assert b"COGS \xe2\x80\x94 Item Purchase" in index_resp.data
+    assert b"COGS \xe2\x80\x94 Inbound Shipping" in index_resp.data
+    assert b"Payroll" in index_resp.data
+    assert b"Outbound Shipping (to Customer)" in index_resp.data
+
+
+def test_employee_loan_disbursement_saves_with_employee_reference(logged_in_client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(
+        conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-27000000
+    )
+    conn.commit()
+
+    resp = logged_in_client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "employee_loan_disbursement", "consignor_item_ref": "Fariz Pradana", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "employee_loan_disbursement"
+    assert row.consignor_item_ref == "Fariz Pradana"
+    assert row.posted_at is None  # saving a label never posts by itself
+
+
+def test_employee_loan_disbursement_requires_employee_reference(logged_in_client, wtopology):
+    """QA-found gap (2026-09-10): a blank employee reference must be
+    rejected at the UI layer too, same as the loan-repayment case — never
+    silently saved and later posted as a placeholder "unspecified" employee
+    reference (see ingestion/matching.py's _missing_employee_ref_reason for
+    the matching defense-in-depth backstop)."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(
+        conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-27000000
+    )
+    conn.commit()
+
+    resp = logged_in_client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "employee_loan_disbursement", "consignor_item_ref": "", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None  # rejected entirely, never silently saved with no employee reference
+
+
+def test_employee_loan_disbursement_rejects_whitespace_only_employee_reference(logged_in_client, wtopology):
+    """QA-found gap (2026-09-10, round 2): a whitespace-only submission
+    ("   ") is truthy in Python, so an unstripped check would have let it
+    silently pass as a "real" reference — must be treated identically to a
+    genuinely empty string."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(
+        conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-27000000
+    )
+    conn.commit()
+
+    resp = logged_in_client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "employee_loan_disbursement", "consignor_item_ref": "   ", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None  # rejected entirely, never silently saved as "labeled" with a blank reference
+
+
+def test_payroll_row_can_save_with_loan_repayment_amount(logged_in_client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(
+        conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-8500000
+    )
+    conn.commit()
+
+    resp = logged_in_client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "payroll",
+            "consignor_item_ref": "Fariz Pradana",
+            "loan_repayment_amount_idr": "1500000",
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "payroll"
+    assert row.consignor_item_ref == "Fariz Pradana"
+    assert row.loan_repayment_amount_idr == 1500000
+
+
+def test_loan_repayment_amount_rejected_for_non_payroll_category(logged_in_client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-100000)
+    conn.commit()
+
+    resp = logged_in_client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "operating_expense",
+            "loan_repayment_amount_idr": "1500000",
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None  # rejected entirely, never silently saved with the wrong category
+
+
+def test_loan_repayment_amount_requires_employee_reference(logged_in_client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-8500000)
+    conn.commit()
+
+    resp = logged_in_client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "payroll",
+            "consignor_item_ref": "",
+            "loan_repayment_amount_idr": "1500000",
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None  # rejected — no employee reference to draw the loan balance down against
+
+
+def test_loan_repayment_amount_rejects_whitespace_only_employee_reference(logged_in_client, wtopology):
+    """QA-found gap (2026-09-10, round 2) — same whitespace-only regression
+    check as the employee_loan_disbursement case above, for the payroll +
+    loan_repayment_amount_idr path."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-8500000)
+    conn.commit()
+
+    resp = logged_in_client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "payroll",
+            "consignor_item_ref": "   ",
+            "loan_repayment_amount_idr": "1500000",
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None  # rejected — whitespace-only is not a real employee reference

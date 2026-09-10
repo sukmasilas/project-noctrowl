@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Employee Loans — Noctrowl{% endblock %}
+{% block topbar %}<div><strong>Settings — Employee Loans</strong></div>{% endblock %}
+{% block content %}
+<h1>Employee Loans</h1>
+<div class="subtitle">No-interest loans given to employees, repaid via salary deduction. Editing a record here is tracking/cross-reference only — it never retroactively changes anything already posted to the ledger. Remaining balance is computed live from posted repayments, never a stored running total.</div>
+
+{% if not loans %}
+<div class="empty-state">No employee loan records yet — add one below.</div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Employee</th>
+      <th class="num">Original Amount (IDR)</th>
+      <th class="num">Monthly Installment (IDR)</th>
+      <th>Start Date</th>
+      <th class="num">Repaid (IDR)</th>
+      <th class="num">Remaining (IDR)</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for loan in loans %}
+      <tr class="figure-row" onclick="document.getElementById('loan-editor-{{ loan.id }}').classList.toggle('hidden-row')">
+        <td>{{ loan.employee_name }}</td>
+        <td class="num">{{ loan.original_amount_idr | idr }}</td>
+        <td class="num">{{ loan.monthly_installment_idr | idr }}</td>
+        <td>{{ loan.loan_start_date }}</td>
+        <td class="num">{{ loan.repaid_idr | idr }}</td>
+        <td class="num">{{ loan.remaining_idr | idr }}</td>
+        <td><span class="small">edit</span></td>
+      </tr>
+      <tr id="loan-editor-{{ loan.id }}" class="inline-editor hidden-row">
+        <td colspan="7">
+          <form method="post" action="{{ url_for('settings.update_employee_loan', loan_id=loan.id) }}" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <label>Employee <input type="text" name="employee_name" value="{{ loan.employee_name }}" required></label>
+            <label>Original Amount (IDR) <input type="number" step="1" min="1" name="original_amount_idr" value="{{ loan.original_amount_idr }}" required></label>
+            <label>Monthly Installment (IDR) <input type="number" step="1" min="1" name="monthly_installment_idr" value="{{ loan.monthly_installment_idr }}" required></label>
+            <label>Start Date <input type="date" name="loan_start_date" value="{{ loan.loan_start_date }}" required></label>
+            <button type="submit">Save</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Add a new loan record</h2>
+<form method="post" action="{{ url_for('settings.create_employee_loan') }}" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+  <label>Employee <input type="text" name="employee_name" placeholder="e.g. Fariz Pradana" required></label>
+  <label>Original Amount (IDR) <input type="number" step="1" min="1" name="original_amount_idr" placeholder="e.g. 27000000" required></label>
+  <label>Monthly Installment (IDR) <input type="number" step="1" min="1" name="monthly_installment_idr" placeholder="e.g. 1500000" required></label>
+  <label>Start Date <input type="date" name="loan_start_date" required></label>
+  <button type="submit">Add</button>
+</form>
+<style>.hidden-row { display: none; }</style>
+{% endblock %}

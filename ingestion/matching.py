@@ -352,17 +352,63 @@ def _try_rule_d_consignment_reimbursement(conn: Connection, row) -> tuple[str, s
     return None
 
 
+def _keyword_matches(keyword: str, description: str) -> bool:
+    """Case-insensitive substring containment, with one added refinement:
+    a word-boundary check at the KEYWORD'S END — the character immediately
+    following a candidate match (if any) must not be another ASCII letter.
+
+    BUG FIX (2026-09-10, real gap found against real data): the real BCA
+    Main Account statement's admin-fee line is literally "BIAYA ADM" (or
+    "BIAYA ADM 0998") — shorter than, and a strict prefix of, the existing
+    "Biaya administrasi rekening"/kartu-debit-fee wording used for the
+    Bridging (Mandiri) statement's OWN, textually similar but genuinely
+    different admin fees. Since rule (e) checks "is KEYWORD found inside
+    DESCRIPTION", the existing longer keyword can never match the shorter
+    real "BIAYA ADM" description (the keyword is bigger than the whole
+    description) — the actual mismatch direction CLAUDE.md's brief called
+    out. The naive fix (seed a new bare "BIAYA ADM" keyword) would work for
+    that real gap but ALSO wrongly match "Biaya administrasi rekening"/
+    "Biaya administrasi kartu debit" (both literally start with "Biaya
+    adm..." followed immediately by "inistrasi", no separator) — silently
+    reversing the already-deliberate decision (see ingestion/seed.py's
+    BANK_KEYWORD_RULES note) to leave the "kartu debit" fee type unmatched/
+    Needs Review. This word-boundary refinement lets "BIAYA ADM" correctly
+    match the real Master-statement lines (always followed by nothing, a
+    space, or a digit) while still correctly excluding both Bridging
+    "administrasi" lines (always followed immediately by the letter "I") —
+    confirmed against tests/ingestion/test_matching.py's existing
+    test_seeded_admin_fee_keyword_matches_and_posts_general_opex, which
+    already asserts the "kartu debit" line stays unmatched.
+
+    Every OTHER existing seeded keyword's real match already satisfies this
+    same boundary (none of them are immediately followed by another letter
+    in any real sample line) — this is purely additive, no other rule's
+    behavior changes.
+    """
+    kw = keyword.upper()
+    desc = description.upper()
+    start = 0
+    while True:
+        idx = desc.find(kw, start)
+        if idx == -1:
+            return False
+        end = idx + len(kw)
+        if end >= len(desc) or not desc[end].isalpha():
+            return True
+        start = idx + 1
+
+
 def _try_rule_e_keyword(conn: Connection, row) -> tuple[str, str, dict] | None:
     """(e) recurring-description keyword rules — the lowest-confidence
-    tier, case-insensitive substring containment only (no fuzzy scoring).
+    tier, case-insensitive substring containment (see _keyword_matches for
+    the one added word-boundary refinement).
     """
     rules = conn.execute(
         select(bank_keyword_rules.c.keyword, bank_keyword_rules.c.category, bank_keyword_rules.c.expense_account_type_code)
         .where(bank_keyword_rules.c.is_active.is_(True))
     ).all()
-    desc_upper = row.raw_description.upper()
     for r in rules:
-        if r.keyword.upper() in desc_upper:
+        if _keyword_matches(r.keyword, row.raw_description):
             return r.category, "e", {"expense_account_type_code": r.expense_account_type_code}
     return None
 
@@ -463,6 +509,18 @@ class PostResult:
     # real historical bad entry (journal_entry_id=917 / review_queue.id=321
     # — see CLAUDE.md's Definition of done).
     skipped_sign_mismatch: int = 0
+    # A row IS classified as a category that REQUIRES an employee reference
+    # (see _EMPLOYEE_REF_REQUIRED_CATEGORIES) but consignor_item_ref is
+    # blank — see _missing_employee_ref_reason. Never posted; flagged back
+    # to needs_review with a reason instead, same treatment as
+    # skipped_sign_mismatch. QA-found gap (2026-09-10): before this,
+    # _post_one_row silently substituted the placeholder string
+    # "unspecified" for a blank employee_ref (truthy, so the posting
+    # functions' own ValueError-on-blank check never actually fired),
+    # defeating the entire traceability point of retaining a per-transaction
+    # employee reference on an aggregate account (same reasoning CLAUDE.md
+    # already applies to Consignor Payable).
+    skipped_missing_employee_ref: int = 0
 
 
 # Category -> the one real-world direction that category inherently implies,
@@ -496,6 +554,15 @@ _DIRECTIONAL_CATEGORY_SIGNS: dict[str, str] = {
     "owners_draw": "outflow",
     "owners_contribution": "inflow",
     "revenue_settlement": "inflow",
+    # Added 2026-09-10 (Employee Loans / expanded COGS sub-categories — see
+    # ledger/chart_of_accounts.py's EMPLOYEE_LOAN_RECEIVABLE note and
+    # CLAUDE.md's Core accounting rules). All inherently one-direction real
+    # -world events, same reasoning as every entry above.
+    "payroll": "outflow",
+    "employee_loan_disbursement": "outflow",
+    "item_purchase": "outflow",
+    "inbound_shipping": "outflow",
+    "item_purchase_and_inbound_shipping": "outflow",
 }
 
 
@@ -518,6 +585,40 @@ def _sign_mismatch_reason(category: str, amount_idr: Decimal) -> str | None:
             f"Category '{category}' is inherently an inflow, but this line's amount "
             f"({amount_idr}) is a non-positive outflow. Not posted — please re-check the "
             "classification."
+        )
+    return None
+
+
+def _missing_employee_ref_reason(category: str, consignor_item_ref: str | None, loan_repayment_amount_idr) -> str | None:
+    """None unless ``category``/``loan_repayment_amount_idr`` combination
+    REQUIRES a real employee reference (``review_queue.consignor_item_ref``,
+    reused for this purpose — see ledger/chart_of_accounts.py's
+    EMPLOYEE_LOAN_RECEIVABLE note) and it's blank. Otherwise a human
+    -readable reason to record on the row (see
+    review_queue.missing_reference_reason) — never posted with a silently
+    substituted placeholder.
+
+    QA-found gap (2026-09-10): 'employee_loan_disbursement' ALWAYS needs a
+    real employee reference — there is no other way to know whose loan
+    balance a disbursement or repayment belongs to on an aggregate
+    EMPLOYEE_LOAN_RECEIVABLE account (same reasoning CLAUDE.md already
+    applies to Consignor Payable's per-transaction reference). 'payroll'
+    only needs one when it actually carries an embedded loan-repayment
+    amount (a plain payroll line with no repayment doesn't reference
+    EMPLOYEE_LOAN_RECEIVABLE at all, so nothing needs a reference) — this
+    mirrors, as a defense-in-depth backstop, the same requirement
+    webapp/review_queue_bp.py::label_row already enforces at the UI layer.
+    """
+    ref = (consignor_item_ref or "").strip()
+    if category == "employee_loan_disbursement" and not ref:
+        return (
+            "Category 'employee_loan_disbursement' requires a real employee reference "
+            "(Consignor/Item Ref) to know whose loan balance this posts against — not posted."
+        )
+    if category == "payroll" and loan_repayment_amount_idr and not ref:
+        return (
+            "A Payroll row with a loan repayment amount requires a real employee reference "
+            "(Consignor/Item Ref) to know whose loan balance to draw down — not posted."
         )
     return None
 
@@ -619,6 +720,7 @@ def post_pending_rows(conn: Connection) -> PostResult:
             review_queue.c.consignor_item_ref,
             review_queue.c.linked_invoice_id,
             review_queue.c.linked_payoneer_withdrawal_id,
+            review_queue.c.loan_repayment_amount_idr,
         ).where(review_queue.c.posted_at.is_(None))
     ).all()
 
@@ -644,6 +746,21 @@ def post_pending_rows(conn: Connection) -> PostResult:
             result.skipped_sign_mismatch += 1
             continue
 
+        missing_ref_reason = _missing_employee_ref_reason(
+            row.category, row.consignor_item_ref, row.loan_repayment_amount_idr
+        )
+        if missing_ref_reason is not None:
+            # Never silently substitute a placeholder employee reference —
+            # see PostResult.skipped_missing_employee_ref. Flag back to
+            # needs_review with a reason, leave the row entirely unposted.
+            conn.execute(
+                update(review_queue)
+                .where(review_queue.c.id == row.id)
+                .values(match_status="needs_review", missing_reference_reason=missing_ref_reason)
+            )
+            result.skipped_missing_employee_ref += 1
+            continue
+
         journal_entry_id = _post_one_row(conn, row)
         if journal_entry_id is None:
             # c-sweep, pair not found yet — see PostResult.skipped_pending_pair.
@@ -655,10 +772,12 @@ def post_pending_rows(conn: Connection) -> PostResult:
             .values(
                 posted_at=_dt.datetime.now(_dt.timezone.utc),
                 posted_journal_entry_id=journal_entry_id,
-                # Clear any earlier mismatch flag now that this row posted
-                # correctly (e.g. a human fixed the category after seeing
-                # the flag) — no stale reason left on a resolved row.
+                # Clear any earlier mismatch/missing-reference flag now that
+                # this row posted correctly (e.g. a human fixed the category
+                # or filled in the reference after seeing the flag) — no
+                # stale reason left on a resolved row.
                 sign_mismatch_reason=None,
+                missing_reference_reason=None,
             )
         )
         if row.linked_invoice_id is not None:
@@ -726,7 +845,21 @@ def _post_one_row(conn: Connection, row) -> int | None:
             )
         return entry_id
 
-    if row.category == "cogs_purchase":
+    if row.category in (
+        "cogs_purchase",
+        "item_purchase",
+        "inbound_shipping",
+        "item_purchase_and_inbound_shipping",
+    ):
+        # Added 2026-09-10: 'item_purchase' / 'inbound_shipping' /
+        # 'item_purchase_and_inbound_shipping' are more specific labels a
+        # human can choose instead of the plain 'cogs_purchase' catch-all
+        # (see webapp/review_queue_bp.py's CATEGORY_OPTIONS and CLAUDE.md) —
+        # all four post IDENTICALLY, straight to the same existing COGS
+        # account. The category value itself (preserved on the review_queue
+        # row) IS the traceability improvement; no new posting logic is
+        # needed since post_operating_expense/post_cogs_purchase already
+        # generalize by account-type-code, not by review-queue category.
         paying_code, paying_kwargs = _paying_account_for_row(row)
         return posting.post_operating_expense(
             conn,
@@ -803,6 +936,67 @@ def _post_one_row(conn: Connection, row) -> int | None:
             paying_account_type_code=paying_code,
             **paying_kwargs,
             **_usd_reference_kwargs(row),
+        )
+
+    if row.category == "payroll":
+        # Added 2026-09-10 — the existing PAYROLL account had no posting
+        # path at all before this (same class of pre-existing gap
+        # CONTRACT_LABOR/SHIPPING_COST each had before their own category
+        # was added — see _DIRECTIONAL_CATEGORY_SIGNS's note). A human
+        # reviewing a payroll bank line MAY optionally specify an embedded
+        # employee-loan-repayment amount (see CLAUDE.md's Core accounting
+        # rules and ledger.posting.post_payroll_with_loan_repayment) — never
+        # auto-applied/guessed (there is no separate payroll record system
+        # to derive it from), always a human's explicit entry on this row.
+        paying_code, paying_kwargs = _paying_account_for_row(row)
+        net_amount = abs(row.amount_idr)
+        if row.loan_repayment_amount_idr:
+            # row.consignor_item_ref is guaranteed non-blank here —
+            # post_pending_rows' _missing_employee_ref_reason pre-check
+            # already flags a blank reference back to needs_review and
+            # never reaches this branch (QA-found gap, 2026-09-10: this
+            # used to silently fall back to a placeholder "unspecified"
+            # string instead).
+            return posting.post_payroll_with_loan_repayment(
+                conn,
+                entry_date=entry_date,
+                net_transfer_idr=net_amount,
+                loan_repayment_idr=row.loan_repayment_amount_idr,
+                employee_ref=row.consignor_item_ref,
+                paying_account_type_code=paying_code,
+                **paying_kwargs,
+                **_usd_reference_kwargs(row),
+                memo=row.raw_description,
+            )
+        return posting.post_operating_expense(
+            conn,
+            entry_date=entry_date,
+            expense_account_type_code="PAYROLL",
+            amount_idr=net_amount,
+            paying_account_type_code=paying_code,
+            **paying_kwargs,
+            **_usd_reference_kwargs(row),
+        )
+
+    if row.category == "employee_loan_disbursement":
+        # A human reviewing a bank line labels a real, one-off loan payout
+        # to an employee directly (see webapp/review_queue_bp.py's
+        # CATEGORY_OPTIONS and the Consignor/Item Ref field, reused here for
+        # the employee's name — same shape as the 'consignment_payout'
+        # traceability reference above, never P&L). See CLAUDE.md's Core
+        # accounting rules and ledger.posting.post_employee_loan_disbursement.
+        paying_code, paying_kwargs = _paying_account_for_row(row)
+        # row.consignor_item_ref is guaranteed non-blank here — see the
+        # 'payroll' branch's identical comment above.
+        return posting.post_employee_loan_disbursement(
+            conn,
+            entry_date=entry_date,
+            amount_idr=abs(row.amount_idr),
+            employee_ref=row.consignor_item_ref,
+            paying_account_type_code=paying_code,
+            **paying_kwargs,
+            **_usd_reference_kwargs(row),
+            memo=row.raw_description,
         )
 
     if row.category == "interest_income":

@@ -333,6 +333,37 @@ review_queue = Table(
     # ingestion/matching.py's post_pending_rows) so a genuinely already-fixed
     # row doesn't carry stale text: it IS cleared at that point.
     Column("sign_mismatch_reason", Text, nullable=True),
+    # Added 2026-09-10 — backs the 'payroll' category's optional embedded
+    # employee-loan-repayment split (see ledger/chart_of_accounts.py's
+    # EMPLOYEE_LOAN_RECEIVABLE note and ingestion.matching._post_one_row's
+    # 'payroll' branch). NULL (the default) is a plain Payroll line with no
+    # loan deduction; a positive value tells post_pending_rows to post a
+    # 3-line entry instead (gross Payroll expense / credit
+    # EMPLOYEE_LOAN_RECEIVABLE for this amount / credit the paying account
+    # for the actual net transfer) via
+    # ledger.posting.post_payroll_with_loan_repayment. The employee it
+    # applies to reuses the existing, already-generic
+    # ``consignor_item_ref`` field above (same pattern already used for the
+    # 'employee_loan_disbursement' category's employee reference and rule
+    # (b)'s "invoice:<id>" non-consignor reuse) — no separate employee-name
+    # column needed, per Main-agent's brief ("follow that shape rather than
+    # inventing something structurally different").
+    Column("loan_repayment_amount_idr", Numeric(20, 2), nullable=True),
+    # Added 2026-09-10 (QA-found gap): 'employee_loan_disbursement' always,
+    # and 'payroll' whenever it carries a loan_repayment_amount_idr, require
+    # a real employee reference (consignor_item_ref, above) to know whose
+    # loan balance an aggregate EMPLOYEE_LOAN_RECEIVABLE posting belongs to.
+    # Before this fix, ingestion.matching._post_one_row silently substituted
+    # the placeholder "unspecified" for a blank reference (truthy, so the
+    # posting functions' own ValueError-on-blank check never fired) —
+    # defeating the entire traceability point. post_pending_rows now checks
+    # this BEFORE posting (see ingestion.matching._missing_employee_ref_
+    # reason); a genuine gap is never posted (stays/returns to needs_review)
+    # and the reason is recorded here, same "never silently post" pattern as
+    # sign_mismatch_reason above. NULL for every row that never hit this —
+    # the overwhelming majority. Cleared on a later successful post, same as
+    # sign_mismatch_reason.
+    Column("missing_reference_reason", Text, nullable=True),
     Column("labeled_at", DateTime(timezone=True), nullable=True),
     Column("posted_at", DateTime(timezone=True), nullable=True),
     Column("posted_journal_entry_id", Integer, ForeignKey("journal_entries.id"), nullable=True),
@@ -365,10 +396,30 @@ review_queue = Table(
     # cost, no exceptions) need their own category for the same reason
     # 'contract_labor' did — posts to the existing SHIPPING_COST account
     # (see ledger/chart_of_accounts.py), never GENERAL_OPEX's default.
+    # 'payroll' added 2026-09-10 — the existing PAYROLL account (in the
+    # chart of accounts since milestone 2) had NO review-queue category or
+    # posting path at all until now, the same class of gap CONTRACT_LABOR/
+    # SHIPPING_COST each had before their own category was added; a plain
+    # 'operating_expense' label always resolves to GENERAL_OPEX by default
+    # (see _post_one_row), which would misclassify real payroll cost.
+    # 'employee_loan_disbursement' added 2026-09-10 — a human reviewing a
+    # bank line labels the real, one-off employee-loan payout directly (see
+    # ledger/chart_of_accounts.py's EMPLOYEE_LOAN_RECEIVABLE note); posts to
+    # that new asset account, never P&L.
+    # 'item_purchase' / 'inbound_shipping' / 'item_purchase_and_inbound_
+    # shipping' added 2026-09-10 — more specific COGS sub-labels for
+    # clearer traceability (per both SAK documents in source-of-truth/,
+    # freight-in IS part of inventory cost/COGS, distinct from outbound
+    # SHIPPING_COST to a customer). All three post to the SAME existing COGS
+    # account as plain 'cogs_purchase' (which is kept, unchanged, for cases
+    # where the distinction isn't relevant/known) — a labeling improvement
+    # only, not a new expense type.
     CheckConstraint(
         "category IS NULL OR category IN ('revenue_settlement','cogs_purchase','consignment_payout',"
         "'internal_transfer','internal_transfer_landing','operating_expense','owners_draw',"
-        "'owners_contribution','interest_income','contract_labor','shipping_cost','other')",
+        "'owners_contribution','interest_income','contract_labor','shipping_cost','payroll',"
+        "'employee_loan_disbursement','item_purchase','inbound_shipping',"
+        "'item_purchase_and_inbound_shipping','other')",
         name="ck_review_queue_category",
     ),
     # The idempotency invariant from CLAUDE.md rule 6, structural: a row can
@@ -380,6 +431,10 @@ review_queue = Table(
     CheckConstraint(
         "posted_journal_entry_id IS NULL OR posted_at IS NOT NULL",
         name="ck_review_queue_no_journal_without_posted_at",
+    ),
+    CheckConstraint(
+        "loan_repayment_amount_idr IS NULL OR loan_repayment_amount_idr > 0",
+        name="ck_review_queue_loan_repayment_amount_positive",
     ),
 )
 

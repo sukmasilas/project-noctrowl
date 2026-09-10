@@ -248,6 +248,40 @@ def test_cash_flow_cogs_purchase_is_operating_outflow(prototype):
     assert report.difference_idr == Decimal("0")
 
 
+def test_cash_flow_employee_loan_disbursement_and_repayment_reconciles(prototype):
+    """2026-09-10: EMPLOYEE_LOAN_RECEIVABLE (a new asset account, not a
+    revenue/expense) must be classified in the cash-flow non-cash whitelist
+    (webapp.reporting._CASH_FLOW_CODE_TO_KEY) — otherwise a real disbursement
+    or embedded-in-payroll repayment (both touch a cash account on one side
+    and this asset account on the other) would silently break the
+    Beginning+NetChange=Ending identity (difference_idr). This is the
+    concrete regression test for that fix.
+    """
+    conn, topo = prototype
+    posting.post_employee_loan_disbursement(
+        conn, entry_date=DAY, amount_idr=Decimal("27000000"), employee_ref="Fariz Pradana"
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert _bucket(report, "employee_loans") == Decimal("-27000000")
+    assert report.total_operating_idr == Decimal("-27000000")
+    assert report.difference_idr == Decimal("0")
+
+    posting.post_payroll_with_loan_repayment(
+        conn,
+        entry_date=DAY,
+        net_transfer_idr=Decimal("8500000"),
+        loan_repayment_idr=Decimal("1500000"),
+        employee_ref="Fariz Pradana",
+    )
+    report2 = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    # Net employee_loans bucket = -27,000,000 (disbursement) + 1,500,000
+    # (repayment credit) = -25,500,000; payroll bucket carries the FULL
+    # gross 10,000,000 payroll expense, not the reduced net transfer.
+    assert _bucket(report2, "employee_loans") == Decimal("-25500000")
+    assert _bucket(report2, "payroll") == Decimal("-10000000")
+    assert report2.difference_idr == Decimal("0")
+
+
 def test_cash_flow_inter_account_transfer_never_appears_in_any_bucket(prototype):
     """An inter_account_transfer only ever touches two cash accounts (see
     ledger/schema.py's trg_check_transfer_accounts) — it should net to zero
