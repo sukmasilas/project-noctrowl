@@ -4,41 +4,78 @@
 {% block title %}Cash Flow — Noctrowl{% endblock %}
 {% block topbar %}
 <form method="get" style="display:flex;gap:10px;align-items:center;">
-  <select class="selector" name="account_id" onchange="this.form.submit()">
-    <option value="consolidated" {% if is_consolidated %}selected{% endif %}>Consolidated</option>
-    {% for a in accounts %}
-      <option value="{{ a.id }}" {% if selected_account and a.id == selected_account.id %}selected{% endif %}>{{ a.name }}</option>
-    {% endfor %}
-  </select>
+  <select class="selector" disabled><option>Consolidated</option></select>
   <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
 </form>
 {{ sb.status_badge(status, url_for('review_queue.index', period=period_month.isoformat()), url_for('documents.index', period=period_month.isoformat())) }}
 {% endblock %}
 {% block content %}
-{{ chrome.report_tabs('cash_flow', period_month, selected_account.id if selected_account else 'consolidated') }}
-<h1>Cash Flow — {{ report.scope_label }}, {{ period_month | period }}</h1>
+{{ chrome.report_tabs('cash_flow', period_month) }}
+<h1>Statement of Cash Flows — Consolidated, {{ period_month | period }}</h1>
+<div class="subtitle">Direct method — Operating / Investing / Financing activities. See CLAUDE.md's Money flow &amp; Core accounting rules for the accounting basis.</div>
 
-{% if report.is_shared_pool %}
-<div class="banner-shared">This Payoneer wallet is shared with another eBay account ({{ report.wallet_group_name }}). Everything from here down is the pooled total for both accounts.</div>
-{% endif %}
-{% if report.transfer_elimination_idr is not none %}
-<div class="banner-shared">Inter-account transfers eliminated — {{ report.transfer_elimination_idr | idr }} moved internally this period nets to zero across the consolidated total (and the shared wallet-group's Payoneer/Bridging figures above are de-duplicated, not summed per account).</div>
-{% endif %}
-
-{% for stage in report.stages %}
-<h2 style="font-size:15px;margin:18px 0 6px;">{{ stage.label }}</h2>
-{% if not stage.movements %}
-<div class="empty-state">No activity this period.</div>
-{% else %}
 <table>
-  <thead><tr><th>Date</th><th>Type</th><th>Memo</th><th class="num">Net (IDR)</th></tr></thead>
   <tbody>
-    {% for m in stage.movements %}
-      <tr><td>{{ m.entry_date }}</td><td>{{ m.source_type }}</td><td>{{ m.memo or '—' }}</td><td class="num">{{ m.net_idr | idr }}</td></tr>
-    {% endfor %}
-    <tr style="font-weight:700;"><td colspan="3">Net this stage</td><td class="num">{{ stage.net_idr | idr }}</td></tr>
+    <tr style="font-weight:700;"><td colspan="2">Cash at beginning of period</td><td class="num">{{ report.beginning_cash_idr | idr }}</td></tr>
   </tbody>
 </table>
+
+<h2>Operating Activities</h2>
+<table>
+  <tbody>
+    {% if not report.operating_lines %}
+      <tr><td colspan="2">No operating activity this period.</td></tr>
+    {% endif %}
+    {% for line in report.operating_lines %}
+      <tr class="figure-row" onclick="location.href='{{ url_for('reports.cash_flow_drilldown', key=line.key, period=period_month.isoformat()) }}'">
+        <td>{{ line.label }}</td><td class="num">{{ line.amount_idr | idr }}</td>
+      </tr>
+    {% endfor %}
+    <tr style="font-weight:700;"><td>Net cash from Operating Activities</td><td class="num">{{ report.total_operating_idr | idr }}</td></tr>
+  </tbody>
+</table>
+
+<h2>Investing Activities</h2>
+<table>
+  <tbody>
+    <tr><td>No investing activity — no capital-asset (PPE/Capex) accounts exist yet.</td><td class="num"></td></tr>
+    <tr style="font-weight:700;"><td>Net cash from Investing Activities</td><td class="num">{{ report.total_investing_idr | idr }}</td></tr>
+  </tbody>
+</table>
+
+<h2>Financing Activities</h2>
+<table>
+  <tbody>
+    {% if not report.financing_lines %}
+      <tr><td colspan="2">No financing activity this period.</td></tr>
+    {% endif %}
+    {% for line in report.financing_lines %}
+      <tr class="figure-row" onclick="location.href='{{ url_for('reports.cash_flow_drilldown', key=line.key, period=period_month.isoformat()) }}'">
+        <td>{{ line.label }}</td><td class="num">{{ line.amount_idr | idr }}</td>
+      </tr>
+    {% endfor %}
+    <tr style="font-weight:700;"><td>Net cash from Financing Activities</td><td class="num">{{ report.total_financing_idr | idr }}</td></tr>
+  </tbody>
+</table>
+
+<table>
+  <tbody>
+    {% if report.fx_effect_idr != 0 %}
+      <tr class="figure-row" onclick="location.href='{{ url_for('reports.cash_flow_drilldown', key='fx_effect', period=period_month.isoformat()) }}'">
+        <td>Effect of unrealized FX revaluation on cash</td><td class="num">{{ report.fx_effect_idr | idr }}</td>
+      </tr>
+    {% endif %}
+    <tr style="font-weight:700;"><td>Net change in cash</td><td class="num">{{ report.net_change_idr | idr }}</td></tr>
+    <tr style="font-weight:700;"><td>Cash at end of period</td><td class="num">{{ report.ending_cash_idr | idr }}</td></tr>
+  </tbody>
+</table>
+
+<div class="subtitle">"Cash" = every eBay Wallet, Payoneer Wallet, BCA Bridging Account, and the BCA Main Account (see the Balance Sheet's Assets section for the individual per-account balances that make up these totals).</div>
+
+{% if report.difference_idr != 0 %}
+<div class="empty-state" style="border-color:#c0392b;color:#c0392b;">
+  Warning: Beginning Cash + Net Change does not equal Ending Cash (difference: {{ report.difference_idr | idr }}).
+  This indicates a real transaction type isn't fitting the Operating/Investing/Financing categorization correctly — investigate rather than trust this report.
+</div>
 {% endif %}
-{% endfor %}
 {% endblock %}

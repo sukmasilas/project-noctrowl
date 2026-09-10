@@ -198,47 +198,175 @@ def test_revenue_report_includes_consignment_commission(prototype):
 
 
 # ---------------------------------------------------------------------------
-# Cash Flow
+# Statement of Cash Flows (consolidated, direct method)
 # ---------------------------------------------------------------------------
 
 
-def test_cash_flow_shared_wallet_group_shown_identically_per_account_and_deduped_consolidated(full_topology):
-    conn, topo = full_topology
-    ebay_1 = topo["ebay_accounts"]["1"]
-    ebay_2 = topo["ebay_accounts"]["2"]
-    shared_wg = topo["wallet_groups"]["shared"]
+def _bucket(report, key):
+    for line in report.operating_lines + report.financing_lines:
+        if line.key == key:
+            return line.amount_idr
+    return None
 
-    posting.post_inter_account_transfer(
-        conn,
-        entry_date=DAY,
-        from_account_type_code="PAYONEER_WALLET",
-        to_account_type_code="BCA_BRIDGING",
-        amount_idr=Decimal("5000000"),
-        from_wallet_group_id=shared_wg,
-        to_wallet_group_id=shared_wg,
+
+def test_cash_flow_ebay_sale_splits_into_customers_and_fee_lines(prototype):
+    conn, topo = prototype
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=DAY, gross_sale_price_usd=Decimal("100"),
+        ebay_fee_usd=Decimal("10"), kurs_pajak_rate=RATE, ebay_order_ref="S1",
     )
-
-    cf_1 = reporting.cash_flow_report(conn, period_month=PERIOD, ebay_account_id=ebay_1)
-    cf_2 = reporting.cash_flow_report(conn, period_month=PERIOD, ebay_account_id=ebay_2)
-    assert cf_1.is_shared_pool is True
-    assert cf_2.is_shared_pool is True
-
-    payoneer_stage_1 = next(s for s in cf_1.stages if "Payoneer" in s.label)
-    payoneer_stage_2 = next(s for s in cf_2.stages if "Payoneer" in s.label)
-    assert payoneer_stage_1.net_idr == payoneer_stage_2.net_idr == Decimal("-5000000")
-
-    consolidated = reporting.cash_flow_report(conn, period_month=PERIOD, ebay_account_id=None)
-    consolidated_payoneer = next(s for s in consolidated.stages if s.label.startswith("Payoneer"))
-    # Must NOT be double-counted (-5,000,000 * 2) just because two accounts
-    # share this wallet-group — the whole point of deduping by wallet_group.
-    assert consolidated_payoneer.net_idr == Decimal("-5000000")
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert _bucket(report, "cash_from_customers") == Decimal("100") * RATE
+    assert _bucket(report, "ebay_selling_fees") == -(Decimal("10") * RATE)
+    # Beginning (0) + net change must equal the real ending cash exactly.
+    assert report.difference_idr == Decimal("0")
+    assert report.ending_cash_idr == report.beginning_cash_idr + report.net_change_idr
+    assert report.ending_cash_idr == Decimal("90") * RATE  # net eBay Wallet inflow
 
 
-def test_cash_flow_independent_account_not_marked_shared(full_topology):
-    conn, topo = full_topology
-    ebay_3 = topo["ebay_accounts"]["3"]
-    cf_3 = reporting.cash_flow_report(conn, period_month=PERIOD, ebay_account_id=ebay_3)
-    assert cf_3.is_shared_pool is False
+def test_cash_flow_refund_at_ebay_wallet_reduces_customer_receipts(prototype):
+    conn, topo = prototype
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=DAY, gross_sale_price_usd=Decimal("100"),
+        ebay_fee_usd=Decimal("10"), kurs_pajak_rate=RATE, ebay_order_ref="S2",
+    )
+    posting.post_refund(
+        conn, entry_date=DAY, amount_idr=Decimal("200000"), stage="ebay_wallet",
+        ebay_account_id=topo["ebay_account_id"], ebay_order_ref="S2",
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert _bucket(report, "cash_from_customers") == (Decimal("100") * RATE) - Decimal("200000")
+    assert report.difference_idr == Decimal("0")
+
+
+def test_cash_flow_cogs_purchase_is_operating_outflow(prototype):
+    conn, topo = prototype
+    posting.post_cogs_purchase(conn, entry_date=DAY, amount_idr=Decimal("1000000"))
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert _bucket(report, "cogs_purchases") == Decimal("-1000000")
+    assert report.total_operating_idr == Decimal("-1000000")
+    assert report.difference_idr == Decimal("0")
+
+
+def test_cash_flow_inter_account_transfer_never_appears_in_any_bucket(prototype):
+    """An inter_account_transfer only ever touches two cash accounts (see
+    ledger/schema.py's trg_check_transfer_accounts) — it should net to zero
+    contribution across every Operating/Investing/Financing bucket, since
+    the whole point is it never touches revenue/expense.
+    """
+    conn, topo = prototype
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=DAY, gross_sale_price_usd=Decimal("100"),
+        ebay_fee_usd=Decimal("0"), kurs_pajak_rate=RATE, ebay_order_ref="S3",
+    )
+    posting.post_inter_account_transfer(
+        conn, entry_date=DAY, from_account_type_code="EBAY_WALLET", to_account_type_code="PAYONEER_WALLET",
+        amount_idr=Decimal("100") * RATE, from_ebay_account_id=topo["ebay_account_id"],
+        to_wallet_group_id=topo["wallet_group_id"],
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    # Total cash unaffected by the transfer leg itself (still just the sale).
+    assert report.ending_cash_idr == Decimal("100") * RATE
+    assert report.total_operating_idr == Decimal("100") * RATE  # only the sale contributes
+    assert report.difference_idr == Decimal("0")
+
+
+def test_cash_flow_consignment_tier_model_customers_includes_consignor_accrual(prototype):
+    """The full buyer payment (including the portion owed to the consignor)
+    is real cash landing in the eBay Wallet at sale time — see module
+    docstring's CONSIGNOR_PAYABLE reasoning. Reimbursement is its own,
+    later, separate outflow line.
+    """
+    conn, topo = prototype
+    sale_id = posting.create_consignment_sale(
+        conn, item_price_usd=Decimal("100"), payout_model="tier", payout_amount_idr=Decimal("1300000"),
+        consignor_item_ref="CONSIGN-1", tier_rate_percent=Decimal("80.00"), confirmed=True,
+    )
+    posting.post_consignment_sale(
+        conn, consignment_sale_id=sale_id, ebay_account_id=topo["ebay_account_id"], entry_date=DAY,
+        gross_sale_price_usd=Decimal("110"), ebay_fee_usd=Decimal("10"), kurs_pajak_rate=RATE,
+        ebay_order_ref="CONSIGN-ORDER",
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    gross_idr = Decimal("110") * RATE
+    fee_idr = Decimal("10") * RATE
+    commission_idr = gross_idr - Decimal("1300000")
+    # customers bucket = SALES-side revenue-ish credits: commission + the
+    # consignor-payable accrual (payout_idr) — no SALES_REVENUE here (this
+    # is a consignment sale, not a stock/pre-order one).
+    assert _bucket(report, "cash_from_customers") == commission_idr + Decimal("1300000")
+    assert _bucket(report, "ebay_selling_fees") == -fee_idr
+    assert _bucket(report, "consignor_payouts") is None  # nothing paid out yet
+    assert report.difference_idr == Decimal("0")
+
+    posting.post_consignor_reimbursement(
+        conn, entry_date=DAY, amount_idr=Decimal("1300000"), consignor_item_ref="CONSIGN-1",
+    )
+    report2 = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert _bucket(report2, "consignor_payouts") == Decimal("-1300000")
+    assert report2.difference_idr == Decimal("0")
+
+
+def test_cash_flow_owners_capital_and_draw_reported_gross_not_netted(prototype):
+    conn, topo = prototype
+    posting.post_owner_contribution(conn, entry_date=DAY, amount_idr=Decimal("5000000"))
+    posting.post_owner_draw(conn, entry_date=DAY, amount_idr=Decimal("2000000"))
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert _bucket(report, "owners_capital") == Decimal("5000000")
+    assert _bucket(report, "owners_draw") == Decimal("-2000000")
+    assert report.total_financing_idr == Decimal("3000000")
+    assert report.difference_idr == Decimal("0")
+
+
+def test_cash_flow_opening_balance_excluded_from_financing_but_counted_in_beginning_cash(prototype):
+    conn, topo = prototype
+    posting.post_opening_balance(
+        conn, account_type_code="PAYONEER_WALLET", entry_date=PERIOD, amount_idr=Decimal("75000000"),
+        wallet_group_id=topo["wallet_group_id"],
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    # Never a Financing line — see module docstring.
+    assert _bucket(report, "owners_capital") is None
+    # But it IS what makes this period's beginning cash correct (booked on
+    # the 1st of the period it represents the opening of — see
+    # ledger/balances.py's account_balance_before docstring).
+    assert report.beginning_cash_idr == Decimal("75000000")
+    assert report.ending_cash_idr == Decimal("75000000")
+    assert report.difference_idr == Decimal("0")
+
+
+def test_cash_flow_unrealized_fx_excluded_from_oif_but_reconciles_ending_cash(prototype):
+    conn, topo = prototype
+    posting.post_opening_balance(
+        conn, account_type_code="PAYONEER_WALLET", entry_date=PERIOD, amount_idr=Decimal("16000000"),
+        wallet_group_id=topo["wallet_group_id"], amount_usd_ref=Decimal("1000"), fx_rate_used=Decimal("16000"),
+    )
+    entry_id = posting.post_unrealized_fx_revaluation(
+        conn, wallet_group_id=topo["wallet_group_id"], period_month=PERIOD, usd_balance=Decimal("1000"),
+        current_book_value_idr=Decimal("16000000"), kemenkeu_eom_rate_idr=Decimal("16500"),
+    )
+    assert entry_id is not None  # a real Rp 500,000 unrealized gain
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert report.total_operating_idr == Decimal("0")
+    assert report.total_financing_idr == Decimal("0")
+    assert report.fx_effect_idr == Decimal("500000")
+    assert report.ending_cash_idr == Decimal("16500000")
+    # The identity still ties out exactly BECAUSE fx_effect is included in
+    # net_change (outside O/I/F, but not outside the total).
+    assert report.beginning_cash_idr + report.net_change_idr == report.ending_cash_idr
+    assert report.difference_idr == Decimal("0")
+
+
+def test_cash_flow_beginning_cash_of_next_period_equals_prior_ending(prototype):
+    conn, topo = prototype
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=DAY, gross_sale_price_usd=Decimal("100"),
+        ebay_fee_usd=Decimal("0"), kurs_pajak_rate=RATE, ebay_order_ref="S4",
+    )
+    july = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    august = reporting.cash_flow_statement(conn, period_month=_dt.date(2026, 8, 1))
+    assert august.beginning_cash_idr == july.ending_cash_idr
+    assert august.difference_idr == Decimal("0")
 
 
 # ---------------------------------------------------------------------------

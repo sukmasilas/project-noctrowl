@@ -33,6 +33,30 @@ def test_revenue_report_renders_with_data(logged_in_client, wtopology):
 def test_cash_flow_report_renders(logged_in_client, wtopology):
     resp = logged_in_client.get("/reports/cash-flow?period=2026-07")
     assert resp.status_code == 200
+    assert b"Statement of Cash Flows" in resp.data
+
+
+def test_cash_flow_report_is_consolidated_only(logged_in_client, wtopology):
+    resp = logged_in_client.get("/reports/cash-flow?period=2026-07")
+    assert resp.status_code == 200
+    assert b"disabled" in resp.data  # account selector locked out, same as P&L/Equity/Balance Sheet
+
+
+def test_cash_flow_drilldown_route_renders(logged_in_client, wtopology):
+    conn, topo = wtopology
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=DAY, gross_sale_price_usd=Decimal("50"),
+        ebay_fee_usd=Decimal("5"), kurs_pajak_rate=Decimal("16300"), ebay_order_ref="CF-DD",
+    )
+    conn.commit()
+    resp = logged_in_client.get("/reports/cash-flow/drilldown/cash_from_customers?period=2026-07")
+    assert resp.status_code == 200
+    assert b"CF-DD" in resp.data
+
+
+def test_cash_flow_drilldown_unknown_key_404s(logged_in_client, wtopology):
+    resp = logged_in_client.get("/reports/cash-flow/drilldown/not_a_real_key?period=2026-07")
+    assert resp.status_code == 404
 
 
 def test_pnl_report_renders_and_is_consolidated_only(logged_in_client, wtopology):

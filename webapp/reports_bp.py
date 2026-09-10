@@ -65,22 +65,32 @@ def revenue():
 @bp.route("/cash-flow")
 @login_required
 def cash_flow():
+    """Statement of Cash Flows — consolidated only (direct method), same
+    "consolidated-only" gating as P&L/Equity/Balance Sheet below, since
+    Operating/Investing/Financing classification for the shared-Payoneer-
+    wallet-group pair can't honestly be split per eBay account any more than
+    P&L's shared COGS/opex can (see CLAUDE.md's Accounting scope).
+    """
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)
-    accounts, account, is_consolidated = _scope_from_request(conn)
-    ebay_account_id = None if is_consolidated else account.id
+    report = reporting.cash_flow_statement(conn, period_month=period_month)
+    status = report_status(conn, period_month=period_month)  # consolidated only
+    return render_template("reports/cash_flow.html", period_month=period_month, report=report, status=status)
 
-    report = reporting.cash_flow_report(conn, period_month=period_month, ebay_account_id=ebay_account_id)
-    status = report_status(conn, period_month=period_month, ebay_account_id=ebay_account_id)
 
+@bp.route("/cash-flow/drilldown/<key>")
+@login_required
+def cash_flow_drilldown(key: str):
+    conn = get_db()
+    period_month = parse_period(request.args.get("period"), conn)
+    if key == "fx_effect":
+        lines = reporting.cash_flow_fx_effect_drilldown(conn, period_month=period_month)
+    elif key in reporting.CASH_FLOW_LINE_KEYS:
+        lines = reporting.cash_flow_line_drilldown(conn, key=key, period_month=period_month)
+    else:
+        abort(404)
     return render_template(
-        "reports/cash_flow.html",
-        accounts=accounts,
-        selected_account=account,
-        is_consolidated=is_consolidated,
-        period_month=period_month,
-        report=report,
-        status=status,
+        "reports/drilldown.html", figure=f"cash flow — {key}", lines=lines, period_month=period_month
     )
 
 

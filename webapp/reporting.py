@@ -38,14 +38,14 @@ silently included in the wrong account's numbers).
 from __future__ import annotations
 
 import datetime as _dt
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
+from ledger.balances import account_balance_before as _shared_account_balance_before
 from ledger.balances import account_balance_through as _shared_account_balance_through
-from ledger.entities import get_account_id
 from ledger.schema import account_types, accounts, ebay_accounts, journal_entries, journal_lines, wallet_groups
 
 ZERO = Decimal("0")
@@ -177,45 +177,305 @@ def revenue_report(conn: Connection, *, period_month: _dt.date, ebay_account_id:
 
 
 # ---------------------------------------------------------------------------
-# Cash Flow
+# Statement of Cash Flows (consolidated only, direct method) — replaces the
+# old per-wallet-stage movement list that used to live here (superseded per
+# Main-agent's brief; that UI shape was already effectively repurposed into
+# the Wallet screen in an earlier phase). See module docstring's cash-flow
+# section for the standards this follows (PSAK 207 / IAS 7 direct method).
+#
+# --- The core technique: per-JOURNAL-LINE classification, not per-entry ---
+# "Cash" here = every account under statement_section='asset' (EBAY_WALLET,
+# PAYONEER_WALLET, BCA_BRIDGING, BCA_MAIN — confirmed to be exactly and only
+# those four; see ledger/chart_of_accounts.py). For any journal entry, since
+# debits always equal credits (enforced by both posting.py and a Postgres
+# trigger — see ledger/schema.py), splitting an entry's lines into a "cash"
+# set C and a "non-cash" set N always gives sum_C(debit-credit) =
+# -sum_N(debit-credit) = sum_N(credit-debit). That identity is exactly what
+# a direct-method statement wants: for every NON-cash line touched by a cash
+# -moving entry, (credit-debit) is that line's signed contribution to
+# whichever cash-flow category its account represents (positive = an
+# inflow-associated bucket, negative = outflow-associated) — and because the
+# identity holds per-entry, the sum of every non-cash line's contribution,
+# grouped into buckets, is GUARANTEED to equal the total change in cash for
+# the period. This is what makes Beginning + Net Change = Ending tie out
+# exactly (see cash_flow_statement()'s own difference_idr field, the same
+# "surfaced, never papered over" pattern as BalanceSheetReport.difference_idr
+# above), and it requires no special-casing for embedded amounts (e.g. the
+# eBay Selling Fee debited inside the SAME entry as an ebay_sale's wallet
+# credit, never a separate cash movement of its own) — the fee line still
+# gets its own correct bucket contribution purely from being a non-cash line.
+#
+# ONE deliberate exception to "classify every non-cash line by its account
+# type alone": CONSIGNOR_PAYABLE (a liability) is credited at the moment a
+# consignment sale accrues (real cash — the FULL buyer payment, including
+# the portion owed to the consignor — lands in the eBay Wallet at that
+# moment) and debited later when the consignor is actually reimbursed (a
+# real, separate cash outflow). These are economically two different
+# cash-flow events sharing one account type, distinguished by which side of
+# the line they're on — not by source_type (see _CONSIGNOR_PAYABLE_BY_SIDE
+# below). This is standard treatment for agency/pass-through cash receipts
+# in a direct-method statement: gross cash collected on a third party's
+# behalf is real "cash received from customers" when it lands, and the
+# later pass-through payment is its own operating outflow line when it
+# actually happens — not held back until reimbursement, and not shown as a
+# strange negative "paid to consignors" figure at accrual time.
+#
+# TWO deliberate, explicit EXCLUSIONS from Operating/Investing/Financing
+# (per Main-agent's brief):
+#   - source_type='opening_balance' entries (post_opening_balance) — these
+#     represent a pre-existing balance from before ledger-tracking began,
+#     not a period Financing activity; excluded from the O/I/F line-item
+#     query entirely (the only account type they ever touch besides a cash
+#     account is OWNERS_CAPITAL) so they only ever affect Beginning Cash
+#     (via account_balance_before(), which already special-cases them — see
+#     ledger/balances.py), never appear as a spurious Financing inflow line.
+#   - UNREALIZED_FX (post_unrealized_fx_revaluation, source_type=
+#     'fx_revaluation') — simply never included in the non-cash code set
+#     queried below, so it's structurally excluded from every O/I/F bucket
+#     without needing a source_type filter. But its cash-side line (a
+#     PAYONEER_WALLET debit/credit) DOES change that account's real book
+#     balance, which Beginning/Ending Cash (reused from ledger.balances,
+#     unfiltered by source_type, per Main-agent's brief) DOES include. A
+#     pure "exclude it and never mention it again" treatment would silently
+#     break the Beginning+Change=Ending identity. The standard, sourced
+#     resolution (IAS 7 / PSAK 207 §28: "the effect of exchange rate
+#     changes on cash... is reported separately... to reconcile cash... at
+#     the beginning and end of the period") is a distinct reconciling line,
+#     OUTSIDE the Operating/Investing/Financing subtotal, between "Net
+#     change from O+I+F" and "Cash at end of period" — see fx_effect_idr
+#     below. This is a resolved implementation detail grounded in the same
+#     real accounting standard CLAUDE.md already cites for this feature,
+#     not an invented workaround; flagged explicitly in the Builder report
+#     for QA/Main-agent to double-check.
 # ---------------------------------------------------------------------------
 
+CASH_STATEMENT_SECTION = "asset"  # EBAY_WALLET/PAYONEER_WALLET/BCA_BRIDGING/BCA_MAIN — see docstring above.
+
+# account_type code -> cash-flow line key, for every non-cash account type
+# that can appear in Operating or Financing. CONSIGNOR_PAYABLE is handled
+# separately (side-dependent) — see _CONSIGNOR_PAYABLE_BY_SIDE below.
+_CASH_FLOW_CODE_TO_KEY = {
+    "SALES_REVENUE": "cash_from_customers",
+    "SALES_RETURNS_ALLOWANCES": "cash_from_customers",
+    "CONSIGNMENT_COMMISSION_INCOME": "cash_from_customers",
+    "COGS": "cogs_purchases",
+    "EBAY_SELLING_FEES": "ebay_selling_fees",
+    "PAYOUT_FEE": "payout_fee",
+    "PAYROLL": "payroll",
+    "GENERAL_OPEX": "general_opex",
+    "SHIPPING_COST": "shipping_cost",
+    "CONTRACT_LABOR": "contract_labor",
+    "INTEREST_INCOME": "interest_income",
+    "REALIZED_FX": "realized_fx",
+    "OTHER_INCOME": "other_income",
+    "OWNERS_CAPITAL": "owners_capital",
+    "OWNERS_DRAW": "owners_draw",
+}
+
+# side: 'credit' = the accrual (a consignment sale) -> bucketed with
+# customer receipts; 'debit' = the actual reimbursement payout -> its own
+# outflow line. See the module-level docstring above.
+_CONSIGNOR_PAYABLE_BY_SIDE = {"credit": "cash_from_customers", "debit": "consignor_payouts"}
+
+_CASH_FLOW_LINE_LABELS = {
+    "cash_from_customers": "Cash received from customers",
+    "cogs_purchases": "Cash paid for COGS purchases",
+    "ebay_selling_fees": "Cash paid — eBay Selling Fees",
+    "payout_fee": "Cash paid — Payout Fee (Payoneer withdrawal)",
+    "payroll": "Cash paid — Payroll",
+    "general_opex": "Cash paid — General Operating Expenses",
+    "shipping_cost": "Cash paid — Shipping Cost",
+    "contract_labor": "Cash paid — Contract Labor",
+    "consignor_payouts": "Cash paid to consignors",
+    "interest_income": "Interest income received",
+    "realized_fx": "Realized FX Gain/Loss (at Payoneer withdrawal)",
+    "other_income": "Other Income (owner's e-wallet pass-through)",
+    "owners_capital": "Owner's Capital contributions",
+    "owners_draw": "Owner's Draw",
+}
+
+_OPERATING_KEY_ORDER = [
+    "cash_from_customers",
+    "cogs_purchases",
+    "ebay_selling_fees",
+    "payout_fee",
+    "payroll",
+    "general_opex",
+    "shipping_cost",
+    "contract_labor",
+    "consignor_payouts",
+    "interest_income",
+    "realized_fx",
+    "other_income",
+]
+_FINANCING_KEY_ORDER = ["owners_capital", "owners_draw"]
+
+# For drill-down: key -> [(account_type_code, side_filter)]. side_filter is
+# None (either side) except CONSIGNOR_PAYABLE's two lines.
+_CASH_FLOW_LINE_SOURCES: dict[str, list[tuple[str, str | None]]] = {}
+for _code, _key in _CASH_FLOW_CODE_TO_KEY.items():
+    _CASH_FLOW_LINE_SOURCES.setdefault(_key, []).append((_code, None))
+for _side, _key in _CONSIGNOR_PAYABLE_BY_SIDE.items():
+    _CASH_FLOW_LINE_SOURCES.setdefault(_key, []).append(("CONSIGNOR_PAYABLE", _side))
+del _code, _key, _side
+
+CASH_FLOW_LINE_KEYS = set(_CASH_FLOW_LINE_SOURCES.keys())
+
 
 @dataclass
-class Movement:
-    entry_date: _dt.date
-    source_type: str
-    memo: str | None
-    debit_idr: Decimal
-    credit_idr: Decimal
-    journal_entry_id: int
-
-    @property
-    def net_idr(self) -> Decimal:
-        return self.debit_idr - self.credit_idr
-
-
-@dataclass
-class CashFlowStage:
+class CashFlowLine:
+    key: str
     label: str
-    movements: list[Movement] = field(default_factory=list)
-
-    @property
-    def net_idr(self) -> Decimal:
-        return sum((m.net_idr for m in self.movements), ZERO)
+    amount_idr: Decimal  # positive = inflow-associated, negative = outflow-associated
 
 
 @dataclass
-class CashFlowReport:
+class CashFlowStatement:
     period_month: _dt.date
-    scope_label: str
-    is_shared_pool: bool
-    wallet_group_name: str | None
-    stages: list[CashFlowStage]
-    transfer_elimination_idr: Decimal | None = None
+    beginning_cash_idr: Decimal
+    operating_lines: list[CashFlowLine]
+    total_operating_idr: Decimal
+    investing_lines: list[CashFlowLine]  # always empty for now — see module docstring
+    total_investing_idr: Decimal
+    financing_lines: list[CashFlowLine]
+    total_financing_idr: Decimal
+    fx_effect_idr: Decimal  # reconciling line, outside O/I/F — see module docstring
+    net_change_idr: Decimal  # total_operating + total_investing + total_financing + fx_effect
+    ending_cash_idr: Decimal  # the ledger's own real balance (ledger.balances), independently computed
+    # Health-check, same pattern as BalanceSheetReport.difference_idr: should
+    # be exactly 0 (beginning + net_change == ending_cash). A nonzero value
+    # means a real transaction type doesn't fit the categorization above and
+    # needs investigating, never silently trusted.
+    difference_idr: Decimal
 
 
-def _account_movements(conn: Connection, account_id: int, period_month: _dt.date) -> list[Movement]:
+def _cash_account_rows(conn: Connection):
+    return conn.execute(
+        select(accounts.c.id, account_types.c.normal_balance)
+        .join(account_types, account_types.c.id == accounts.c.account_type_id)
+        .where(account_types.c.statement_section == CASH_STATEMENT_SECTION)
+    ).all()
+
+
+def _total_cash_before(conn: Connection, period_month: _dt.date) -> Decimal:
+    return sum(
+        (_shared_account_balance_before(conn, r.id, period_month, r.normal_balance) for r in _cash_account_rows(conn)),
+        ZERO,
+    )
+
+
+def _total_cash_through(conn: Connection, period_month: _dt.date) -> Decimal:
+    return sum(
+        (_shared_account_balance_through(conn, r.id, period_month, r.normal_balance) for r in _cash_account_rows(conn)),
+        ZERO,
+    )
+
+
+def _cash_flow_source_lines(conn: Connection, period_month: _dt.date):
+    """Every journal_line, this period, touching a non-cash account type
+    that appears somewhere in the Operating/Financing categorization
+    (``_CASH_FLOW_CODE_TO_KEY`` union CONSIGNOR_PAYABLE) — excludes
+    ``source_type='opening_balance'`` (see module docstring; the only
+    account type it touches here is OWNERS_CAPITAL).
+    """
+    codes = list(_CASH_FLOW_CODE_TO_KEY) + ["CONSIGNOR_PAYABLE"]
+    return conn.execute(
+        select(
+            account_types.c.code,
+            journal_lines.c.debit_amount_idr,
+            journal_lines.c.credit_amount_idr,
+        )
+        .join(accounts, accounts.c.id == journal_lines.c.account_id)
+        .join(account_types, account_types.c.id == accounts.c.account_type_id)
+        .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
+        .where(account_types.c.code.in_(codes))
+        .where(journal_entries.c.period_month == period_month)
+        .where(journal_entries.c.source_type != "opening_balance")
+    ).all()
+
+
+def _fx_revaluation_cash_effect(conn: Connection, period_month: _dt.date) -> Decimal:
+    """Net effect on cash-account book balances from
+    ``source_type='fx_revaluation'`` entries this period — the standard IAS
+    7/PSAK 207 reconciling "effect of exchange rate changes on cash" line,
+    kept OUTSIDE Operating/Investing/Financing. See module docstring.
+    """
+    rows = conn.execute(
+        select(journal_lines.c.debit_amount_idr, journal_lines.c.credit_amount_idr)
+        .join(accounts, accounts.c.id == journal_lines.c.account_id)
+        .join(account_types, account_types.c.id == accounts.c.account_type_id)
+        .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
+        .where(account_types.c.statement_section == CASH_STATEMENT_SECTION)
+        .where(journal_entries.c.source_type == "fx_revaluation")
+        .where(journal_entries.c.period_month == period_month)
+    ).all()
+    return sum((r.debit_amount_idr - r.credit_amount_idr for r in rows), ZERO)
+
+
+def cash_flow_statement(conn: Connection, *, period_month: _dt.date) -> CashFlowStatement:
+    """The Statement of Cash Flows — consolidated only, direct method. See
+    the module docstring above (and CLAUDE.md's Money flow / Core accounting
+    rules sections) for the full reasoning.
+    """
+    totals: dict[str, Decimal] = {}
+    for row in _cash_flow_source_lines(conn, period_month):
+        contribution = row.credit_amount_idr - row.debit_amount_idr
+        if row.code == "CONSIGNOR_PAYABLE":
+            side = "credit" if row.credit_amount_idr > 0 else "debit"
+            key = _CONSIGNOR_PAYABLE_BY_SIDE[side]
+            # Reimbursement (debit side) is an outflow — contribution above
+            # is already negative in that case (0 - amount), correct as-is.
+        else:
+            key = _CASH_FLOW_CODE_TO_KEY[row.code]
+        totals[key] = totals.get(key, ZERO) + contribution
+
+    operating_lines = [
+        CashFlowLine(key=k, label=_CASH_FLOW_LINE_LABELS[k], amount_idr=totals[k])
+        for k in _OPERATING_KEY_ORDER
+        if k in totals
+    ]
+    financing_lines = [
+        CashFlowLine(key=k, label=_CASH_FLOW_LINE_LABELS[k], amount_idr=totals[k])
+        for k in _FINANCING_KEY_ORDER
+        if k in totals
+    ]
+    total_operating = sum((l.amount_idr for l in operating_lines), ZERO)
+    total_investing = ZERO  # No PPE/Capex accounts exist yet — see CLAUDE.md's SAK alignment section.
+    total_financing = sum((l.amount_idr for l in financing_lines), ZERO)
+
+    fx_effect = _fx_revaluation_cash_effect(conn, period_month)
+    net_change = total_operating + total_investing + total_financing + fx_effect
+
+    beginning_cash = _total_cash_before(conn, period_month)
+    ending_cash = _total_cash_through(conn, period_month)
+
+    return CashFlowStatement(
+        period_month=period_month,
+        beginning_cash_idr=beginning_cash,
+        operating_lines=operating_lines,
+        total_operating_idr=total_operating,
+        investing_lines=[],
+        total_investing_idr=total_investing,
+        financing_lines=financing_lines,
+        total_financing_idr=total_financing,
+        fx_effect_idr=fx_effect,
+        net_change_idr=net_change,
+        ending_cash_idr=ending_cash,
+        difference_idr=ending_cash - (beginning_cash + net_change),
+    )
+
+
+def cash_flow_line_drilldown(conn: Connection, *, key: str, period_month: _dt.date) -> list[DrilldownLine]:
+    """Source journal lines behind one Operating/Financing line of
+    ``cash_flow_statement()`` — same DrilldownLine shape and query pattern
+    as ``drilldown()``/``account_instance_drilldown()`` above, filtered by
+    (account_type_code, side) pairs so CONSIGNOR_PAYABLE's two different
+    lines each show only their own side's lines.
+    """
+    sources = _CASH_FLOW_LINE_SOURCES.get(key)
+    if not sources:
+        return []
+    codes = sorted({code for code, _side in sources})
     rows = conn.execute(
         select(
             journal_entries.c.entry_date,
@@ -223,140 +483,80 @@ def _account_movements(conn: Connection, account_id: int, period_month: _dt.date
             journal_entries.c.memo,
             journal_lines.c.debit_amount_idr,
             journal_lines.c.credit_amount_idr,
+            journal_lines.c.ebay_order_ref,
+            journal_lines.c.consignor_item_ref,
+            journal_lines.c.journal_entry_id,
+            account_types.c.code,
+        )
+        .join(accounts, accounts.c.id == journal_lines.c.account_id)
+        .join(account_types, account_types.c.id == accounts.c.account_type_id)
+        .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
+        .where(account_types.c.code.in_(codes))
+        .where(journal_entries.c.period_month == period_month)
+        .where(journal_entries.c.source_type != "opening_balance")
+        .order_by(journal_entries.c.entry_date)
+    ).all()
+
+    side_by_code = dict(sources)
+    out: list[DrilldownLine] = []
+    for r in rows:
+        side = side_by_code.get(r.code)
+        if side == "credit" and not (r.credit_amount_idr > 0):
+            continue
+        if side == "debit" and not (r.debit_amount_idr > 0):
+            continue
+        out.append(
+            DrilldownLine(
+                entry_date=r.entry_date,
+                source_type=r.source_type,
+                memo=r.memo,
+                debit_idr=r.debit_amount_idr,
+                credit_idr=r.credit_amount_idr,
+                ebay_order_ref=r.ebay_order_ref,
+                consignor_item_ref=r.consignor_item_ref,
+                journal_entry_id=r.journal_entry_id,
+            )
+        )
+    return out
+
+
+def cash_flow_fx_effect_drilldown(conn: Connection, *, period_month: _dt.date) -> list[DrilldownLine]:
+    """Source journal lines behind the "Effect of unrealized FX revaluation
+    on cash" reconciling line — every cash-account line on a
+    ``source_type='fx_revaluation'`` entry this period.
+    """
+    rows = conn.execute(
+        select(
+            journal_entries.c.entry_date,
+            journal_entries.c.source_type,
+            journal_entries.c.memo,
+            journal_lines.c.debit_amount_idr,
+            journal_lines.c.credit_amount_idr,
+            journal_lines.c.ebay_order_ref,
+            journal_lines.c.consignor_item_ref,
             journal_lines.c.journal_entry_id,
         )
+        .join(accounts, accounts.c.id == journal_lines.c.account_id)
+        .join(account_types, account_types.c.id == accounts.c.account_type_id)
         .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
-        .where(journal_lines.c.account_id == account_id)
+        .where(account_types.c.statement_section == CASH_STATEMENT_SECTION)
+        .where(journal_entries.c.source_type == "fx_revaluation")
         .where(journal_entries.c.period_month == period_month)
         .order_by(journal_entries.c.entry_date)
     ).all()
     return [
-        Movement(
+        DrilldownLine(
             entry_date=r.entry_date,
             source_type=r.source_type,
             memo=r.memo,
             debit_idr=r.debit_amount_idr,
             credit_idr=r.credit_amount_idr,
+            ebay_order_ref=r.ebay_order_ref,
+            consignor_item_ref=r.consignor_item_ref,
             journal_entry_id=r.journal_entry_id,
         )
         for r in rows
     ]
-
-
-def _try_account_id(conn: Connection, code: str, **kwargs) -> int | None:
-    try:
-        return get_account_id(conn, code, **kwargs)
-    except Exception:  # UnknownAccountInstanceError — this account_type isn't set up yet
-        return None
-
-
-def cash_flow_report(
-    conn: Connection, *, period_month: _dt.date, ebay_account_id: int | None = None
-) -> CashFlowReport:
-    if ebay_account_id is not None:
-        acct_row = conn.execute(
-            select(ebay_accounts.c.name, ebay_accounts.c.wallet_group_id, wallet_groups.c.name.label("wg_name"))
-            .join(wallet_groups, wallet_groups.c.id == ebay_accounts.c.wallet_group_id)
-            .where(ebay_accounts.c.id == ebay_account_id)
-        ).first()
-        if acct_row is None:
-            raise ValueError(f"No ebay_account with id={ebay_account_id}")
-        is_shared = (
-            len(
-                conn.execute(
-                    select(ebay_accounts.c.id).where(
-                        ebay_accounts.c.wallet_group_id == acct_row.wallet_group_id,
-                        ebay_accounts.c.is_active.is_(True),
-                    )
-                ).all()
-            )
-            > 1
-        )
-
-        stages: list[CashFlowStage] = []
-        ebay_wallet_id = _try_account_id(conn, "EBAY_WALLET", ebay_account_id=ebay_account_id)
-        if ebay_wallet_id is not None:
-            stages.append(
-                CashFlowStage(label="eBay Wallet", movements=_account_movements(conn, ebay_wallet_id, period_month))
-            )
-        payoneer_id = _try_account_id(conn, "PAYONEER_WALLET", wallet_group_id=acct_row.wallet_group_id)
-        if payoneer_id is not None:
-            stages.append(
-                CashFlowStage(
-                    label="Payoneer Wallet" + (" (shared pool)" if is_shared else ""),
-                    movements=_account_movements(conn, payoneer_id, period_month),
-                )
-            )
-        bridging_id = _try_account_id(conn, "BCA_BRIDGING", wallet_group_id=acct_row.wallet_group_id)
-        if bridging_id is not None:
-            stages.append(
-                CashFlowStage(
-                    label="BCA Bridging Account" + (" (shared pool)" if is_shared else ""),
-                    movements=_account_movements(conn, bridging_id, period_month),
-                )
-            )
-        return CashFlowReport(
-            period_month=period_month,
-            scope_label=acct_row.name,
-            is_shared_pool=is_shared,
-            wallet_group_name=acct_row.wg_name,
-            stages=stages,
-        )
-
-    # Consolidated: sum eBay Wallet movements across every active account
-    # (1:1, no dedup needed); dedupe Payoneer/BCA Bridging by wallet-group
-    # (never sum each paired account's identical shared-pool figure twice —
-    # this is the exact double-count bug CLAUDE.md warns about).
-    active_accounts = conn.execute(
-        select(ebay_accounts.c.id, ebay_accounts.c.name, ebay_accounts.c.wallet_group_id).where(
-            ebay_accounts.c.is_active.is_(True)
-        )
-    ).all()
-
-    ebay_wallet_stage = CashFlowStage(label="eBay Wallet (all accounts)")
-    for acc in active_accounts:
-        wallet_id = _try_account_id(conn, "EBAY_WALLET", ebay_account_id=acc.id)
-        if wallet_id is not None:
-            ebay_wallet_stage.movements.extend(_account_movements(conn, wallet_id, period_month))
-
-    seen_wallet_groups: set[int] = set()
-    payoneer_stage = CashFlowStage(label="Payoneer Wallet (all wallet-groups, deduped)")
-    bridging_stage = CashFlowStage(label="BCA Bridging Account (all wallet-groups, deduped)")
-    for acc in active_accounts:
-        if acc.wallet_group_id in seen_wallet_groups:
-            continue
-        seen_wallet_groups.add(acc.wallet_group_id)
-        payoneer_id = _try_account_id(conn, "PAYONEER_WALLET", wallet_group_id=acc.wallet_group_id)
-        if payoneer_id is not None:
-            payoneer_stage.movements.extend(_account_movements(conn, payoneer_id, period_month))
-        bridging_id = _try_account_id(conn, "BCA_BRIDGING", wallet_group_id=acc.wallet_group_id)
-        if bridging_id is not None:
-            bridging_stage.movements.extend(_account_movements(conn, bridging_id, period_month))
-
-    bca_main_id = _try_account_id(conn, "BCA_MAIN")
-    bca_main_stage = CashFlowStage(label="BCA Main Account")
-    if bca_main_id is not None:
-        bca_main_stage.movements = _account_movements(conn, bca_main_id, period_month)
-
-    # Informational only: the total inter-account-transfer inflow landing in
-    # BCA Main this period. It's not subtracted from anything — the
-    # underlying movement lists above already only count each transfer leg
-    # once, on its own account's list — this figure just makes visible that
-    # those legs cancel out when you look at total cash movement across the
-    # whole business (see module docstring / design doc §3).
-    transfer_elimination = sum(
-        (m.debit_idr - m.credit_idr for m in bca_main_stage.movements if m.source_type == "inter_account_transfer"),
-        ZERO,
-    )
-
-    return CashFlowReport(
-        period_month=period_month,
-        scope_label="Consolidated",
-        is_shared_pool=False,
-        wallet_group_name=None,
-        stages=[ebay_wallet_stage, payoneer_stage, bridging_stage, bca_main_stage],
-        transfer_elimination_idr=transfer_elimination,
-    )
 
 
 # ---------------------------------------------------------------------------
