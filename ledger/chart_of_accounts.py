@@ -83,6 +83,17 @@ ACCOUNT_TYPES = [
     # eBay's Promoted Listings fee out of COGS). Given its own line for
     # visibility, same reasoning as SHIPPING_COST/INTEREST_INCOME above.
     ("CONTRACT_LABOR", "Contract Labor", "opex", "debit", "consolidated", False),
+    # Added 2026-09-10 — some real Shopee/Tokopedia (and possibly other
+    # vendor) purchases are for packaging supplies (boxes, bubble wrap, poly
+    # mailers, etc.), not inventory items, and shouldn't dilute either COGS
+    # or the generic GENERAL_OPEX catch-all — a real, recurring cost the
+    # user wants separately visible, same reasoning already applied to
+    # SHIPPING_COST/CONTRACT_LABOR. Deliberately NOT given a keyword
+    # auto-match rule: the same Shopee/Tokopedia bank line could be either
+    # an item purchase or packaging supplies (or something else) and can't
+    # be told apart from the raw description alone — stays human-judgment,
+    # per-transaction, in the Review Queue.
+    ("PACKAGING_SUPPLIES", "Packaging Supplies", "opex", "debit", "consolidated", False),
     # Other Income / Expense
     ("REALIZED_FX", "Realized FX Gain/Loss", "other_income_expense", "credit", "consolidated", False),
     ("UNREALIZED_FX", "Unrealized FX Gain/Loss", "other_income_expense", "credit", "consolidated", False),

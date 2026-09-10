@@ -414,12 +414,22 @@ review_queue = Table(
     # account as plain 'cogs_purchase' (which is kept, unchanged, for cases
     # where the distinction isn't relevant/known) — a labeling improvement
     # only, not a new expense type.
+    # 'packaging_supplies' added 2026-09-10 — some real Shopee/Tokopedia (and
+    # possibly other vendor) purchases are for packaging supplies (boxes,
+    # bubble wrap, poly mailers, etc.), not inventory items, and need their
+    # own category for the same reason 'contract_labor'/'shipping_cost' did:
+    # 'operating_expense' always resolves to GENERAL_OPEX by default (see
+    # ingestion.matching._post_one_row), which would misclassify a real
+    # packaging cost. Deliberately no keyword auto-match rule — the same
+    # Shopee/Tokopedia bank line could be either an item purchase or
+    # packaging supplies and can't be told apart from the raw description
+    # alone, so this always stays a human-selected label.
     CheckConstraint(
         "category IS NULL OR category IN ('revenue_settlement','cogs_purchase','consignment_payout',"
         "'internal_transfer','internal_transfer_landing','operating_expense','owners_draw',"
         "'owners_contribution','interest_income','contract_labor','shipping_cost','payroll',"
         "'employee_loan_disbursement','item_purchase','inbound_shipping',"
-        "'item_purchase_and_inbound_shipping','other')",
+        "'item_purchase_and_inbound_shipping','packaging_supplies','other')",
         name="ck_review_queue_category",
     ),
     # The idempotency invariant from CLAUDE.md rule 6, structural: a row can

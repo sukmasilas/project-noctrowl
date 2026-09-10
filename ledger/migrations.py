@@ -356,15 +356,17 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "SHIPPING_COST posting path; 'payroll' / "
             "'employee_loan_disbursement', added 2026-09-10 for the new "
             "PAYROLL posting path and the new EMPLOYEE_LOAN_RECEIVABLE asset "
-            "account; and 'item_purchase' / 'inbound_shipping' / "
+            "account; 'item_purchase' / 'inbound_shipping' / "
             "'item_purchase_and_inbound_shipping', added 2026-09-10 as more "
             "specific COGS sub-labels (all three still post to the existing "
             "COGS account — a labeling/traceability improvement, not a new "
             "expense type; 'cogs_purchase' itself is kept, unchanged) — see "
-            "ingestion/matching.py's _post_one_row) — brings the constraint "
-            "to whatever the LATEST code defines in one step, regardless of "
-            "which of those historical widenings a given database happens "
-            "to be missing."
+            "ingestion/matching.py's _post_one_row; and 'packaging_supplies', "
+            "added 2026-09-10 for the new PACKAGING_SUPPLIES operating "
+            "-expense account (see ledger/chart_of_accounts.py) — brings the "
+            "constraint to whatever the LATEST code defines in one step, "
+            "regardless of which of those historical widenings a given "
+            "database happens to be missing."
         ),
         table="review_queue",
         apply_sql=(
@@ -375,7 +377,7 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "'operating_expense','owners_draw','owners_contribution',"
             "'interest_income','contract_labor','shipping_cost','payroll',"
             "'employee_loan_disbursement','item_purchase','inbound_shipping',"
-            "'item_purchase_and_inbound_shipping','other'))",
+            "'item_purchase_and_inbound_shipping','packaging_supplies','other'))",
         ),
     ),
     MigrationStep(
@@ -593,6 +595,42 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "missing_reference_reason TEXT",
         ),
     ),
+    MigrationStep(
+        id="account_types_packaging_supplies",
+        description=(
+            "account_types row for PACKAGING_SUPPLIES (2026-09-10) — a new "
+            "Operating Expenses line for real Shopee/Tokopedia (and possibly "
+            "other vendor) purchases that are packaging supplies (boxes, "
+            "bubble wrap, poly mailers, etc.), not inventory items (see "
+            "ledger/chart_of_accounts.py's inline note). Same exact pattern/"
+            "reasoning as 'account_types_contract_labor'/"
+            "'account_types_other_income'/"
+            "'account_types_employee_loan_receivable' above: account_types."
+            "code has a UNIQUE constraint and ledger.seed.seed_account_types "
+            "is a plain INSERT with no upsert guard, so a brand-new "
+            "account_type added to the Python catalog after a database was "
+            "already seeded needs an explicit, idempotent INSERT here."
+        ),
+        table="account_types",
+        already_applied_check=(
+            "SELECT 1 FROM account_types WHERE code = 'PACKAGING_SUPPLIES'"
+        ),
+        apply_sql=(
+            "INSERT INTO account_types (code, name, statement_section, "
+            "normal_balance, scope_kind, is_contra) "
+            "SELECT 'PACKAGING_SUPPLIES', 'Packaging Supplies', 'opex', "
+            "'debit', 'consolidated', false "
+            "WHERE NOT EXISTS (SELECT 1 FROM account_types WHERE code = "
+            "'PACKAGING_SUPPLIES')",
+        ),
+    ),
+    # NOTE: same as the account_types_contract_labor/account_types_other_income
+    # steps above — this only creates the account_types CATALOG row. The
+    # actual postable `accounts` row (the consolidated singleton instance
+    # PACKAGING_SUPPLIES needs before anything can post to it) is
+    # deliberately NOT a MIGRATIONS step, for the identical reason documented
+    # there. See scripts/ensure_packaging_supplies_account.py for the
+    # one-off, idempotent real-database equivalent instead.
     MigrationStep(
         id="review_queue_sign_mismatch_reason",
         description=(

@@ -315,6 +315,14 @@ _CASH_FLOW_CODE_TO_KEY = {
     # call for a single small-dollar real loan, flagged for QA/Main-agent
     # to confirm rather than silently assumed as the only valid treatment.
     "EMPLOYEE_LOAN_RECEIVABLE": "employee_loans",
+    # Added 2026-09-10 alongside the new PACKAGING_SUPPLIES opex account (see
+    # ledger/chart_of_accounts.py). REQUIRED here, not optional decoration —
+    # same whitelist warning as EMPLOYEE_LOAN_RECEIVABLE above: any
+    # cash-touching entry's non-cash counterpart line that isn't in this
+    # dict silently drops out of the Operating/Financing totals entirely,
+    # breaking the Beginning+NetChange=Ending identity the moment a real
+    # packaging-supplies expense posts.
+    "PACKAGING_SUPPLIES": "packaging_supplies",
 }
 
 # side: 'credit' = the accrual (a consignment sale) -> bucketed with
@@ -331,6 +339,7 @@ _CASH_FLOW_LINE_LABELS = {
     "general_opex": "Cash paid — General Operating Expenses",
     "shipping_cost": "Cash paid — Shipping Cost",
     "contract_labor": "Cash paid — Contract Labor",
+    "packaging_supplies": "Cash paid — Packaging Supplies",
     "consignor_payouts": "Cash paid to consignors",
     "interest_income": "Interest income received",
     "realized_fx": "Realized FX Gain/Loss (at Payoneer withdrawal)",
@@ -349,6 +358,7 @@ _OPERATING_KEY_ORDER = [
     "general_opex",
     "shipping_cost",
     "contract_labor",
+    "packaging_supplies",
     "consignor_payouts",
     "interest_income",
     "realized_fx",

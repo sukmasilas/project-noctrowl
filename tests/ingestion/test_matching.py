@@ -1364,6 +1364,67 @@ def test_manually_labeled_contract_labor_row_posts_to_its_own_account_not_genera
 
 
 # ---------------------------------------------------------------------------
+# 'packaging_supplies' — a human-selected review-queue category (2026-09-10,
+# added alongside the new PACKAGING_SUPPLIES operating-expense account for
+# real Shopee/Tokopedia (and possibly other vendor) purchases that are
+# packaging supplies rather than inventory items — see
+# ledger/chart_of_accounts.py and CLAUDE.md). Deliberately NO keyword
+# auto-match rule (the user confirmed a Shopee/Tokopedia bank line could be
+# EITHER an item purchase OR packaging supplies, with no way to tell from
+# the raw description alone) — only the manual-label -> post path a human
+# actually uses, mirroring
+# test_manually_labeled_contract_labor_row_posts_to_its_own_account_not_
+# general_opex's pattern above.
+# ---------------------------------------------------------------------------
+
+
+def test_manually_labeled_packaging_supplies_row_posts_to_its_own_account_not_general_opex(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 15),
+                raw_description="Transfer to Tokopedia - bubble wrap and boxes",
+                amount_idr=Decimal("-850000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    run_auto_match(conn)
+    row = conn.execute(select(review_queue.c.id, review_queue.c.category)).one()
+    assert row.category is None  # no keyword rule for this — correctly Needs Review
+
+    conn.execute(
+        update(review_queue)
+        .values(category="packaging_supplies", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row.id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row.id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+
+    packaging_supplies_id = get_account_id(conn, "PACKAGING_SUPPLIES")
+    assert packaging_supplies_id is not None  # the account instance genuinely exists (not just the catalog row)
+    assert "PACKAGING_SUPPLIES" in lines
+    assert lines["PACKAGING_SUPPLIES"][0].debit_amount_idr == Decimal("850000")
+    assert "GENERAL_OPEX" not in lines  # must NOT fall back to the generic default
+    assert lines["BCA_MAIN"][0].credit_amount_idr == Decimal("850000")
+    assert_balanced(conn, entry_id)
+
+    # Idempotent: a second sync run must not double-post the same row.
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 0
+
+
+# ---------------------------------------------------------------------------
 # 'other' — bidirectional by design (2026-09-05 fix). CLAUDE.md's Chart of
 # accounts adds OTHER_INCOME as the inflow-side counterpart to GENERAL_OPEX.
 # Found against a real historical bad entry: a real +Rp 50,000 inflow (the

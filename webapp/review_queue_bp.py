@@ -82,6 +82,19 @@ CATEGORY_OPTIONS = [
     # Item Ref" field below for the employee's name (traceability only, one
     # aggregate account, same pattern as Consignor Payable).
     ("employee_loan_disbursement", "Employee Loan Disbursement"),
+    # Added 2026-09-10 — some real Shopee/Tokopedia (and possibly other
+    # vendor) purchases are for packaging supplies (boxes, bubble wrap, poly
+    # mailers, etc.), not inventory items, and need their own category for
+    # the same reason 'contract_labor'/'shipping_cost' did: a plain
+    # 'operating_expense' label always resolves to GENERAL_OPEX (see
+    # ingestion.matching._post_one_row), which would misclassify a real
+    # packaging cost instead of posting it to its own dedicated line.
+    # Deliberately NO keyword auto-match rule for this — the user confirmed
+    # the same Shopee/Tokopedia bank line could be EITHER an item purchase
+    # OR packaging supplies (no way to tell from the raw description alone),
+    # so this always stays a human-selected, per-transaction judgment call
+    # in the Review Queue.
+    ("packaging_supplies", "Packaging Supplies"),
     ("other", "Other"),
 ]
 
