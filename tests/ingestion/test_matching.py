@@ -1305,6 +1305,61 @@ def test_never_posts_unlabeled_needs_review_row(iprototype):
     assert post_result2.posted == 1
 
 
+def test_post_pending_rows_flips_match_status_to_matched_on_success(iprototype):
+    """Regression test for the 2026-09-14 bug fix: post_pending_rows was
+    setting posted_at/posted_journal_entry_id on a successful post but never
+    flipping match_status from 'needs_review' to 'matched', so a row that
+    had genuinely posted kept showing the amber 'Needs Review' badge in the
+    UI forever (see CLAUDE.md's "New low-priority gap found by QA
+    2026-09-05" note). This drives a row through the exact human-labels-a-
+    needs_review-row path (the normal case this bug affected) and asserts
+    match_status is 'matched' afterward, not just posted_at being set.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 5, 20),
+                raw_description="Unrecognized transfer",
+                amount_idr=Decimal("-500000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    run_auto_match(conn)
+
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    row_before = conn.execute(
+        select(review_queue.c.match_status, review_queue.c.posted_at).where(review_queue.c.id == row_id)
+    ).one()
+    assert row_before.match_status == "needs_review"
+    assert row_before.posted_at is None
+
+    # Human labels it — next sync run picks it up (rule 4).
+    conn.execute(
+        update(review_queue)
+        .values(category="operating_expense", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    row_after = conn.execute(
+        select(
+            review_queue.c.match_status,
+            review_queue.c.posted_at,
+            review_queue.c.posted_journal_entry_id,
+        ).where(review_queue.c.id == row_id)
+    ).one()
+    assert row_after.match_status == "matched"
+    assert row_after.posted_at is not None
+    assert row_after.posted_journal_entry_id is not None
+
+
 # ---------------------------------------------------------------------------
 # 'contract_labor' — a human-selected review-queue category (2026-09-05,
 # added alongside the new CONTRACT_LABOR operating-expense account for the

@@ -774,6 +774,7 @@ def post_pending_rows(conn: Connection) -> PostResult:
             update(review_queue)
             .where(review_queue.c.id == row.id)
             .values(
+                match_status="matched",
                 posted_at=_dt.datetime.now(_dt.timezone.utc),
                 posted_journal_entry_id=journal_entry_id,
                 # Clear any earlier mismatch/missing-reference flag now that
