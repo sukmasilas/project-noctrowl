@@ -1,4 +1,14 @@
-"""Data Quality screen: automated reconciliation-gap detection results.
+"""Bank Reconciliation screen: automated reconciliation-gap detection
+results.
+
+Renamed from "Data Quality" (2026-09-16) — pure naming/branding correction,
+no change to the underlying logic/computation/data. "Bank Reconciliation"
+is the accurate, standard accounting term for what this screen has always
+done: comparing the ledger's own computed balance against a real bank/
+wallet statement's own stated opening/closing balance. It was never a
+general "does everything balance" check — the double-entry balance
+identity is already guaranteed by the database and separately verified on
+the Balance Sheet screen.
 
 See CLAUDE.md's reconciliation-gap-detection feature and
 ``ingestion/reconciliation.py``'s module docstring. Purely informational,
@@ -19,7 +29,7 @@ from webapp.db import get_db
 from webapp.finalization import review_queue_status
 from webapp.scoping import list_ebay_accounts, parse_period
 
-bp = Blueprint("data_quality", __name__, url_prefix="/data-quality")
+bp = Blueprint("bank_reconciliation", __name__, url_prefix="/bank-reconciliation")
 
 
 @bp.route("/")
@@ -74,7 +84,7 @@ def index():
         )
 
     return render_template(
-        "data_quality.html",
+        "bank_reconciliation.html",
         accounts=accounts_list,
         period_month=period_month,
         cards=cards,

@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Data Quality — Noctrowl{% endblock %}
+{% block title %}Bank Reconciliation — Noctrowl{% endblock %}
 {% block topbar %}
 <form method="get" style="display:flex;gap:10px;align-items:center;">
   <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
 </form>
 {% endblock %}
 {% block content %}
-<h1>Data Quality</h1>
+<h1>Bank Reconciliation</h1>
 <div class="subtitle">{{ period_month | period }} — automated reconciliation of the ledger's own computed balance against each bank/wallet statement's own printed opening/closing balance.</div>
 <div class="empty-state" style="border-color:#6b7280;color:#6b7280;margin-bottom:16px;">
   Informational only — this screen never corrects a discrepancy or reopens a posted transaction. A real gap needs a human to investigate outside this app.

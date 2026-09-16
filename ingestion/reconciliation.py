@@ -14,7 +14,9 @@ the ledger — that's a separate, deliberately deferred decision (see
 CLAUDE.md's "Correcting a posted review-queue row" item). If a real gap is
 found here, it is recorded so a human can investigate; nothing in this
 module (or anywhere downstream of it — webapp.finalization,
-webapp/data_quality_bp.py) can act on it beyond showing it.
+webapp/bank_reconciliation_bp.py, renamed 2026-09-16 from
+webapp/data_quality_bp.py — pure rename, no logic change) can act on it
+beyond showing it.
 
 ONLY ACCOUNTS WITH A REAL PARSED (opening, closing) BALANCE PAIR ARE EVER
 CHECKED. Today that's exactly two document formats:

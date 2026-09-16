@@ -3,27 +3,26 @@
 {% block topbar %}
 <form method="get" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
   <select class="selector" name="account_id" onchange="this.form.submit()">
-    <option value="all" {% if not account_option %}selected{% endif %}>All accounts</option>
     {% for opt in all_accounts %}
       <option value="{{ opt.account_id }}" {% if account_option and account_option.account_id == opt.account_id %}selected{% endif %}>{{ opt.label }}</option>
     {% endfor %}
   </select>
   <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
-  {% if account_option %}
-    <input type="hidden" name="scope" value="{{ 'all' if scope_all else 'period' }}">
-  {% endif %}
+  <input type="hidden" name="scope" value="{{ 'all' if scope_all else 'period' }}">
 </form>
 {% endblock %}
 {% block content %}
 <h1>General Ledger</h1>
+{% if not account_option %}
+<div class="empty-state">No accounts exist yet.</div>
+{% else %}
 <div class="subtitle">
-  {% if account_option %}{{ account_option.label }}{% else %}All accounts{% endif %}
+  {{ account_option.label }}
   —
   {% if scope_all %}All periods{% else %}{{ period_month | period }}{% endif %}
-  <div class="small">The complete, posted-only, double-entry accounting record — every journal entry with both its debit and credit sides shown together. Read-only; this is a browse view, not a place to edit anything.</div>
+  <div class="small">This account's own activity only, one row per journal line, with a running balance — the other side of each entry is deliberately not shown here. Follow a Journal Entry # link to see the full both-sides detail. Read-only; this is a browse view, not a place to edit anything.</div>
 </div>
 
-{% if account_option %}
 <div class="card-row">
   <div class="card"><strong>{{ opening_balance | idr }}</strong><div class="small">{% if scope_all %}Opening Balance (start of history){% else %}Opening Balance{% endif %}</div></div>
   <div class="card"><strong>{{ closing_balance | idr if closing_balance is not none else opening_balance | idr }}</strong><div class="small">Closing Balance{% if scope_all %} (as of now){% endif %}</div></div>
@@ -37,66 +36,45 @@
     <a href="{{ url_for('general_ledger.index', account_id=account_option.account_id, period=period_month|period_short, scope='all') }}">View this account's full history (all periods)</a>.
   {% endif %}
 </div>
-{% endif %}
 
-{% if not entries %}
-<div class="empty-state">No posted journal entries for this selection.</div>
+{% if not rows %}
+<div class="empty-state">No posted journal lines for this account/period.</div>
 {% else %}
-<div class="small" style="margin-bottom:10px;">{{ entries | length }} journal entr{{ 'y' if entries|length == 1 else 'ies' }}.</div>
-
-{% for e in entries %}
-<div class="card" style="margin-bottom:12px;">
-  <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:baseline;">
-    <div>
-      <strong>{{ e.entry_date }}</strong>
-      <span class="badge blue" style="margin-left:6px;">{{ e.source_type }}</span>
-      <span class="small" style="margin-left:6px;">Journal Entry #{{ e.id }}</span>
-      {% if e.reversal_of_id %}
-        <span class="badge amber" style="margin-left:6px;">Reversal of #{{ e.reversal_of_id }}</span>
-      {% endif %}
-      {% if e.reversed_by_id %}
-        <span class="badge red" style="margin-left:6px;">Reversed by #{{ e.reversed_by_id }}</span>
-      {% endif %}
-    </div>
-    {% if account_option and e.running_balance_idr is not none %}
-      <div class="small">Running balance ({{ account_option.label }}): <strong>{{ e.running_balance_idr | idr }}</strong></div>
-    {% endif %}
-  </div>
-  {% if e.memo %}<div class="small" style="margin-top:4px;">{{ e.memo }}</div>{% endif %}
-  {% if e.reversal_of_id %}
-    <div class="small" style="color:var(--amber-text);margin-top:2px;">This entry reverses <a href="{{ url_for('general_ledger.index', account_id='all', period=e.period_month|period_short) }}">journal entry #{{ e.reversal_of_id }}</a> — net effect of the pair is zero on every account touched.</div>
-  {% endif %}
-  {% if e.reversed_by_id %}
-    <div class="small" style="color:var(--red-text);margin-top:2px;">This entry has been reversed by <a href="{{ url_for('general_ledger.index', account_id='all', period=e.period_month|period_short) }}">journal entry #{{ e.reversed_by_id }}</a> — no longer represents money actually in effect.</div>
-  {% endif %}
-
-  <table style="margin-top:10px;">
-    <thead><tr><th>Account</th><th class="num">Debit (IDR)</th><th class="num">Credit (IDR)</th><th>Order/Consignor Ref</th></tr></thead>
-    <tbody>
-      {% for l in e.lines %}
-      <tr {% if l.is_filtered_account %}style="background:#f8faff;font-weight:600;"{% endif %}>
-        <td>{{ l.account_label }}</td>
-        <td class="num">{{ l.debit_idr | idr if l.debit_idr else '' }}</td>
-        <td class="num">{{ l.credit_idr | idr if l.credit_idr else '' }}</td>
-        <td class="small">{{ l.ebay_order_ref or l.consignor_item_ref or '—' }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-
-  {% if e.source_traces %}
-  <div class="small" style="margin-top:8px;">
-    <strong>Source:</strong>
-    <ul style="margin:4px 0 0 18px;padding:0;">
-      {% for t in e.source_traces %}
-      <li>{{ t.label }}</li>
-      {% endfor %}
-    </ul>
-  </div>
-  {% else %}
-  <div class="small" style="margin-top:8px;color:var(--text-dim);">No linked source record (e.g. a manual correction entry) — see the memo above for context.</div>
-  {% endif %}
-</div>
-{% endfor %}
+<div class="small" style="margin-bottom:10px;">{{ rows | length }} journal line{{ 's' if rows|length != 1 }}.</div>
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Journal Entry</th>
+      <th>Memo</th>
+      <th>Ref</th>
+      <th class="num">Debit (IDR)</th>
+      <th class="num">Credit (IDR)</th>
+      <th class="num">Running Balance (IDR)</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.entry_date }}</td>
+      <td>
+        <a href="{{ url_for('journal_entries.index', account_id='all', period=row.period_month|period_short) }}#entry-{{ row.journal_entry_id }}">#{{ row.journal_entry_id }}</a>
+        {% if row.reversal_of_id %}
+          <span class="badge amber" title="This entry reverses journal entry #{{ row.reversal_of_id }}">Reversal</span>
+        {% endif %}
+        {% if row.reversed_by_id %}
+          <span class="badge red" title="This entry has been reversed by journal entry #{{ row.reversed_by_id }}">Reversed</span>
+        {% endif %}
+      </td>
+      <td class="small">{{ row.memo or '—' }}</td>
+      <td class="small">{{ row.ebay_order_ref or row.consignor_item_ref or '—' }}</td>
+      <td class="num">{{ row.debit_idr | idr if row.debit_idr else '' }}</td>
+      <td class="num">{{ row.credit_idr | idr if row.credit_idr else '' }}</td>
+      <td class="num"><strong>{{ row.running_balance_idr | idr }}</strong></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endif %}
 {% endblock %}
