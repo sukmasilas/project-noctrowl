@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Subsidiary Ledger — Noctrowl{% endblock %}
+{% block topbar %}
+<form method="get" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+  <select class="selector" name="account" onchange="this.form.submit()">
+    {% for opt in ledger_accounts %}
+      <option value="{{ opt.account_type_code }}" {% if account_option and account_option.account_type_code == opt.account_type_code %}selected{% endif %}>{{ opt.label }}</option>
+    {% endfor %}
+  </select>
+  <input class="selector" type="month" name="period" value="{{ period_month | period_short }}" onchange="this.form.submit()">
+</form>
+{% endblock %}
+{% block content %}
+<h1>Subsidiary Ledger</h1>
+{% if not account_option %}
+<div class="empty-state">No subsidiary-ledger control accounts exist yet.</div>
+{% else %}
+<div class="subtitle">
+  {{ account_option.label }} — as of end of {{ period_month | period }}
+  <div class="small">Breaks the aggregate {{ account_option.label }} control account down by individual consignor/employee. Read-only; this is a browse view, not a place to edit anything.</div>
+</div>
+
+<div class="card-row">
+  <div class="card"><strong>{{ recon.control_account_balance_idr | idr }}</strong><div class="small">{{ account_option.label }} — control account balance (General Ledger)</div></div>
+  <div class="card"><strong>{{ recon.sum_of_sub_entities_idr | idr }}</strong><div class="small">Sum of all sub-entity balances below</div></div>
+</div>
+
+{% if recon.matches %}
+<div class="empty-state" style="border-color:#2e7d32;color:#2e7d32;margin-bottom:16px;">
+  Reconciled — the sum of every sub-entity's balance ties out exactly to the {{ account_option.label }} control account balance.
+</div>
+{% else %}
+<div class="empty-state" style="border-color:#c0392b;color:#c0392b;margin-bottom:16px;">
+  Warning: sub-entity balances do NOT sum to the {{ account_option.label }} control account balance
+  (difference: {{ recon.difference_idr | idr }}). This means some activity on this account is
+  missing a consignor/employee reference (or a reference typo) — investigate rather than trust
+  the sub-entity list below as complete.
+</div>
+{% endif %}
+
+<h2>Sub-entities</h2>
+{% if not balances %}
+<div class="empty-state">No sub-entity activity on {{ account_option.label }} yet as of {{ period_month | period }}.</div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Consignor / Employee</th>
+      <th class="num">Balance (IDR)</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for b in balances %}
+    <tr {% if selected_reference == b.reference %}style="font-weight:700;"{% endif %}>
+      <td>{{ b.reference }}</td>
+      <td class="num">{{ b.balance_idr | idr }}</td>
+      <td><a href="{{ url_for('subsidiary_ledger.index', account=account_option.account_type_code, period=period_month|period_short, entity=b.reference) }}">View transactions</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if selected_reference %}
+<h2>Transactions — {{ selected_reference }}</h2>
+{% if not entity_rows %}
+<div class="empty-state">No posted journal lines for {{ selected_reference }} on this account through {{ period_month | period }}.</div>
+{% else %}
+<div class="small" style="margin-bottom:10px;">{{ entity_rows | length }} journal line{{ 's' if entity_rows|length != 1 }}.</div>
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Journal Entry</th>
+      <th>Memo</th>
+      <th class="num">Debit (IDR)</th>
+      <th class="num">Credit (IDR)</th>
+      <th class="num">Running Balance (IDR)</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in entity_rows %}
+    <tr>
+      <td>{{ row.entry_date }}</td>
+      <td>
+        <a href="{{ url_for('journal_entries.index', account_id='all', period=row.period_month|period_short) }}#entry-{{ row.journal_entry_id }}">#{{ row.journal_entry_id }}</a>
+        {% if row.reversal_of_id %}
+          <span class="badge amber" title="This entry reverses journal entry #{{ row.reversal_of_id }}">Reversal</span>
+        {% endif %}
+        {% if row.reversed_by_id %}
+          <span class="badge red" title="This entry has been reversed by journal entry #{{ row.reversed_by_id }}">Reversed</span>
+        {% endif %}
+      </td>
+      <td class="small">{{ row.memo or '—' }}</td>
+      <td class="num">{{ row.debit_idr | idr if row.debit_idr else '' }}</td>
+      <td class="num">{{ row.credit_idr | idr if row.credit_idr else '' }}</td>
+      <td class="num"><strong>{{ row.running_balance_idr | idr }}</strong></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+{% endif %}
+{% endblock %}

@@ -14,6 +14,7 @@
     <a class="nav-item {% if request.endpoint == 'wallet.index' %}active{% endif %}" href="{{ url_for('wallet.index') }}">Wallet</a>
     <a class="nav-item {% if request.endpoint == 'journal_entries.index' %}active{% endif %}" href="{{ url_for('journal_entries.index') }}">Journal Entries</a>
     <a class="nav-item {% if request.endpoint == 'general_ledger.index' %}active{% endif %}" href="{{ url_for('general_ledger.index') }}">General Ledger</a>
+    <a class="nav-item {% if request.endpoint == 'subsidiary_ledger.index' %}active{% endif %}" href="{{ url_for('subsidiary_ledger.index') }}">Subsidiary Ledger</a>
     <a class="nav-item {% if request.endpoint == 'bank_reconciliation.index' %}active{% endif %}" href="{{ url_for('bank_reconciliation.index') }}">Bank Reconciliation</a>
     <div class="nav-item {% if request.blueprint == 'reports' %}active{% endif %}">Reports</div>
     {# Revenue link removed from nav 2026-09-09 (parked, not deleted — see

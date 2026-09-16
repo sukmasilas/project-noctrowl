@@ -49,6 +49,61 @@ def account_balance_through(
     return sum((r.credit_amount_idr - r.debit_amount_idr for r in rows), ZERO)
 
 
+def account_balance_through_by_reference(
+    conn: Connection, account_id: int, period_month: _dt.date, normal_balance: str, reference: str
+) -> Decimal:
+    """Same computation as ``account_balance_through`` above, but further
+    restricted to ``journal_lines`` whose ``consignor_item_ref`` exactly
+    matches ``reference`` — the per-sub-entity balance within a subsidiary
+    ledger (see ``webapp/subsidiary_ledger_bp.py``).
+
+    This is the load-bearing identity a subsidiary ledger exists to prove:
+    summing this across every distinct ``reference`` that has ever posted to
+    ``account_id`` must always tie out exactly to ``account_balance_through``'s
+    own aggregate for that same ``account_id``/``period_month`` — any gap
+    means some line posted to the control account without a reference (or a
+    reference typo), which is exactly the kind of thing a subsidiary ledger
+    is supposed to surface, not hide.
+
+    Deliberately a new, separate function rather than adding an optional
+    ``reference=`` parameter to ``account_balance_through`` — the two callers
+    (whole-account balance vs. one-reference-within-an-account balance) have
+    different enough call shapes (no caller ever wants to filter
+    ``account_balance_through`` by reference AND get the unfiltered
+    behavior from the same call site) that a shared function with an
+    optional filter would only add a branch no one needs.
+    """
+    rows = conn.execute(
+        select(journal_lines.c.debit_amount_idr, journal_lines.c.credit_amount_idr)
+        .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
+        .where(journal_lines.c.account_id == account_id)
+        .where(journal_lines.c.consignor_item_ref == reference)
+        .where(journal_entries.c.period_month <= period_month)
+    ).all()
+    if normal_balance == "debit":
+        return sum((r.debit_amount_idr - r.credit_amount_idr for r in rows), ZERO)
+    return sum((r.credit_amount_idr - r.debit_amount_idr for r in rows), ZERO)
+
+
+def distinct_references_for_account(conn: Connection, account_id: int, period_month: _dt.date) -> list[str]:
+    """Every distinct non-null ``consignor_item_ref`` that has posted to
+    ``account_id`` on or before the end of ``period_month`` — the sub-entity
+    list for a subsidiary ledger screen. Scoped "through period end" (not
+    "within period only") for the same reason a balance is always "as of a
+    date": a consignor/employee whose only activity is in a later period
+    shouldn't appear on an earlier period's subsidiary ledger.
+    """
+    rows = conn.execute(
+        select(journal_lines.c.consignor_item_ref)
+        .distinct()
+        .join(journal_entries, journal_entries.c.id == journal_lines.c.journal_entry_id)
+        .where(journal_lines.c.account_id == account_id)
+        .where(journal_lines.c.consignor_item_ref.is_not(None))
+        .where(journal_entries.c.period_month <= period_month)
+    ).all()
+    return sorted(r.consignor_item_ref for r in rows)
+
+
 def _prior_month(d: _dt.date) -> _dt.date:
     if d.month == 1:
         return d.replace(year=d.year - 1, month=12)
