@@ -91,3 +91,13 @@ button:disabled { background: #aab4c4; cursor: not-allowed; }
 .inline-editor td { padding-top: 12px; padding-bottom: 12px; }
 .empty-state { color: var(--text-dim); padding: 30px; text-align: center; }
 .small { font-size: 12px; color: var(--text-dim); }
+
+/* Journal Entries: dense single-table layout, both lines of an entry grouped
+   together via subtle zebra shading + a top border on the first row of each
+   group, instead of a bordered "card" per entry (see journal_entries.html). */
+.journal-table td, .journal-table th { padding: 6px 10px; }
+.journal-table tr.jrow-even td { background: #fafbfc; }
+.journal-table tr.jrow-first td { border-top: 2px solid var(--border); }
+.journal-table tr.jrow-meta td { padding-top: 3px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.journal-table .badge { margin-left: 4px; }
+.jrow-meta-seg ~ .jrow-meta-seg::before { content: " \00b7 "; color: var(--text-dim); }
