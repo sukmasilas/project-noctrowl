@@ -24,36 +24,36 @@ SAMPLES = Path(__file__).resolve().parents[2] / "sample-documents"
 EBAY_CSV_BYTES = (SAMPLES / "eBay account 1_ricky-game" / "Transaction_report_20260701_20260731.csv").read_bytes()
 
 
-def test_documents_page_renders_not_yet_uploaded_state(logged_in_client, wtopology):
+def test_documents_page_renders_not_yet_uploaded_state(client, wtopology):
     # Use the CURRENT month, not the fixed 2026-07 PERIOD below — the H+7
     # deadline for July 2026 has already passed relative to the real
     # system clock, which would make this period show "Missing" instead.
     current_month = _dt.date.today().replace(day=1)
-    resp = logged_in_client.get(f"/documents/?period={current_month.isoformat()[:7]}")
+    resp = client.get(f"/documents/?period={current_month.isoformat()[:7]}")
     assert resp.status_code == 200
     assert b"Not yet uploaded" in resp.data
 
 
-def test_documents_page_shows_uploaded_card(logged_in_client, wtopology):
+def test_documents_page_shows_uploaded_card(client, wtopology):
     conn, topo = wtopology
     make_source_document(conn, document_type="ebay_sales_csv", period_month=PERIOD, ebay_account_id=topo["ebay_account_id"], ingested=True)
     conn.commit()
-    resp = logged_in_client.get(f"/documents/?period={PERIOD.isoformat()[:7]}")
+    resp = client.get(f"/documents/?period={PERIOD.isoformat()[:7]}")
     assert resp.status_code == 200
     assert b"Uploaded" in resp.data
 
 
-def test_documents_page_shows_missing_when_deadline_passed(logged_in_client, wtopology):
+def test_documents_page_shows_missing_when_deadline_passed(client, wtopology):
     old_period = _dt.date(2020, 1, 1)  # deadline long since passed
-    resp = logged_in_client.get(f"/documents/?period={old_period.isoformat()[:7]}")
+    resp = client.get(f"/documents/?period={old_period.isoformat()[:7]}")
     assert resp.status_code == 200
     assert b"Missing" in resp.data
 
 
-def test_sync_now_without_drive_configured_flashes_error_not_crash(logged_in_client, wtopology, monkeypatch):
+def test_sync_now_without_drive_configured_flashes_error_not_crash(client, wtopology, monkeypatch):
     monkeypatch.delenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", raising=False)
     conn, topo = wtopology
-    resp = logged_in_client.post(
+    resp = client.post(
         "/documents/sync",
         data={"account_id": str(topo["ebay_account_id"]), "period": PERIOD.isoformat()},
         follow_redirects=True,
@@ -62,13 +62,13 @@ def test_sync_now_without_drive_configured_flashes_error_not_crash(logged_in_cli
     assert b"not configured" in resp.data or b"GOOGLE_DRIVE_ROOT_FOLDER_ID" in resp.data
 
 
-def test_sync_now_respects_cooldown(logged_in_client, wtopology, monkeypatch):
+def test_sync_now_respects_cooldown(client, wtopology, monkeypatch):
     monkeypatch.setenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", "fake-root")
     conn, topo = wtopology
     record_sync_run(conn, triggered_by="tester", ebay_account_id=topo["ebay_account_id"], period_month=PERIOD, result_summary="test")
     conn.commit()
 
-    resp = logged_in_client.post(
+    resp = client.post(
         "/documents/sync",
         data={"account_id": str(topo["ebay_account_id"]), "period": PERIOD.isoformat()},
         follow_redirects=True,
@@ -77,7 +77,7 @@ def test_sync_now_respects_cooldown(logged_in_client, wtopology, monkeypatch):
     assert b"cooldown" in resp.data
 
 
-def test_update_invoice_saves_fields_and_marks_confirmed(logged_in_client, wtopology):
+def test_update_invoice_saves_fields_and_marks_confirmed(client, wtopology):
     conn, topo = wtopology
     result = conn.execute(
         invoices_table.insert().values(
@@ -90,7 +90,7 @@ def test_update_invoice_saves_fields_and_marks_confirmed(logged_in_client, wtopo
     invoice_id = result.inserted_primary_key[0]
     conn.commit()
 
-    resp = logged_in_client.post(
+    resp = client.post(
         f"/documents/invoices/{invoice_id}",
         data={
             "extracted_date": "2026-07-10",
@@ -141,12 +141,13 @@ def _seed_remaining_july_kurs_pajak_rates(conn):
     seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 8, 3), rate_idr=_Decimal("16400.0000"))
 
 
-def _app_with_fake_drive(wengine, login_env, drive_client):
+def _app_with_fake_drive(wengine, monkeypatch, drive_client):
     """Same construction as the shared ``app`` fixture (tests/webapp/
     conftest.py), but with an explicit Drive client instead of always None —
     needed here because Sync Now's folder-name resolution can only be
     exercised end-to-end with a real (faked) Drive client behind it.
     """
+    monkeypatch.setenv("APP_SECRET_KEY", "test-secret-key-not-for-production")
     flask_app = create_app(engine=wengine, drive_client=drive_client)
     flask_app.config.update(TESTING=True)
     return flask_app
@@ -163,7 +164,7 @@ def _app_with_fake_drive(wengine, login_env, drive_client):
 # not-configured short-circuits, before folder resolution ever runs).
 
 
-def test_sync_now_uses_explicit_drive_folder_name_when_set(wengine, login_env, wtopology, monkeypatch):
+def test_sync_now_uses_explicit_drive_folder_name_when_set(wengine, wtopology, monkeypatch):
     conn, topo = wtopology
     _seed_remaining_july_kurs_pajak_rates(conn)
 
@@ -187,11 +188,8 @@ def test_sync_now_uses_explicit_drive_folder_name_when_set(wengine, login_env, w
     # folder-name logic (explicit vs. derived) is under test here.
     monkeypatch.setenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", client.root_id)
 
-    flask_app = _app_with_fake_drive(wengine, login_env, client)
-    username, password = login_env
+    flask_app = _app_with_fake_drive(wengine, monkeypatch, client)
     test_client = flask_app.test_client()
-    login_resp = test_client.post("/login", data={"username": username, "password": password})
-    assert login_resp.status_code in (302, 303)
 
     resp = test_client.post(
         "/documents/sync",
@@ -208,7 +206,7 @@ def test_sync_now_uses_explicit_drive_folder_name_when_set(wengine, login_env, w
     )
 
 
-def test_sync_now_falls_back_to_derived_folder_name_when_drive_folder_name_is_null(wengine, login_env, wtopology, monkeypatch):
+def test_sync_now_falls_back_to_derived_folder_name_when_drive_folder_name_is_null(wengine, wtopology, monkeypatch):
     conn, topo = wtopology
     _seed_remaining_july_kurs_pajak_rates(conn)
     conn.commit()
@@ -234,11 +232,8 @@ def test_sync_now_falls_back_to_derived_folder_name_when_drive_folder_name_is_nu
     client.add_file(ebay_folder, "Transaction_report_20260701_20260731.csv", EBAY_CSV_BYTES, "text/csv")
     monkeypatch.setenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", client.root_id)
 
-    flask_app = _app_with_fake_drive(wengine, login_env, client)
-    username, password = login_env
+    flask_app = _app_with_fake_drive(wengine, monkeypatch, client)
     test_client = flask_app.test_client()
-    login_resp = test_client.post("/login", data={"username": username, "password": password})
-    assert login_resp.status_code in (302, 303)
 
     resp = test_client.post(
         "/documents/sync",

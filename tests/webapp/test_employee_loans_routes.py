@@ -14,15 +14,15 @@ from ledger.posting import post_employee_loan_disbursement, post_payroll_with_lo
 from ledger.schema import employee_loans
 
 
-def test_employee_loans_page_renders_empty_state(logged_in_client, wtopology):
-    resp = logged_in_client.get("/settings/employee-loans")
+def test_employee_loans_page_renders_empty_state(client, wtopology):
+    resp = client.get("/settings/employee-loans")
     assert resp.status_code == 200
     assert b"No employee loan records yet" in resp.data
 
 
-def test_create_employee_loan_record(logged_in_client, wtopology):
+def test_create_employee_loan_record(client, wtopology):
     conn, topo = wtopology
-    resp = logged_in_client.post(
+    resp = client.post(
         "/settings/employee-loans",
         data={
             "employee_name": "Fariz Pradana",
@@ -40,8 +40,8 @@ def test_create_employee_loan_record(logged_in_client, wtopology):
     assert row.loan_start_date == _dt.date(2026, 9, 1)
 
 
-def test_create_employee_loan_rejects_non_positive_amounts(logged_in_client, wtopology):
-    resp = logged_in_client.post(
+def test_create_employee_loan_rejects_non_positive_amounts(client, wtopology):
+    resp = client.post(
         "/settings/employee-loans",
         data={
             "employee_name": "Fariz Pradana",
@@ -51,17 +51,17 @@ def test_create_employee_loan_rejects_non_positive_amounts(logged_in_client, wto
         },
     )
     assert resp.status_code in (301, 302)
-    resp2 = logged_in_client.get("/settings/employee-loans")
+    resp2 = client.get("/settings/employee-loans")
     assert b"No employee loan records yet" in resp2.data  # rejected, nothing created
 
 
-def test_remaining_balance_computed_live_from_posted_repayments(logged_in_client, wtopology):
+def test_remaining_balance_computed_live_from_posted_repayments(client, wtopology):
     """The core promise of this screen: remaining balance always reflects
     what's ACTUALLY been posted, never a manually-maintained running total.
     """
     conn, topo = wtopology
 
-    logged_in_client.post(
+    client.post(
         "/settings/employee-loans",
         data={
             "employee_name": "Fariz Pradana",
@@ -71,7 +71,7 @@ def test_remaining_balance_computed_live_from_posted_repayments(logged_in_client
         },
     )
 
-    resp = logged_in_client.get("/settings/employee-loans")
+    resp = client.get("/settings/employee-loans")
     assert b"27.000.000" in resp.data
 
     # No repayments posted yet — remaining balance equals the original amount.
@@ -92,13 +92,13 @@ def test_remaining_balance_computed_live_from_posted_repayments(logged_in_client
     )
     conn.commit()
 
-    resp2 = logged_in_client.get("/settings/employee-loans")
+    resp2 = client.get("/settings/employee-loans")
     assert resp2.status_code == 200
     # Remaining = 27,000,000 - 1,500,000 = 25,500,000 — computed live, not stored.
     assert b"25.500.000" in resp2.data
 
 
-def test_update_employee_loan_record(logged_in_client, wtopology):
+def test_update_employee_loan_record(client, wtopology):
     conn, topo = wtopology
     conn.execute(
         employee_loans.insert().values(
@@ -111,7 +111,7 @@ def test_update_employee_loan_record(logged_in_client, wtopology):
     conn.commit()
     row = conn.execute(select(employee_loans)).first()
 
-    resp = logged_in_client.post(
+    resp = client.post(
         f"/settings/employee-loans/{row.id}",
         data={
             "employee_name": "Fariz Pradana",

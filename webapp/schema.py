@@ -30,9 +30,13 @@ webapp_sync_runs = Table(
     Column("id", Integer, primary_key=True),
     Column("triggered_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("completed_at", DateTime(timezone=True), nullable=True),
-    # Always the shared-login username for this prototype (no per-user
-    # identity beyond that) — kept for the action-log visibility CLAUDE.md
-    # expects, not for any access-control purpose.
+    # Historically the shared-login username (no per-user identity beyond
+    # that) — kept for the action-log visibility CLAUDE.md expects, not for
+    # any access-control purpose. The app's own login gate was removed
+    # 2026-09-22 (see CLAUDE.md's "Login gate — superseded" note; Dotworks
+    # is now the shared entry point in front of this app), so the webapp
+    # route no longer has anything to populate this with and always passes
+    # None — column kept nullable for schema/test-fixture stability.
     Column("triggered_by", Text, nullable=True),
     Column("ebay_account_id", Integer, nullable=True),
     Column("period_month", Date, nullable=True),

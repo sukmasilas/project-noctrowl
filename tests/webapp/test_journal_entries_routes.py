@@ -242,7 +242,7 @@ def test_journal_entries_entry_with_no_linked_source_shows_empty_trace_not_a_cra
     assert e.source_traces == []
 
 
-def test_journal_entries_route_renders_reversal_badges_for_real_shape(logged_in_client, wtopology):
+def test_journal_entries_route_renders_reversal_badges_for_real_shape(client, wtopology):
     conn, topo = wtopology
     original_id = post_cogs_purchase(conn, entry_date=_dt.date(2026, 7, 10), amount_idr=Decimal("50000"))
     reversal_id = post_reversal_entry(
@@ -253,25 +253,20 @@ def test_journal_entries_route_renders_reversal_badges_for_real_shape(logged_in_
     )
     conn.commit()
 
-    resp = logged_in_client.get("/journal-entries/?period=2026-07")
+    resp = client.get("/journal-entries/?period=2026-07")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert f"Reversed by #{reversal_id}" in body
     assert f"Reversal of #{original_id}" in body
 
 
-def test_journal_entries_route_requires_login(client):
-    resp = client.get("/journal-entries/", follow_redirects=False)
-    assert resp.status_code in (302, 303)
-
-
-def test_journal_entries_route_handles_no_data_without_crashing(logged_in_client, wtopology):
-    resp = logged_in_client.get("/journal-entries/?period=2020-01")
+def test_journal_entries_route_handles_no_data_without_crashing(client, wtopology):
+    resp = client.get("/journal-entries/?period=2020-01")
     assert resp.status_code == 200
     assert "No posted journal entries" in resp.get_data(as_text=True)
 
 
-def test_journal_entries_route_account_scope_all_toggle_works(logged_in_client, wtopology):
+def test_journal_entries_route_account_scope_all_toggle_works(client, wtopology):
     conn, topo = wtopology
     post_cogs_purchase(conn, entry_date=_dt.date(2026, 6, 10), amount_idr=Decimal("40000"))
     post_cogs_purchase(conn, entry_date=_dt.date(2026, 7, 15), amount_idr=Decimal("60000"))
@@ -280,8 +275,8 @@ def test_journal_entries_route_account_scope_all_toggle_works(logged_in_client, 
     all_accounts = list_all_accounts(conn)
     cogs_opt = next(o for o in all_accounts if o.account_type_code == "COGS")
 
-    resp_period = logged_in_client.get(f"/journal-entries/?period=2026-07&account_id={cogs_opt.account_id}")
-    resp_all = logged_in_client.get(
+    resp_period = client.get(f"/journal-entries/?period=2026-07&account_id={cogs_opt.account_id}")
+    resp_all = client.get(
         f"/journal-entries/?period=2026-07&account_id={cogs_opt.account_id}&scope=all"
     )
     assert resp_period.status_code == 200

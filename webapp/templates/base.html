@@ -28,9 +28,6 @@
     <div class="nav-item {% if request.blueprint == 'settings' %}active{% endif %}">Settings</div>
     <a class="nav-sub {% if request.endpoint == 'settings.payout_tiers' %}active{% endif %}" href="{{ url_for('settings.payout_tiers') }}">Payout Tiers</a>
     <a class="nav-sub {% if request.endpoint == 'settings.employee_loans_index' %}active{% endif %}" href="{{ url_for('settings.employee_loans_index') }}">Employee Loans</a>
-    <form method="post" action="{{ url_for('auth.logout') }}" style="margin-top:auto;padding:12px 18px;">
-      <button type="submit" class="btn-secondary" style="width:100%;">Log out</button>
-    </form>
   </div>
   <div class="main">
     <div class="topbar">

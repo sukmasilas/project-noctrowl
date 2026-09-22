@@ -35,14 +35,12 @@ from sqlalchemy import func, select, update
 from ledger.entities import get_account_id
 from ledger.errors import UnknownAccountInstanceError
 from ledger.schema import consignor_payout_tiers, employee_loans, journal_lines
-from webapp.auth import login_required
 from webapp.db import get_db
 
 bp = Blueprint("settings", __name__, url_prefix="/settings")
 
 
 @bp.route("/payout-tiers")
-@login_required
 def payout_tiers():
     conn = get_db()
     rows = conn.execute(select(consignor_payout_tiers).order_by(consignor_payout_tiers.c.display_order)).all()
@@ -50,7 +48,6 @@ def payout_tiers():
 
 
 @bp.route("/payout-tiers/<int:tier_id>", methods=["POST"])
-@login_required
 def update_payout_tier(tier_id: int):
     conn = get_db()
     row = conn.execute(
@@ -128,7 +125,6 @@ def _repayments_by_employee(conn) -> dict[str, Decimal]:
 
 
 @bp.route("/employee-loans")
-@login_required
 def employee_loans_index():
     conn = get_db()
     rows = conn.execute(select(employee_loans).order_by(employee_loans.c.loan_start_date, employee_loans.c.id)).all()
@@ -154,7 +150,6 @@ def employee_loans_index():
 
 
 @bp.route("/employee-loans", methods=["POST"])
-@login_required
 def create_employee_loan():
     conn = get_db()
     employee_name = (request.form.get("employee_name") or "").strip()
@@ -196,7 +191,6 @@ def create_employee_loan():
 
 
 @bp.route("/employee-loans/<int:loan_id>", methods=["POST"])
-@login_required
 def update_employee_loan(loan_id: int):
     conn = get_db()
     row = conn.execute(select(employee_loans).where(employee_loans.c.id == loan_id)).first()

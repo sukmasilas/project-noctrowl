@@ -82,7 +82,6 @@ from ledger.schema import (
     payoneer_withdrawals,
     wallet_groups,
 )
-from webapp.auth import login_required
 from webapp.db import get_db
 from webapp.scoping import parse_period
 
@@ -507,7 +506,6 @@ def journal_entries_for_scope(
 
 
 @bp.route("/")
-@login_required
 def index():
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)

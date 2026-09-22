@@ -10,7 +10,6 @@ from __future__ import annotations
 from flask import Blueprint, abort, redirect, render_template, request, url_for
 
 from webapp import reporting
-from webapp.auth import login_required
 from webapp.db import get_db
 from webapp.finalization import report_status
 from webapp.scoping import list_ebay_accounts, parse_period
@@ -19,7 +18,6 @@ bp = Blueprint("reports", __name__, url_prefix="/reports")
 
 
 @bp.route("/")
-@login_required
 def index():
     return redirect(url_for("reports.revenue"))
 
@@ -41,7 +39,6 @@ def _scope_from_request(conn):
 
 
 @bp.route("/revenue")
-@login_required
 def revenue():
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)
@@ -63,7 +60,6 @@ def revenue():
 
 
 @bp.route("/cash-flow")
-@login_required
 def cash_flow():
     """Statement of Cash Flows — consolidated only (direct method), same
     "consolidated-only" gating as P&L/Equity/Balance Sheet below, since
@@ -79,7 +75,6 @@ def cash_flow():
 
 
 @bp.route("/cash-flow/drilldown/<key>")
-@login_required
 def cash_flow_drilldown(key: str):
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)
@@ -95,7 +90,6 @@ def cash_flow_drilldown(key: str):
 
 
 @bp.route("/pnl")
-@login_required
 def pnl():
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)
@@ -105,7 +99,6 @@ def pnl():
 
 
 @bp.route("/equity")
-@login_required
 def equity():
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)
@@ -115,7 +108,6 @@ def equity():
 
 
 @bp.route("/balance-sheet")
-@login_required
 def balance_sheet():
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)
@@ -127,7 +119,6 @@ def balance_sheet():
 
 
 @bp.route("/balance-sheet/drilldown/<int:account_id>")
-@login_required
 def balance_sheet_drilldown(account_id: int):
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)
@@ -189,7 +180,6 @@ _DRILLDOWN_CODES = {
 
 
 @bp.route("/drilldown/<figure>")
-@login_required
 def drilldown(figure: str):
     conn = get_db()
     if figure not in _DRILLDOWN_CODES:

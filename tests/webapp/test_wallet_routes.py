@@ -217,7 +217,7 @@ def test_traceable_invoice_is_not_flagged_once_a_review_queue_row_links_to_it(wt
     assert untraceable == []
 
 
-def test_wallet_route_renders_and_flags_untraceable_invoice(logged_in_client, wtopology):
+def test_wallet_route_renders_and_flags_untraceable_invoice(client, wtopology):
     conn, topo = wtopology
     period = _dt.date(2026, 7, 1)
     conn.execute(
@@ -233,26 +233,19 @@ def test_wallet_route_renders_and_flags_untraceable_invoice(logged_in_client, wt
     )
     conn.commit()
 
-    resp = logged_in_client.get(f"/wallet/?period=2026-07&account_id={topo['ebay_wallet_id']}")
+    resp = client.get(f"/wallet/?period=2026-07&account_id={topo['ebay_wallet_id']}")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert "Mystery Vendor" in body
     assert "no matching transaction" in body.lower()
 
 
-def test_wallet_route_requires_login(client):
-    resp = client.get("/wallet/", follow_redirects=False)
-    assert resp.status_code in (302, 303)
-
-
-def test_wallet_route_handles_no_accounts_set_up_yet_without_crashing(app, login_env, wconn):
+def test_wallet_route_handles_no_accounts_set_up_yet_without_crashing(app, wconn):
     """CLAUDE.md's Definition of done: handle the 'no data yet' case without
     crashing. ``wconn`` seeds catalogs only — no eBay account/wallet-group
     topology exists yet.
     """
     client = app.test_client()
-    username, password = login_env
-    client.post("/login", data={"username": username, "password": password})
     resp = client.get("/wallet/")
     assert resp.status_code == 200
     assert "No wallet accounts are set up yet" in resp.get_data(as_text=True)

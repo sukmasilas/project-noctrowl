@@ -214,20 +214,15 @@ def test_sub_entity_rows_empty_for_unknown_reference(wtopology):
 # ---------------------------------------------------------------------------
 
 
-def test_subsidiary_ledger_route_requires_login(client):
-    resp = client.get("/subsidiary-ledger/", follow_redirects=False)
-    assert resp.status_code in (302, 303)
-
-
-def test_subsidiary_ledger_route_renders_empty_state_for_consignor_payable(logged_in_client, wtopology):
-    resp = logged_in_client.get("/subsidiary-ledger/?account=CONSIGNOR_PAYABLE&period=2026-07")
+def test_subsidiary_ledger_route_renders_empty_state_for_consignor_payable(client, wtopology):
+    resp = client.get("/subsidiary-ledger/?account=CONSIGNOR_PAYABLE&period=2026-07")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert "No sub-entity activity" in body
     assert "Reconciled" in body
 
 
-def test_subsidiary_ledger_route_shows_real_employee_balance(logged_in_client, wtopology):
+def test_subsidiary_ledger_route_shows_real_employee_balance(client, wtopology):
     conn, topo = wtopology
     post_employee_loan_disbursement(
         conn, entry_date=_dt.date(2026, 6, 1), amount_idr=Decimal("27000000"), employee_ref="Fariz Pradana"
@@ -241,7 +236,7 @@ def test_subsidiary_ledger_route_shows_real_employee_balance(logged_in_client, w
     )
     conn.commit()
 
-    resp = logged_in_client.get("/subsidiary-ledger/?account=EMPLOYEE_LOAN_RECEIVABLE&period=2026-07")
+    resp = client.get("/subsidiary-ledger/?account=EMPLOYEE_LOAN_RECEIVABLE&period=2026-07")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert "Fariz Pradana" in body
@@ -249,14 +244,14 @@ def test_subsidiary_ledger_route_shows_real_employee_balance(logged_in_client, w
     assert "Warning" not in body
 
 
-def test_subsidiary_ledger_route_drilldown_shows_transaction_rows(logged_in_client, wtopology):
+def test_subsidiary_ledger_route_drilldown_shows_transaction_rows(client, wtopology):
     conn, topo = wtopology
     post_employee_loan_disbursement(
         conn, entry_date=_dt.date(2026, 6, 1), amount_idr=Decimal("27000000"), employee_ref="Fariz Pradana"
     )
     conn.commit()
 
-    resp = logged_in_client.get(
+    resp = client.get(
         "/subsidiary-ledger/?account=EMPLOYEE_LOAN_RECEIVABLE&period=2026-07&entity=Fariz+Pradana"
     )
     assert resp.status_code == 200

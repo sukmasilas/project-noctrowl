@@ -50,7 +50,6 @@ from ledger.balances import (
     distinct_references_for_account,
 )
 from ledger.schema import journal_entries, journal_lines
-from webapp.auth import login_required
 from webapp.db import get_db
 from webapp.general_ledger_bp import GeneralLedgerRow, _reversal_links_for_entries
 from webapp.journal_entries_bp import AccountOption, list_all_accounts
@@ -202,7 +201,6 @@ def _get_account_option(options: list[AccountOption], code: str) -> AccountOptio
 
 
 @bp.route("/")
-@login_required
 def index():
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)

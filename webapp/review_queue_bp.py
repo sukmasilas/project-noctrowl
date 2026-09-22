@@ -11,7 +11,6 @@ from flask import Blueprint, flash, redirect, render_template, request, url_for
 from sqlalchemy import func, select, update
 
 from ingestion.schema import review_queue
-from webapp.auth import login_required
 from webapp.db import get_db
 from webapp.scoping import list_ebay_accounts, parse_period
 
@@ -100,7 +99,6 @@ CATEGORY_OPTIONS = [
 
 
 @bp.route("/")
-@login_required
 def index():
     conn = get_db()
     accounts = list_ebay_accounts(conn)
@@ -161,7 +159,6 @@ def _next_month(d: _dt.date) -> _dt.date:
 
 
 @bp.route("/<int:row_id>", methods=["POST"])
-@login_required
 def label_row(row_id: int):
     conn = get_db()
     category = request.form.get("category") or None

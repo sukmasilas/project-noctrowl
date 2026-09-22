@@ -45,7 +45,6 @@ from sqlalchemy.engine import Connection
 
 from ledger.balances import account_balance_before
 from ledger.schema import journal_entries, journal_lines
-from webapp.auth import login_required
 from webapp.db import get_db
 from webapp.journal_entries_bp import AccountOption, list_all_accounts
 from webapp.scoping import parse_period
@@ -169,7 +168,6 @@ def general_ledger_rows(
 
 
 @bp.route("/")
-@login_required
 def index():
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)

@@ -5,6 +5,14 @@ overall architecture. Nothing here defines its own DB engine/connection
 concept, its own ORM models, or a second Drive-auth path — see webapp/db.py
 and webapp/documents_bp.py for how the existing ledger/ingestion packages
 are reused directly.
+
+No login gate here anymore (removed 2026-09-22) — see CLAUDE.md's Architecture
+section, "Login gate — superseded 2026-09-22": a separate project, Dotworks,
+is now the single shared login/entry point in front of this app (and
+Project-Alakazam), so every route below is reachable directly with no
+authentication of its own. ``SECRET_KEY`` is still required — Flask's
+``flash()`` (used e.g. by webapp/review_queue_bp.py) needs a signed session
+to store the flashed message across the redirect, independent of login.
 """
 from __future__ import annotations
 
@@ -30,7 +38,6 @@ def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
 
     db_module.init_app(app, engine=engine)
 
-    from webapp.auth import bp as auth_bp
     from webapp.bank_reconciliation_bp import bp as bank_reconciliation_bp
     from webapp.documents_bp import bp as documents_bp
     from webapp.general_ledger_bp import bp as general_ledger_bp
@@ -42,7 +49,6 @@ def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
     from webapp.subsidiary_ledger_bp import bp as subsidiary_ledger_bp
     from webapp.wallet_bp import bp as wallet_bp
 
-    app.register_blueprint(auth_bp)
     app.register_blueprint(documents_bp)
     app.register_blueprint(review_queue_bp)
     app.register_blueprint(settings_bp)
@@ -54,20 +60,5 @@ def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
     app.register_blueprint(subsidiary_ledger_bp)
 
     register_template_filters(app)
-
-    @app.before_request
-    def _require_login():
-        from flask import request, session
-
-        from webapp.auth import SESSION_KEY
-
-        exempt_endpoints = {"auth.login", "static"}
-        if request.endpoint in exempt_endpoints or request.endpoint is None:
-            return None
-        if not session.get(SESSION_KEY):
-            from flask import redirect, url_for
-
-            return redirect(url_for("auth.login", next=request.path))
-        return None
 
     return app

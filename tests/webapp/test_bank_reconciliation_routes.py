@@ -15,25 +15,25 @@ from tests.webapp.conftest import make_reconciliation_check
 PERIOD = _dt.date(2026, 7, 1)
 
 
-def test_bank_reconciliation_renders_empty_state_when_nothing_checked_yet(logged_in_client, wtopology):
-    resp = logged_in_client.get("/bank-reconciliation/?period=2026-07")
+def test_bank_reconciliation_renders_empty_state_when_nothing_checked_yet(client, wtopology):
+    resp = client.get("/bank-reconciliation/?period=2026-07")
     assert resp.status_code == 200
     assert b"No reconciliation check has run yet" in resp.data
 
 
-def test_bank_reconciliation_renders_a_clean_match(logged_in_client, wtopology):
+def test_bank_reconciliation_renders_a_clean_match(client, wtopology):
     conn, topo = wtopology
     bridging_id = get_account_id(conn, "BCA_BRIDGING", wallet_group_id=topo["wallet_group_id"])
     make_reconciliation_check(conn, account_id=bridging_id, period_month=PERIOD, is_material=False)
     conn.commit()
 
-    resp = logged_in_client.get("/bank-reconciliation/?period=2026-07")
+    resp = client.get("/bank-reconciliation/?period=2026-07")
     assert resp.status_code == 200
     assert b"Matches" in resp.data
     assert b"Discrepancy found" not in resp.data
 
 
-def test_bank_reconciliation_renders_a_material_discrepancy_without_any_fix_action(logged_in_client, wtopology):
+def test_bank_reconciliation_renders_a_material_discrepancy_without_any_fix_action(client, wtopology):
     conn, topo = wtopology
     bridging_id = get_account_id(conn, "BCA_BRIDGING", wallet_group_id=topo["wallet_group_id"])
     make_reconciliation_check(
@@ -46,7 +46,7 @@ def test_bank_reconciliation_renders_a_material_discrepancy_without_any_fix_acti
     )
     conn.commit()
 
-    resp = logged_in_client.get("/bank-reconciliation/?period=2026-07")
+    resp = client.get("/bank-reconciliation/?period=2026-07")
     assert resp.status_code == 200
     assert b"Discrepancy found" in resp.data
     # This is a detection-only screen — never a correction/reopen action.

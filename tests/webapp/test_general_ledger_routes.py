@@ -161,25 +161,20 @@ def test_general_ledger_row_keeps_traceability_ref_without_other_account_detail(
     assert rows[0].credit_idr == Decimal("50000")
 
 
-def test_general_ledger_route_defaults_to_a_sensible_account_when_none_selected(logged_in_client, wtopology):
-    resp = logged_in_client.get("/general-ledger/?period=2026-07")
+def test_general_ledger_route_defaults_to_a_sensible_account_when_none_selected(client, wtopology):
+    resp = client.get("/general-ledger/?period=2026-07")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert "No accounts exist yet" not in body
 
 
-def test_general_ledger_route_requires_login(client):
-    resp = client.get("/general-ledger/", follow_redirects=False)
-    assert resp.status_code in (302, 303)
-
-
-def test_general_ledger_route_handles_no_data_without_crashing(logged_in_client, wtopology):
-    resp = logged_in_client.get("/general-ledger/?period=2020-01")
+def test_general_ledger_route_handles_no_data_without_crashing(client, wtopology):
+    resp = client.get("/general-ledger/?period=2020-01")
     assert resp.status_code == 200
     assert "No posted journal lines" in resp.get_data(as_text=True)
 
 
-def test_general_ledger_route_shows_journal_entry_link_not_other_side_of_entry(logged_in_client, wtopology):
+def test_general_ledger_route_shows_journal_entry_link_not_other_side_of_entry(client, wtopology):
     conn, topo = wtopology
     post_cogs_purchase(conn, entry_date=_dt.date(2026, 7, 10), amount_idr=Decimal("150000"))
     conn.commit()
@@ -187,7 +182,7 @@ def test_general_ledger_route_shows_journal_entry_link_not_other_side_of_entry(l
     all_accounts = list_all_accounts(conn)
     cogs_opt = next(o for o in all_accounts if o.account_type_code == "COGS")
 
-    resp = logged_in_client.get(f"/general-ledger/?period=2026-07&account_id={cogs_opt.account_id}")
+    resp = client.get(f"/general-ledger/?period=2026-07&account_id={cogs_opt.account_id}")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert "/journal-entries/" in body
@@ -200,7 +195,7 @@ def test_general_ledger_route_shows_journal_entry_link_not_other_side_of_entry(l
     assert "150.000" in table_body
 
 
-def test_general_ledger_route_account_scope_all_toggle_works(logged_in_client, wtopology):
+def test_general_ledger_route_account_scope_all_toggle_works(client, wtopology):
     conn, topo = wtopology
     post_cogs_purchase(conn, entry_date=_dt.date(2026, 6, 10), amount_idr=Decimal("40000"))
     post_cogs_purchase(conn, entry_date=_dt.date(2026, 7, 15), amount_idr=Decimal("60000"))
@@ -209,8 +204,8 @@ def test_general_ledger_route_account_scope_all_toggle_works(logged_in_client, w
     all_accounts = list_all_accounts(conn)
     cogs_opt = next(o for o in all_accounts if o.account_type_code == "COGS")
 
-    resp_period = logged_in_client.get(f"/general-ledger/?period=2026-07&account_id={cogs_opt.account_id}")
-    resp_all = logged_in_client.get(
+    resp_period = client.get(f"/general-ledger/?period=2026-07&account_id={cogs_opt.account_id}")
+    resp_all = client.get(
         f"/general-ledger/?period=2026-07&account_id={cogs_opt.account_id}&scope=all"
     )
     assert resp_period.status_code == 200

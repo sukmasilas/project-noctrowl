@@ -66,15 +66,11 @@ def wtopology(wconn):
 
 
 @pytest.fixture()
-def login_env(monkeypatch):
-    monkeypatch.setenv("APP_LOGIN_USERNAME", "testuser")
-    monkeypatch.setenv("APP_LOGIN_PASSWORD", "testpass")
+def app(wengine, monkeypatch):
+    # No login gate exists anymore (see CLAUDE.md's "Login gate — superseded
+    # 2026-09-22" note) — APP_SECRET_KEY is still required purely to sign the
+    # Flask session cookie for flash() messages, independent of login.
     monkeypatch.setenv("APP_SECRET_KEY", "test-secret-key-not-for-production")
-    return "testuser", "testpass"
-
-
-@pytest.fixture()
-def app(wengine, login_env):
     flask_app = create_app(engine=wengine, drive_client=None)
     flask_app.config.update(TESTING=True)
     return flask_app
@@ -83,14 +79,6 @@ def app(wengine, login_env):
 @pytest.fixture()
 def client(app):
     return app.test_client()
-
-
-@pytest.fixture()
-def logged_in_client(client, login_env):
-    username, password = login_env
-    resp = client.post("/login", data={"username": username, "password": password}, follow_redirects=False)
-    assert resp.status_code in (302, 303), resp.get_data(as_text=True)
-    return client
 
 
 def make_source_document(conn, *, document_type: str, period_month: _dt.date, ingested: bool = True, **scope) -> int:

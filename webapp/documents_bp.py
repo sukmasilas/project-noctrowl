@@ -8,14 +8,13 @@ from __future__ import annotations
 import datetime as _dt
 import os
 
-from flask import Blueprint, current_app, flash, redirect, render_template, request, session, url_for
+from flask import Blueprint, current_app, flash, redirect, render_template, request, url_for
 from sqlalchemy import exists, select, update
 from sqlalchemy.engine import Connection
 
 from ingestion.schema import invoices as invoices_table
 from ingestion.schema import review_queue, source_documents
 from ingestion.sync import SyncAlreadyRunningError, run_sync_for_period
-from webapp.auth import login_required
 from webapp.db import get_db
 from webapp.finalization import expected_by
 from webapp.scoping import list_ebay_accounts, parse_period
@@ -62,7 +61,6 @@ def list_untraceable_invoices(conn: Connection, *, period_month=None):
 
 
 @bp.route("/")
-@login_required
 def index():
     conn = get_db()
     accounts = list_ebay_accounts(conn)
@@ -159,7 +157,6 @@ def _ingestion_cards(conn, *, ebay_account_id: int, wallet_group_id: int, period
 
 
 @bp.route("/invoices/<int:invoice_id>", methods=["POST"])
-@login_required
 def update_invoice(invoice_id: int):
     conn = get_db()
     extracted_date = request.form.get("extracted_date") or None
@@ -195,7 +192,6 @@ def update_invoice(invoice_id: int):
 
 
 @bp.route("/sync", methods=["POST"])
-@login_required
 def sync_now():
     conn = get_db()
     ebay_account_id = request.form.get("account_id", type=int)
@@ -256,7 +252,13 @@ def sync_now():
 
     record_sync_run(
         conn,
-        triggered_by=session.get("logged_in") and os.environ.get("APP_LOGIN_USERNAME"),
+        # No login gate exists anymore (see CLAUDE.md's "Login gate —
+        # superseded 2026-09-22" note — Dotworks is now the single shared
+        # entry point in front of this app). This field was always just the
+        # shared-login username, never real per-user identity (see
+        # webapp/schema.py's triggered_by comment) — nothing meaningful to
+        # record here now, so it stays None.
+        triggered_by=None,
         ebay_account_id=account.id,
         period_month=period_month,
         result_summary=f"{len(result.steps)} steps, "

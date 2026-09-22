@@ -24,7 +24,6 @@ from flask import Blueprint, render_template, request
 from sqlalchemy import select
 
 from ledger.schema import account_types, accounts, reconciliation_checks, wallet_groups
-from webapp.auth import login_required
 from webapp.db import get_db
 from webapp.finalization import review_queue_status
 from webapp.scoping import list_ebay_accounts, parse_period
@@ -33,7 +32,6 @@ bp = Blueprint("bank_reconciliation", __name__, url_prefix="/bank-reconciliation
 
 
 @bp.route("/")
-@login_required
 def index():
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)

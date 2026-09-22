@@ -45,7 +45,6 @@ from sqlalchemy.engine import Connection
 from ingestion.schema import ebay_csv_transactions, review_queue
 from ledger.balances import account_balance_before, account_balance_through
 from ledger.schema import account_types, accounts, consignment_sales, ebay_accounts, wallet_groups
-from webapp.auth import login_required
 from webapp.db import get_db
 from webapp.documents_bp import list_untraceable_invoices
 from webapp.review_queue_bp import CATEGORY_OPTIONS
@@ -297,7 +296,6 @@ def wallet_register(
 
 
 @bp.route("/")
-@login_required
 def index():
     conn = get_db()
     period_month = parse_period(request.args.get("period"), conn)
