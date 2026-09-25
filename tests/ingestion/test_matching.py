@@ -2509,3 +2509,65 @@ def test_real_seeded_biaya_adm_keyword_matches_real_master_data(iprototype):
         select(journal_lines.c.debit_amount_idr).where(journal_lines.c.account_id == general_opex_id)
     ).scalars().all()
     assert debits == [Decimal("10000"), Decimal("10000"), Decimal("10000")]
+
+
+# ---------------------------------------------------------------------------
+# 'staff_meals_welfare' — a human-selected review-queue category (2026-09-24,
+# added alongside the new STAFF_MEALS_WELFARE operating-expense account for
+# the real, roughly-monthly recurring team-meal cost — see ledger/
+# chart_of_accounts.py and CLAUDE.md. Real trigger: a -Rp 520,000 "MLINJO
+# CAF" QR-code debit line, confirmed by the user as a team meal). Deliberately
+# NO keyword auto-match rule (a QR/debit line to a cafe could plausibly be
+# something else, with no way to tell from the raw description alone) — only
+# the manual-label -> post path a human actually uses, mirroring
+# test_manually_labeled_packaging_supplies_row_posts_to_its_own_account_not_
+# general_opex's pattern above. Uses a synthetic row with the same real
+# description/amount — the actual real backlog row is deliberately left
+# untouched by this test (out of scope for this task).
+# ---------------------------------------------------------------------------
+
+
+def test_manually_labeled_staff_meals_welfare_row_posts_to_its_own_account_not_general_opex(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 7),
+                raw_description="TRANSAKSI DEBIT TGL: 07/08 / QR 008 / 00000.00MLINJO CAF",
+                amount_idr=Decimal("-520000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    run_auto_match(conn)
+    row = conn.execute(select(review_queue.c.id, review_queue.c.category)).one()
+    assert row.category is None  # no keyword rule for this — correctly Needs Review
+
+    conn.execute(
+        update(review_queue)
+        .values(category="staff_meals_welfare", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row.id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row.id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+
+    staff_meals_welfare_id = get_account_id(conn, "STAFF_MEALS_WELFARE")
+    assert staff_meals_welfare_id is not None  # the account instance genuinely exists (not just the catalog row)
+    assert "STAFF_MEALS_WELFARE" in lines
+    assert lines["STAFF_MEALS_WELFARE"][0].debit_amount_idr == Decimal("520000")
+    assert "GENERAL_OPEX" not in lines  # must NOT fall back to the generic default
+    assert lines["BCA_MAIN"][0].credit_amount_idr == Decimal("520000")
+    assert_balanced(conn, entry_id)
+
+    # Idempotent: a second sync run must not double-post the same row.
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 0

@@ -282,6 +282,50 @@ def test_cash_flow_employee_loan_disbursement_and_repayment_reconciles(prototype
     assert report2.difference_idr == Decimal("0")
 
 
+def test_cash_flow_staff_meals_welfare_is_operating_outflow(prototype):
+    """2026-09-24: STAFF_MEALS_WELFARE (new opex account, real team-meal
+    cost) must post as its own bucketed Operating outflow and reconcile
+    exactly, same shape as test_cash_flow_cogs_purchase_is_operating_outflow
+    above.
+    """
+    conn, topo = prototype
+    posting.post_operating_expense(
+        conn, entry_date=DAY, expense_account_type_code="STAFF_MEALS_WELFARE", amount_idr=Decimal("520000"),
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert _bucket(report, "staff_meals_welfare") == Decimal("-520000")
+    assert report.total_operating_idr == Decimal("-520000")
+    assert report.difference_idr == Decimal("0")
+
+
+def test_cash_flow_staff_meals_welfare_negative_control_breaks_identity_if_whitelist_omits_it(prototype, monkeypatch):
+    """Negative-control regression test (per CLAUDE.md's Packaging Supplies
+    precedent — see the 2026-09-11 entry under Chart of accounts): proves
+    the Beginning+NetChange=Ending identity ACTUALLY DEPENDS on
+    STAFF_MEALS_WELFARE being present in webapp.reporting._CASH_FLOW_CODE_TO_KEY,
+    not merely that the code doesn't crash without it. Temporarily removes
+    the whitelist entry, reposts the same real-shaped transaction, and
+    confirms difference_idr breaks by EXACTLY the posted amount — the same
+    class of silent corruption a missing whitelist entry caused for real
+    once already (see CLAUDE.md's Packaging Supplies note).
+    """
+    conn, topo = prototype
+    patched = dict(reporting._CASH_FLOW_CODE_TO_KEY)
+    del patched["STAFF_MEALS_WELFARE"]
+    monkeypatch.setattr(reporting, "_CASH_FLOW_CODE_TO_KEY", patched)
+
+    posting.post_operating_expense(
+        conn, entry_date=DAY, expense_account_type_code="STAFF_MEALS_WELFARE", amount_idr=Decimal("520000"),
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    # The cash leg (BCA_MAIN credit) still reduces ending cash, but with the
+    # whitelist entry gone, the expense's own Operating line silently drops
+    # out of the total — so Beginning+NetChange no longer equals Ending,
+    # off by exactly the amount that should have been bucketed.
+    assert _bucket(report, "staff_meals_welfare") is None  # bucket silently vanished
+    assert report.difference_idr == Decimal("-520000")
+
+
 def test_cash_flow_inter_account_transfer_never_appears_in_any_bucket(prototype):
     """An inter_account_transfer only ever touches two cash accounts (see
     ledger/schema.py's trg_check_transfer_accounts) — it should net to zero

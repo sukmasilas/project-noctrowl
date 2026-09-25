@@ -94,6 +94,20 @@ ACCOUNT_TYPES = [
     # be told apart from the raw description alone — stays human-judgment,
     # per-transaction, in the Review Queue.
     ("PACKAGING_SUPPLIES", "Packaging Supplies", "opex", "debit", "consolidated", False),
+    # Added 2026-09-24 — a real, roughly-monthly recurring cost: the business
+    # periodically pays for a team meal (e.g. a QRIS/QR-code debit to a local
+    # cafe — the real trigger, a -Rp 520,000 "MLINJO CAF" line, is a
+    # confirmed team meal, not a one-off). Not PAYROLL (not salary/
+    # compensation), not COGS, not CONTRACT_LABOR. Given its own line, same
+    # reasoning as SHIPPING_COST/CONTRACT_LABOR (a recurring cost the user
+    # wants separately visible on the P&L rather than buried in
+    # GENERAL_OPEX). Deliberately NO keyword auto-match rule — same
+    # reasoning as PACKAGING_SUPPLIES: a QR/debit line to a cafe or
+    # restaurant could plausibly be something else (a business meeting, a
+    # different kind of expense) with no way to tell from the raw bank line
+    # alone, so this stays a human-judgment, per-transaction category in the
+    # Review Queue, never auto-matched.
+    ("STAFF_MEALS_WELFARE", "Staff Meals & Welfare", "opex", "debit", "consolidated", False),
     # Other Income / Expense
     ("REALIZED_FX", "Realized FX Gain/Loss", "other_income_expense", "credit", "consolidated", False),
     ("UNREALIZED_FX", "Unrealized FX Gain/Loss", "other_income_expense", "credit", "consolidated", False),

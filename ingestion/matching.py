@@ -567,6 +567,10 @@ _DIRECTIONAL_CATEGORY_SIGNS: dict[str, str] = {
     # see ledger/chart_of_accounts.py). Inherently one-direction real-world
     # event, same reasoning as every entry above.
     "packaging_supplies": "outflow",
+    # Added 2026-09-24 (new STAFF_MEALS_WELFARE operating-expense account —
+    # see ledger/chart_of_accounts.py). Inherently one-direction real-world
+    # event, same reasoning as every entry above.
+    "staff_meals_welfare": "outflow",
 }
 
 
@@ -959,6 +963,27 @@ def _post_one_row(conn: Connection, row) -> int | None:
             conn,
             entry_date=entry_date,
             expense_account_type_code="PACKAGING_SUPPLIES",
+            amount_idr=abs(row.amount_idr),
+            paying_account_type_code=paying_code,
+            **paying_kwargs,
+            **_usd_reference_kwargs(row),
+        )
+
+    if row.category == "staff_meals_welfare":
+        # A human reviewing a bank line selected "Staff Meals & Welfare"
+        # directly (see webapp/review_queue_bp.py's CATEGORY_OPTIONS) — no
+        # keyword auto-match rule exists for this (a QR/debit line to a cafe
+        # or restaurant could plausibly be something else — never guessed) —
+        # posts straight to its own dedicated STAFF_MEALS_WELFARE account via
+        # the same generic post_operating_expense used for cogs_purchase/
+        # operating_expense/contract_labor/shipping_cost/packaging_supplies/
+        # other above, never GENERAL_OPEX's default. Same pattern as the
+        # PACKAGING_SUPPLIES branch above.
+        paying_code, paying_kwargs = _paying_account_for_row(row)
+        return posting.post_operating_expense(
+            conn,
+            entry_date=entry_date,
+            expense_account_type_code="STAFF_MEALS_WELFARE",
             amount_idr=abs(row.amount_idr),
             paying_account_type_code=paying_code,
             **paying_kwargs,

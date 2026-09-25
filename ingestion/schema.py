@@ -424,12 +424,21 @@ review_queue = Table(
     # Shopee/Tokopedia bank line could be either an item purchase or
     # packaging supplies and can't be told apart from the raw description
     # alone, so this always stays a human-selected label.
+    # 'staff_meals_welfare' added 2026-09-24 — a real, roughly-monthly
+    # recurring team-meal cost (a QRIS/QR-code debit to a local cafe) needs
+    # its own category for the same reason 'contract_labor'/'shipping_cost'/
+    # 'packaging_supplies' did: 'operating_expense' always resolves to
+    # GENERAL_OPEX by default, which would bury a real, visible recurring
+    # cost. Deliberately no keyword auto-match rule, same reasoning as
+    # 'packaging_supplies' — a QR/debit line to a cafe or restaurant could
+    # plausibly be something else and can't be told apart from the raw
+    # description alone, so this always stays a human-selected label.
     CheckConstraint(
         "category IS NULL OR category IN ('revenue_settlement','cogs_purchase','consignment_payout',"
         "'internal_transfer','internal_transfer_landing','operating_expense','owners_draw',"
         "'owners_contribution','interest_income','contract_labor','shipping_cost','payroll',"
         "'employee_loan_disbursement','item_purchase','inbound_shipping',"
-        "'item_purchase_and_inbound_shipping','packaging_supplies','other')",
+        "'item_purchase_and_inbound_shipping','packaging_supplies','staff_meals_welfare','other')",
         name="ck_review_queue_category",
     ),
     # The idempotency invariant from CLAUDE.md rule 6, structural: a row can

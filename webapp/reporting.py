@@ -323,6 +323,14 @@ _CASH_FLOW_CODE_TO_KEY = {
     # breaking the Beginning+NetChange=Ending identity the moment a real
     # packaging-supplies expense posts.
     "PACKAGING_SUPPLIES": "packaging_supplies",
+    # Added 2026-09-24 alongside the new STAFF_MEALS_WELFARE opex account
+    # (see ledger/chart_of_accounts.py). REQUIRED here, not optional
+    # decoration — same whitelist warning as PACKAGING_SUPPLIES/
+    # EMPLOYEE_LOAN_RECEIVABLE above: any cash-touching entry's non-cash
+    # counterpart line that isn't in this dict silently drops out of the
+    # Operating/Financing totals entirely, breaking the Beginning+NetChange
+    # =Ending identity the moment a real staff-meals expense posts.
+    "STAFF_MEALS_WELFARE": "staff_meals_welfare",
 }
 
 # side: 'credit' = the accrual (a consignment sale) -> bucketed with
@@ -340,6 +348,7 @@ _CASH_FLOW_LINE_LABELS = {
     "shipping_cost": "Cash paid — Shipping Cost",
     "contract_labor": "Cash paid — Contract Labor",
     "packaging_supplies": "Cash paid — Packaging Supplies",
+    "staff_meals_welfare": "Cash paid — Staff Meals & Welfare",
     "consignor_payouts": "Cash paid to consignors",
     "interest_income": "Interest income received",
     "realized_fx": "Realized FX Gain/Loss (at Payoneer withdrawal)",
@@ -359,6 +368,7 @@ _OPERATING_KEY_ORDER = [
     "shipping_cost",
     "contract_labor",
     "packaging_supplies",
+    "staff_meals_welfare",
     "consignor_payouts",
     "interest_income",
     "realized_fx",

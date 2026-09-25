@@ -361,9 +361,12 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "specific COGS sub-labels (all three still post to the existing "
             "COGS account — a labeling/traceability improvement, not a new "
             "expense type; 'cogs_purchase' itself is kept, unchanged) — see "
-            "ingestion/matching.py's _post_one_row; and 'packaging_supplies', "
+            "ingestion/matching.py's _post_one_row; 'packaging_supplies', "
             "added 2026-09-10 for the new PACKAGING_SUPPLIES operating "
-            "-expense account (see ledger/chart_of_accounts.py) — brings the "
+            "-expense account (see ledger/chart_of_accounts.py); and "
+            "'staff_meals_welfare', added 2026-09-24 for the new "
+            "STAFF_MEALS_WELFARE operating-expense account (see ledger/"
+            "chart_of_accounts.py) — brings the "
             "constraint to whatever the LATEST code defines in one step, "
             "regardless of which of those historical widenings a given "
             "database happens to be missing."
@@ -377,7 +380,8 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "'operating_expense','owners_draw','owners_contribution',"
             "'interest_income','contract_labor','shipping_cost','payroll',"
             "'employee_loan_disbursement','item_purchase','inbound_shipping',"
-            "'item_purchase_and_inbound_shipping','packaging_supplies','other'))",
+            "'item_purchase_and_inbound_shipping','packaging_supplies',"
+            "'staff_meals_welfare','other'))",
         ),
     ),
     MigrationStep(
@@ -630,6 +634,43 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
     # PACKAGING_SUPPLIES needs before anything can post to it) is
     # deliberately NOT a MIGRATIONS step, for the identical reason documented
     # there. See scripts/ensure_packaging_supplies_account.py for the
+    # one-off, idempotent real-database equivalent instead.
+    MigrationStep(
+        id="account_types_staff_meals_welfare",
+        description=(
+            "account_types row for STAFF_MEALS_WELFARE (2026-09-24) — a new "
+            "Operating Expenses line for the real, roughly-monthly team-meal "
+            "cost (see ledger/chart_of_accounts.py's inline note; the real "
+            "trigger is a -Rp 520,000 'MLINJO CAF' QR/debit bank line, "
+            "confirmed by the user as a team meal and a recurring pattern, "
+            "not a one-off). Same exact pattern/reasoning as "
+            "'account_types_contract_labor'/'account_types_other_income'/"
+            "'account_types_employee_loan_receivable'/"
+            "'account_types_packaging_supplies' above: account_types.code "
+            "has a UNIQUE constraint and ledger.seed.seed_account_types is a "
+            "plain INSERT with no upsert guard, so a brand-new account_type "
+            "added to the Python catalog after a database was already "
+            "seeded needs an explicit, idempotent INSERT here."
+        ),
+        table="account_types",
+        already_applied_check=(
+            "SELECT 1 FROM account_types WHERE code = 'STAFF_MEALS_WELFARE'"
+        ),
+        apply_sql=(
+            "INSERT INTO account_types (code, name, statement_section, "
+            "normal_balance, scope_kind, is_contra) "
+            "SELECT 'STAFF_MEALS_WELFARE', 'Staff Meals & Welfare', 'opex', "
+            "'debit', 'consolidated', false "
+            "WHERE NOT EXISTS (SELECT 1 FROM account_types WHERE code = "
+            "'STAFF_MEALS_WELFARE')",
+        ),
+    ),
+    # NOTE: same as the account_types_contract_labor/account_types_other_income
+    # steps above — this only creates the account_types CATALOG row. The
+    # actual postable `accounts` row (the consolidated singleton instance
+    # STAFF_MEALS_WELFARE needs before anything can post to it) is
+    # deliberately NOT a MIGRATIONS step, for the identical reason documented
+    # there. See scripts/ensure_staff_meals_welfare_account.py for the
     # one-off, idempotent real-database equivalent instead.
     MigrationStep(
         id="review_queue_sign_mismatch_reason",
