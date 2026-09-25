@@ -16,6 +16,15 @@
 <h1>Documents</h1>
 <div class="subtitle">{{ selected_account.name if selected_account else '' }} — {{ period_month | period }}</div>
 
+{% if token_status and token_status.status in ('expiring_soon', 'likely_expired') %}
+  <div class="flash warning">
+    <strong>Google Drive access {% if token_status.status == 'likely_expired' %}may have already expired{% else %}may expire soon{% endif %}.</strong>
+    Last authorized {{ token_status.days_elapsed | round(1) }} day(s) ago. Google limits this to ~7 days while the
+    app is in Testing mode (this is an estimate, not a confirmed expiry — see CLAUDE.md). Re-run
+    <code>scripts/authorize_google_drive.py</code> to renew it before Sync Now starts failing.
+  </div>
+{% endif %}
+
 {% if no_accounts %}
   <div class="empty-state">No eBay account is set up yet.</div>
 {% else %}

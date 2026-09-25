@@ -12,6 +12,7 @@ from flask import Blueprint, current_app, flash, redirect, render_template, requ
 from sqlalchemy import exists, select, update
 from sqlalchemy.engine import Connection
 
+from ingestion.drive_client import get_token_authorization_status
 from ingestion.schema import invoices as invoices_table
 from ingestion.schema import review_queue, source_documents
 from ingestion.sync import SyncAlreadyRunningError, run_sync_for_period
@@ -63,9 +64,18 @@ def list_untraceable_invoices(conn: Connection, *, period_month=None):
 @bp.route("/")
 def index():
     conn = get_db()
+    # Best-effort, LOCAL estimate of how stale the Drive OAuth authorization
+    # is — see ingestion/drive_client.py's get_token_authorization_status
+    # docstring and CLAUDE.md's "Google Drive OAuth token expiry" note.
+    # Computed regardless of whether an eBay account exists yet (it's not
+    # account-scoped), and never raises — degrades to "unknown" (no banner)
+    # when Drive OAuth isn't configured at all, same as every other
+    # "no data yet" case in this app.
+    token_status = get_token_authorization_status()
+
     accounts = list_ebay_accounts(conn)
     if not accounts:
-        return render_template("documents.html", accounts=[], no_accounts=True)
+        return render_template("documents.html", accounts=[], no_accounts=True, token_status=token_status)
 
     ebay_account_id = request.args.get("account_id", type=int) or accounts[0].id
     account = next((a for a in accounts if a.id == ebay_account_id), accounts[0])
@@ -104,6 +114,7 @@ def index():
         purpose_options=INVOICE_PURPOSE_OPTIONS,
         sync_cooldown_seconds=last_sync,
         no_accounts=False,
+        token_status=token_status,
     )
 
 

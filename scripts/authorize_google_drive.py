@@ -34,6 +34,10 @@ WHAT IT DOES:
      ingestion/drive_client.py reads from this same path afterward and
      refreshes the access token automatically when it expires — you should
      not need to re-run this script under normal use.
+  4. Writes a small sidecar file (<token path>.authorized_at) recording the
+     UTC timestamp of this authorization. The Documents screen reads this to
+     show a proactive warning as the ~7-day Testing-mode refresh-token cap
+     approaches (see CLAUDE.md's "Google Drive OAuth token expiry" note).
 
 USAGE:
     python3 scripts/authorize_google_drive.py
@@ -96,7 +100,7 @@ def main() -> int:
     # (see ingestion/drive_client.py::_load_oauth_credentials) go through
     # the exact same, already-tested write path rather than two versions
     # that could drift.
-    from ingestion.drive_client import save_oauth_token
+    from ingestion.drive_client import save_oauth_token, write_authorized_at
 
     print("=" * 70)
     print("Google Drive authorization")
@@ -140,6 +144,15 @@ def main() -> int:
     # holding a live refresh token.
     save_oauth_token(token_path, credentials.to_json())
 
+    # Record when this real, interactive authorization completed, so the
+    # Documents screen can proactively warn as it approaches Google's known
+    # ~7-day refresh-token cap for apps in "Testing" publishing status (see
+    # CLAUDE.md's "Google Drive OAuth token expiry" note and
+    # ingestion/drive_client.py's get_token_authorization_status). This is a
+    # separate sidecar file, not a field inside the token JSON itself — see
+    # write_authorized_at's docstring for why.
+    authorized_at_path = write_authorized_at(token_path)
+
     print()
     print("SUCCESS.")
     print()
@@ -148,6 +161,8 @@ def main() -> int:
         print(f"  - {scope}")
     print()
     print(f"Token (including a refresh token) saved to: {token_path}")
+    print(f"Authorization timestamp recorded to: {authorized_at_path}")
+    print("(used by the Documents screen to warn before Google's ~7-day Testing-mode cap hits)")
     print()
     print("This file lets the app read AND write your Google Drive under your own")
     print("account's storage quota — it's already gitignored, but treat it like a")

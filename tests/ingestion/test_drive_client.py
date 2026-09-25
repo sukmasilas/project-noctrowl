@@ -275,3 +275,128 @@ def test_driveclient_unknown_auth_mode_raises_value_error():
 
     with pytest.raises(ValueError, match="Unknown auth_mode"):
         DriveClient(auth_mode="carrier-pigeon")
+
+
+# ---------------------------------------------------------------------------
+# OAuth authorization-age tracking (write_authorized_at /
+# get_token_authorization_status) — added 2026-09-25, see CLAUDE.md's
+# "Google Drive OAuth token expiry" note. Every "now" reference is injected
+# explicitly so these never depend on real wall-clock timing.
+# ---------------------------------------------------------------------------
+
+import datetime as _dt  # noqa: E402 - grouped near the tests that use it
+
+
+def test_write_authorized_at_writes_iso_timestamp_sidecar(tmp_path):
+    from ingestion.drive_client import write_authorized_at
+
+    token_path = tmp_path / "google-oauth-token.json"
+    when = _dt.datetime(2026, 9, 20, 12, 0, 0, tzinfo=_dt.timezone.utc)
+
+    sidecar_path = write_authorized_at(str(token_path), when=when)
+
+    assert sidecar_path == str(token_path) + ".authorized_at"
+    written = open(sidecar_path).read().strip()
+    assert written == when.isoformat()
+    # No leftover .tmp sibling once the atomic swap has completed.
+    assert not (tmp_path / "google-oauth-token.json.authorized_at.tmp").exists()
+
+
+def test_write_authorized_at_defaults_to_now_and_overwrites(tmp_path):
+    from ingestion.drive_client import write_authorized_at
+
+    token_path = tmp_path / "google-oauth-token.json"
+    write_authorized_at(str(token_path), when=_dt.datetime(2020, 1, 1, tzinfo=_dt.timezone.utc))
+    write_authorized_at(str(token_path))  # defaults to real now()
+
+    sidecar_path = str(token_path) + ".authorized_at"
+    written = _dt.datetime.fromisoformat(open(sidecar_path).read().strip())
+    assert written.year != 2020
+
+
+def test_token_authorization_status_healthy_within_4_days(tmp_path):
+    from ingestion.drive_client import get_token_authorization_status, write_authorized_at
+
+    token_path = str(tmp_path / "token.json")
+    now = _dt.datetime(2026, 9, 25, 12, 0, 0, tzinfo=_dt.timezone.utc)
+    write_authorized_at(token_path, when=now - _dt.timedelta(days=2))
+
+    result = get_token_authorization_status(token_path, now=now)
+
+    assert result.status == "healthy"
+    assert result.days_elapsed == pytest.approx(2.0, abs=0.01)
+    assert result.authorized_at is not None
+
+
+def test_token_authorization_status_expiring_soon_between_5_and_7_days(tmp_path):
+    from ingestion.drive_client import get_token_authorization_status, write_authorized_at
+
+    token_path = str(tmp_path / "token.json")
+    now = _dt.datetime(2026, 9, 25, 12, 0, 0, tzinfo=_dt.timezone.utc)
+    write_authorized_at(token_path, when=now - _dt.timedelta(days=6))
+
+    result = get_token_authorization_status(token_path, now=now)
+
+    assert result.status == "expiring_soon"
+    assert result.days_elapsed == pytest.approx(6.0, abs=0.01)
+
+
+def test_token_authorization_status_likely_expired_past_7_days(tmp_path):
+    from ingestion.drive_client import get_token_authorization_status, write_authorized_at
+
+    token_path = str(tmp_path / "token.json")
+    now = _dt.datetime(2026, 9, 25, 12, 0, 0, tzinfo=_dt.timezone.utc)
+    write_authorized_at(token_path, when=now - _dt.timedelta(days=9))
+
+    result = get_token_authorization_status(token_path, now=now)
+
+    assert result.status == "likely_expired"
+    assert result.days_elapsed == pytest.approx(9.0, abs=0.01)
+
+
+def test_token_authorization_status_unknown_when_sidecar_missing(tmp_path):
+    from ingestion.drive_client import get_token_authorization_status
+
+    token_path = str(tmp_path / "token-with-no-sidecar.json")
+
+    result = get_token_authorization_status(token_path)
+
+    assert result.status == "unknown"
+    assert result.authorized_at is None
+    assert result.days_elapsed is None
+
+
+def test_token_authorization_status_unknown_when_token_path_not_configured(monkeypatch):
+    from ingestion.drive_client import get_token_authorization_status
+
+    monkeypatch.delenv("GOOGLE_OAUTH_TOKEN_PATH", raising=False)
+
+    result = get_token_authorization_status()
+
+    assert result.status == "unknown"
+
+
+def test_token_authorization_status_unknown_on_malformed_sidecar(tmp_path):
+    from ingestion.drive_client import get_token_authorization_status
+
+    token_path = tmp_path / "token.json"
+    sidecar_path = str(token_path) + ".authorized_at"
+    with open(sidecar_path, "w") as f:
+        f.write("not a valid timestamp")
+
+    result = get_token_authorization_status(str(token_path))
+
+    assert result.status == "unknown"
+
+
+def test_token_authorization_status_never_raises_on_unreadable_directory(tmp_path):
+    """Sanity check for the graceful-degradation contract: a token_path
+    that isn't even a real file path (e.g. pointing inside a directory that
+    doesn't exist) still returns "unknown", never raises."""
+    from ingestion.drive_client import get_token_authorization_status
+
+    token_path = str(tmp_path / "does" / "not" / "exist" / "token.json")
+
+    result = get_token_authorization_status(token_path)
+
+    assert result.status == "unknown"

@@ -62,6 +62,57 @@ def test_sync_now_without_drive_configured_flashes_error_not_crash(client, wtopo
     assert b"not configured" in resp.data or b"GOOGLE_DRIVE_ROOT_FOLDER_ID" in resp.data
 
 
+def test_documents_page_shows_drive_expiry_banner_when_expiring_soon(client, wtopology, monkeypatch, tmp_path):
+    from ingestion.drive_client import write_authorized_at
+
+    token_path = tmp_path / "token.json"
+    monkeypatch.setenv("GOOGLE_OAUTH_TOKEN_PATH", str(token_path))
+    write_authorized_at(str(token_path), when=_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=6))
+
+    resp = client.get(f"/documents/?period={PERIOD.isoformat()[:7]}")
+
+    assert resp.status_code == 200
+    assert b"may expire soon" in resp.data
+    assert b"authorize_google_drive.py" in resp.data
+
+
+def test_documents_page_shows_drive_expiry_banner_when_likely_expired(client, wtopology, monkeypatch, tmp_path):
+    from ingestion.drive_client import write_authorized_at
+
+    token_path = tmp_path / "token.json"
+    monkeypatch.setenv("GOOGLE_OAUTH_TOKEN_PATH", str(token_path))
+    write_authorized_at(str(token_path), when=_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=9))
+
+    resp = client.get(f"/documents/?period={PERIOD.isoformat()[:7]}")
+
+    assert resp.status_code == 200
+    assert b"may have already expired" in resp.data
+
+
+def test_documents_page_hides_drive_expiry_banner_when_healthy(client, wtopology, monkeypatch, tmp_path):
+    from ingestion.drive_client import write_authorized_at
+
+    token_path = tmp_path / "token.json"
+    monkeypatch.setenv("GOOGLE_OAUTH_TOKEN_PATH", str(token_path))
+    write_authorized_at(str(token_path), when=_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=1))
+
+    resp = client.get(f"/documents/?period={PERIOD.isoformat()[:7]}")
+
+    assert resp.status_code == 200
+    assert b"may expire soon" not in resp.data
+    assert b"may have already expired" not in resp.data
+
+
+def test_documents_page_hides_drive_expiry_banner_when_drive_not_configured(client, wtopology, monkeypatch):
+    monkeypatch.delenv("GOOGLE_OAUTH_TOKEN_PATH", raising=False)
+
+    resp = client.get(f"/documents/?period={PERIOD.isoformat()[:7]}")
+
+    assert resp.status_code == 200
+    assert b"may expire soon" not in resp.data
+    assert b"may have already expired" not in resp.data
+
+
 def test_sync_now_respects_cooldown(client, wtopology, monkeypatch):
     monkeypatch.setenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", "fake-root")
     conn, topo = wtopology

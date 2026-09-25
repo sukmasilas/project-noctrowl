@@ -75,6 +75,7 @@ button:disabled { background: #aab4c4; cursor: not-allowed; }
 .flash { padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; font-size: 13px; }
 .flash.success { background: var(--green-bg); color: var(--green-text); }
 .flash.error { background: var(--red-bg); color: var(--red-text); }
+.flash.warning { background: var(--amber-bg); color: var(--amber-text); border: 1px solid var(--amber-border); }
 .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
 .login-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 28px 30px; width: 320px; }

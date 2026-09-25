@@ -51,6 +51,7 @@ the interactive consent flow.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import os
 from dataclasses import dataclass
 
@@ -176,6 +177,128 @@ def _load_oauth_credentials():
             pass  # refreshed token still works for this run even if we couldn't persist it
 
     return credentials
+
+
+# ---------------------------------------------------------------------------
+# OAuth authorization-age tracking (added 2026-09-25)
+#
+# WHY THIS EXISTS: see CLAUDE.md's "Google Drive OAuth token expiry — known
+# limitation" note. The OAuth consent screen backing this project is in
+# Google's "Testing" publishing status, which caps refresh tokens at ~7
+# days. Google exposes no real, retrievable server-side expiry timestamp
+# for a refresh token — the cap is only discoverable when a refresh attempt
+# actually fails (surfaced as DriveCredentialError above). This section adds
+# a best-effort, LOCAL estimate — "how long ago did a human last complete
+# the real interactive consent flow" — so the Documents screen can show a
+# proactive heads-up before Sync Now breaks again, instead of only after.
+#
+# This is deliberately NOT baked into the token JSON file itself
+# (GOOGLE_OAUTH_TOKEN_PATH): that file is parsed by google-auth's
+# ``UserCredentials.from_authorized_user_file``, a well-tested third-party
+# format we don't want to risk destabilizing with a custom field. Instead,
+# a small sidecar text file lives next to it, written ONLY by
+# scripts/authorize_google_drive.py at the moment a real human consent flow
+# completes — never by the automatic access-token refresh in
+# _load_oauth_credentials above, since a routine refresh isn't a new
+# consent event and re-stamping it would defeat the whole point of tracking
+# staleness.
+# ---------------------------------------------------------------------------
+
+# Boundaries (days elapsed since the last real authorization) for the
+# status buckets returned by get_token_authorization_status. Chosen to
+# leave a few days' warning window before Google's known ~7-day cap:
+# 0-4 days = healthy, 5-7 = expiring soon (the warning zone), >7 = likely
+# expired.
+TOKEN_AUTHORIZATION_WARNING_DAYS = 5
+TOKEN_AUTHORIZATION_EXPIRED_DAYS = 7
+
+
+def _authorized_at_sidecar_path(token_path: str) -> str:
+    return token_path + ".authorized_at"
+
+
+def write_authorized_at(token_path: str, when: _dt.datetime | None = None) -> str:
+    """Record that a real interactive OAuth authorization just completed for
+    ``token_path``, by writing an ISO-8601 UTC timestamp to a sidecar file
+    (``<token_path>.authorized_at``) alongside it.
+
+    Called ONLY by scripts/authorize_google_drive.py, as its last step right
+    after the token itself is saved via save_oauth_token. Nothing else in
+    this module (in particular, _load_oauth_credentials' automatic
+    access-token refresh) should ever call this — a refresh is not a new
+    human consent event.
+
+    Returns the sidecar path written, so the caller can print/confirm it.
+    """
+    if when is None:
+        when = _dt.datetime.now(_dt.timezone.utc)
+    sidecar_path = _authorized_at_sidecar_path(token_path)
+    sidecar_dir = os.path.dirname(sidecar_path) or "."
+    os.makedirs(sidecar_dir, exist_ok=True)
+    # Not a secret (just a timestamp), but written atomically anyway (tmp +
+    # os.replace) for the same "don't leave a half-written file behind on a
+    # crash mid-write" reason save_oauth_token above cares about.
+    tmp_path = sidecar_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        f.write(when.isoformat())
+    os.replace(tmp_path, sidecar_path)
+    return sidecar_path
+
+
+@dataclass
+class TokenAuthorizationStatus:
+    status: str  # "healthy" | "expiring_soon" | "likely_expired" | "unknown"
+    authorized_at: _dt.datetime | None
+    days_elapsed: float | None
+
+
+def get_token_authorization_status(
+    token_path: str | None = None, *, now: _dt.datetime | None = None
+) -> TokenAuthorizationStatus:
+    """Best-effort estimate of how stale the current Drive OAuth
+    authorization is, for the Documents screen's proactive warning banner.
+
+    This is an ESTIMATE, not a confirmed fact — see the module-level note
+    above for why Google gives us nothing more authoritative to check
+    against. Degrades gracefully to "unknown" and never raises: a missing
+    ``token_path``/env var, a missing sidecar file (e.g. a token generated
+    before this feature existed, or Drive not configured at all), or an
+    unreadable/malformed timestamp are all treated the same way as every
+    other "no data yet" case in this app — nothing to warn about, nothing
+    to crash over.
+
+    ``token_path`` defaults to the ``GOOGLE_OAUTH_TOKEN_PATH`` env var (the
+    same one ``_load_oauth_credentials`` reads). ``now`` is injectable so
+    tests never depend on real wall-clock timing.
+    """
+    if token_path is None:
+        token_path = os.environ.get("GOOGLE_OAUTH_TOKEN_PATH")
+    if not token_path:
+        return TokenAuthorizationStatus(status="unknown", authorized_at=None, days_elapsed=None)
+
+    sidecar_path = _authorized_at_sidecar_path(token_path)
+    try:
+        with open(sidecar_path, "r") as f:
+            raw = f.read().strip()
+        authorized_at = _dt.datetime.fromisoformat(raw)
+    except (OSError, ValueError):
+        return TokenAuthorizationStatus(status="unknown", authorized_at=None, days_elapsed=None)
+
+    if authorized_at.tzinfo is None:
+        authorized_at = authorized_at.replace(tzinfo=_dt.timezone.utc)
+
+    if now is None:
+        now = _dt.datetime.now(_dt.timezone.utc)
+    days_elapsed = (now - authorized_at).total_seconds() / 86400.0
+
+    if days_elapsed < TOKEN_AUTHORIZATION_WARNING_DAYS:
+        status = "healthy"
+    elif days_elapsed <= TOKEN_AUTHORIZATION_EXPIRED_DAYS:
+        status = "expiring_soon"
+    else:
+        status = "likely_expired"
+
+    return TokenAuthorizationStatus(status=status, authorized_at=authorized_at, days_elapsed=days_elapsed)
 
 
 class DriveClient:
