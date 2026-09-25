@@ -22,8 +22,59 @@ from flask import Flask, redirect, url_for
 from sqlalchemy.engine import Engine
 
 
+class PrefixMiddleware:
+    """WSGI middleware making Flask (and thus ``url_for()``) aware of a
+    path prefix stripped by an upstream reverse proxy (added 2026-09-25).
+
+    Project-Noctrowl is deployed behind nginx as part of a combined site:
+    ``dotworks.net`` is served by a sibling app (Dotworks), and nginx proxies
+    ``dotworks.net/noctrowl/*`` through to this Flask app on an internal-only
+    port, stripping the ``/noctrowl`` prefix before forwarding — so from this
+    app's own point of view, a request for ``dotworks.net/noctrowl/reports``
+    arrives looking like a plain request for ``/reports``. Without this
+    middleware, ``url_for()`` (nav links, redirects, static asset URLs) would
+    generate paths starting from ``/`` with no idea a ``/noctrowl`` prefix
+    exists on the outside, breaking every link/redirect/asset reference once
+    deployed this way.
+
+    nginx is expected to set the ``X-Script-Name`` header to the prefix it
+    stripped (e.g. ``/noctrowl``). This middleware reads that header and, if
+    present, sets ``environ['SCRIPT_NAME']`` to it (which is what
+    ``url_for()`` and Flask's routing consult) and strips that same prefix
+    off the front of ``environ['PATH_INFO']`` if it's there (since nginx's
+    proxied request may still include the full original path depending on
+    proxy config — stripping defensively here keeps routing correct either
+    way).
+
+    This is a standard, well-known pattern for mounting a Flask app under a
+    prefix behind a reverse proxy — not a Project-Noctrowl invention. It is a
+    distinct concern from Werkzeug's ``ProxyFix`` (which handles
+    client-IP/scheme headers like ``X-Forwarded-For``/``X-Forwarded-Proto``,
+    not prefix stripping) — no new dependency is needed for this.
+
+    Critically, when the ``X-Script-Name`` header is absent (e.g. local dev
+    via ``flask run``, or any request not passing through the reverse proxy),
+    this is a complete no-op — ``environ`` is passed through unchanged. This
+    must never affect local dev or the current already-deployed-nowhere-yet
+    behavior.
+    """
+
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        script_name = environ.get("HTTP_X_SCRIPT_NAME", "")
+        if script_name:
+            environ["SCRIPT_NAME"] = script_name
+            path_info = environ.get("PATH_INFO", "")
+            if path_info.startswith(script_name):
+                environ["PATH_INFO"] = path_info[len(script_name):]
+        return self.wsgi_app(environ, start_response)
+
+
 def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
     app = Flask(__name__)
+    app.wsgi_app = PrefixMiddleware(app.wsgi_app)  # type: ignore[method-assign]
 
     secret_key = os.environ.get("APP_SECRET_KEY")
     if not secret_key:
