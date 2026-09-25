@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from ingestion.schema import review_queue
 from tests.webapp.conftest import make_review_queue_row, make_source_document
+from webapp.review_queue_bp import CATEGORY_OPTIONS
 
 PERIOD = _dt.date(2026, 7, 1)
 DAY = _dt.date(2026, 7, 5)
@@ -258,6 +259,38 @@ def test_loan_repayment_amount_requires_employee_reference(client, wtopology):
     assert row.category is None  # rejected — no employee reference to draw the loan balance down against
 
 
+def test_category_options_follow_pl_statement_order():
+    """2026-09-25: the dropdown must mirror the P&L's actual flow — Revenue,
+    then every COGS variant grouped together, then every Operating Expense
+    grouped together (matching the Chart of Accounts order in CLAUDE.md),
+    then Other Income, then the non-P&L balance-sheet/equity transaction
+    types, with 'other' staying last. This is an intentional display-order
+    change (values/labels/posting logic are untouched) — not a regression to
+    revert if it ever fails after another category is added; update the
+    expected order below deliberately instead."""
+    expected_order = [
+        "revenue_settlement",
+        "cogs_purchase",
+        "item_purchase",
+        "inbound_shipping",
+        "item_purchase_and_inbound_shipping",
+        "payroll",
+        "operating_expense",
+        "shipping_cost",
+        "packaging_supplies",
+        "contract_labor",
+        "staff_meals_welfare",
+        "interest_income",
+        "internal_transfer",
+        "consignment_payout",
+        "employee_loan_disbursement",
+        "owners_draw",
+        "owners_contribution",
+        "other",
+    ]
+    assert [value for value, _label in CATEGORY_OPTIONS] == expected_order
+
+
 def test_loan_repayment_amount_rejects_whitespace_only_employee_reference(client, wtopology):
     """QA-found gap (2026-09-10, round 2) — same whitespace-only regression
     check as the employee_loan_disbursement case above, for the payroll +
@@ -280,3 +313,56 @@ def test_loan_repayment_amount_rejects_whitespace_only_employee_reference(client
 
     row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
     assert row.category is None  # rejected — whitespace-only is not a real employee reference
+
+
+def test_successful_save_redirects_anchored_to_the_saved_row(client, wtopology):
+    """2026-09-25 (Fix 3): after a successful save, the redirect must land
+    the user back at the row they just worked on (via a #rq-row-<id> URL
+    fragment) instead of the top of a long page."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "operating_expense", "consignor_item_ref": "", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+    assert resp.headers["Location"].endswith(f"#rq-row-{row_id}")
+
+
+def test_validation_failure_redirect_has_no_row_anchor(client, wtopology):
+    """The validation-failure path never posted a row_id through, so it
+    should not carry a #rq-row-<id> fragment — only a successful save does."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    resp = client.post(f"/review-queue/{row_id}", data={"category": "not_a_real_category"})
+    assert resp.status_code in (301, 302)
+    assert "#rq-row-" not in resp.headers["Location"]
+
+
+def test_row_and_editor_markup_wired_for_loan_field_toggle(client, wtopology):
+    """2026-09-25 (Fixes 2 & 3): the row has a stable id for the redirect
+    anchor, the category select calls the per-row toggle function, and the
+    loan-repayment input starts disabled unless the row's own category is
+    already 'payroll'."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    resp = client.get(f"/review-queue/?period={PERIOD.isoformat()[:7]}")
+    html = resp.data.decode()
+    assert f'id="rq-row-{row_id}"' in html
+    assert f'onchange="rqCategoryChanged({row_id})"' in html
+    assert "function rqCategoryChanged(rowId)" in html
+    # Not labeled payroll yet, so the loan field must start disabled.
+    import re
+
+    editor_match = re.search(rf'id="rq-editor-{row_id}".*?</tr>', html, re.DOTALL)
+    assert editor_match is not None
+    assert re.search(r'name="loan_repayment_amount_idr"[^>]*disabled', editor_match.group(0))

@@ -40,7 +40,7 @@
   </thead>
   <tbody>
     {% for row in rows %}
-      <tr class="figure-row" {% if row.match_status == 'needs_review' and not row.posted_at %}onclick="document.getElementById('rq-editor-{{ row.id }}').classList.toggle('hidden-row')"{% endif %}>
+      <tr id="rq-row-{{ row.id }}" class="figure-row" {% if row.match_status == 'needs_review' and not row.posted_at %}onclick="document.getElementById('rq-editor-{{ row.id }}').classList.toggle('hidden-row')"{% endif %}>
         <td>{{ row.transaction_date }}</td>
         <td>{{ row.raw_description }}</td>
         <td class="num">{{ row.amount_idr | idr }}
@@ -77,16 +77,18 @@
             <input type="hidden" name="period" value="{{ period_month.isoformat() }}">
             <input type="hidden" name="account_id" value="{{ selected_account_id or '' }}">
             <label>Category
-              <select name="category" required>
+              <select name="category" required onchange="rqCategoryChanged({{ row.id }})">
                 <option value="">— choose —</option>
                 {% for value, label in category_options %}
                   <option value="{{ value }}" {% if row.category == value %}selected{% endif %}>{{ label }}</option>
                 {% endfor %}
               </select>
             </label>
-            <label>Consignor/Item Ref <input type="text" name="consignor_item_ref" value="{{ row.consignor_item_ref or '' }}"></label>
+            <label><span class="rq-ref-label-text">{% if row.category == 'payroll' %}Consignor/Item Ref (employee's name, if this payroll includes a loan repayment){% else %}Consignor/Item Ref{% endif %}</span>
+              <input type="text" name="consignor_item_ref" value="{{ row.consignor_item_ref or '' }}">
+            </label>
             <label>Loan repayment (IDR, Payroll only)
-              <input type="number" step="1" min="1" name="loan_repayment_amount_idr" value="{{ row.loan_repayment_amount_idr or '' }}" placeholder="e.g. 1500000">
+              <input type="number" step="1" min="1" name="loan_repayment_amount_idr" value="{{ row.loan_repayment_amount_idr or '' }}" placeholder="e.g. 1500000" {% if row.category != 'payroll' %}disabled{% endif %}>
             </label>
             <span class="small">For a Payroll row that includes an employee-loan installment deduction — leave blank for a plain payroll payment. Use the Consignor/Item Ref field above for the employee's name.</span>
             <button type="submit">Save</button>
@@ -99,4 +101,54 @@
 </table>
 {% endif %}
 <style>.hidden-row { display: none; }</style>
+<script>
+// Fix 2 (2026-09-25): the Loan repayment field only ever applies to a
+// 'payroll' row (see review_queue_bp.py's label_row validation) — this
+// keeps that rule visible in the UI itself instead of only surfacing as an
+// error after a failed submit. Purely client-side convenience; the
+// server-side checks in label_row are unchanged and stay the real guard.
+//
+// Scoped per-row via rq-editor-<rowId>, since each row has its own
+// independent editor/form and ids are only unique when queried within that
+// row's own subtree (never via a bare document.querySelector('[name=...]'),
+// which would only ever hit the first row on the page).
+function rqCategoryChanged(rowId) {
+  var editor = document.getElementById('rq-editor-' + rowId);
+  if (!editor) return;
+  var category = editor.querySelector('select[name="category"]');
+  var loanInput = editor.querySelector('input[name="loan_repayment_amount_idr"]');
+  var refLabel = editor.querySelector('.rq-ref-label-text');
+  var isPayroll = category && category.value === 'payroll';
+
+  if (loanInput) {
+    loanInput.disabled = !isPayroll;
+    if (!isPayroll) {
+      // A disabled input isn't submitted anyway, but clear it too so a
+      // stale amount never lingers if the user flips categories back and
+      // forth before eventually submitting.
+      loanInput.value = '';
+    }
+  }
+  if (refLabel) {
+    refLabel.textContent = isPayroll
+      ? "Consignor/Item Ref (employee's name, if this payroll includes a loan repayment)"
+      : "Consignor/Item Ref";
+  }
+}
+
+// Fix 3 (2026-09-25): after saving a row, the redirect lands on
+// '#rq-row-<id>' so the browser scrolls back to where the user was working
+// instead of the top of the page. Since the editor only shows/hides via the
+// row's onclick toggle, a fresh page load would otherwise still land the
+// editor collapsed even though the browser scrolled to the right row — so
+// also re-expand that row's editor on load if the hash points at it.
+document.addEventListener('DOMContentLoaded', function () {
+  var match = window.location.hash.match(/^#rq-row-(\d+)$/);
+  if (!match) return;
+  var editor = document.getElementById('rq-editor-' + match[1]);
+  if (editor) {
+    editor.classList.remove('hidden-row');
+  }
+});
+</script>
 {% endblock %}

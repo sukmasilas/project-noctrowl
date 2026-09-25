@@ -19,44 +19,6 @@ bp = Blueprint("review_queue", __name__, url_prefix="/review-queue")
 CATEGORY_OPTIONS = [
     ("revenue_settlement", "Revenue Settlement"),
     ("cogs_purchase", "COGS"),
-    ("internal_transfer", "Internal Transfer"),
-    ("consignment_payout", "Consignment Payout"),
-    ("operating_expense", "Operating Expense"),
-    ("owners_draw", "Owner's Draw"),
-    ("owners_contribution", "Owner's Contribution"),
-    # Added 2026-09-02 alongside the bank_keyword_rules seeding fix (see
-    # ingestion/seed.py, ledger.posting.post_interest_income_line): without
-    # this, a human could never correctly hand-label a leftover
-    # interest-related Needs Review row (e.g. the Bridging account's "Pajak
-    # rekening" line, which the seeded keyword rules deliberately do NOT
-    # auto-match — see ingestion/seed.py's note) — they'd be forced to
-    # mislabel it 'operating_expense', posting it to GENERAL_OPEX instead of
-    # netting it against INTEREST_INCOME as CLAUDE.md's Chart of accounts
-    # section requires.
-    ("interest_income", "Interest Income"),
-    # Added 2026-09-05 alongside the new CONTRACT_LABOR operating-expense
-    # account (see ledger/chart_of_accounts.py and CLAUDE.md) — same reason
-    # 'interest_income' needed its own category above: a plain
-    # 'operating_expense' label always resolves to GENERAL_OPEX (see
-    # ingestion.matching._post_one_row), which would misclassify a real
-    # contract-labor cost instead of posting it to its own dedicated line.
-    ("contract_labor", "Contract Labor"),
-    # Added 2026-09-09 — Kurasi is a confirmed real shipping vendor (every
-    # bank line whose raw description contains "KURASI" is a shipping cost,
-    # no exceptions). Same reason 'contract_labor' needed its own category:
-    # a plain 'operating_expense' label always resolves to GENERAL_OPEX (see
-    # ingestion.matching._post_one_row), which would misclassify a real
-    # shipping cost instead of posting it to the dedicated SHIPPING_COST
-    # account that already exists in the chart of accounts.
-    #
-    # Label only (2026-09-10, Main-agent's brief): renamed from plain
-    # "Shipping Cost" to make the OUTBOUND direction explicit in the
-    # dropdown, now that COGS also has its own "Inbound Shipping" label
-    # below — the category CODE and the account it posts to (SHIPPING_COST)
-    # are UNCHANGED, this is purely a display-label clarity improvement, not
-    # a reclassification. Kurasi (and this category generally) is confirmed
-    # genuinely outbound (to customers) — never touched by this change.
-    ("shipping_cost", "Outbound Shipping (to Customer)"),
     # Added 2026-09-10 — more specific COGS sub-labels (see CLAUDE.md and
     # ledger/chart_of_accounts.py's COGS account). All three post to the
     # SAME existing COGS account as 'cogs_purchase' below (kept, unchanged,
@@ -75,12 +37,23 @@ CATEGORY_OPTIONS = [
     # the editor below (see review_queue.html) — see CLAUDE.md's Core
     # accounting rules and ledger.posting.post_payroll_with_loan_repayment.
     ("payroll", "Payroll"),
-    # Added 2026-09-10 — a real, one-off loan disbursement to an employee
-    # (see ledger/chart_of_accounts.py's EMPLOYEE_LOAN_RECEIVABLE note).
-    # Posts to that new asset account, never P&L. Uses the same "Consignor/
-    # Item Ref" field below for the employee's name (traceability only, one
-    # aggregate account, same pattern as Consignor Payable).
-    ("employee_loan_disbursement", "Employee Loan Disbursement"),
+    ("operating_expense", "Operating Expense"),
+    # Added 2026-09-09 — Kurasi is a confirmed real shipping vendor (every
+    # bank line whose raw description contains "KURASI" is a shipping cost,
+    # no exceptions). Same reason 'contract_labor' needed its own category:
+    # a plain 'operating_expense' label always resolves to GENERAL_OPEX (see
+    # ingestion.matching._post_one_row), which would misclassify a real
+    # shipping cost instead of posting it to the dedicated SHIPPING_COST
+    # account that already exists in the chart of accounts.
+    #
+    # Label only (2026-09-10, Main-agent's brief): renamed from plain
+    # "Shipping Cost" to make the OUTBOUND direction explicit in the
+    # dropdown, now that COGS also has its own "Inbound Shipping" label
+    # below — the category CODE and the account it posts to (SHIPPING_COST)
+    # are UNCHANGED, this is purely a display-label clarity improvement, not
+    # a reclassification. Kurasi (and this category generally) is confirmed
+    # genuinely outbound (to customers) — never touched by this change.
+    ("shipping_cost", "Outbound Shipping (to Customer)"),
     # Added 2026-09-10 — some real Shopee/Tokopedia (and possibly other
     # vendor) purchases are for packaging supplies (boxes, bubble wrap, poly
     # mailers, etc.), not inventory items, and need their own category for
@@ -94,6 +67,47 @@ CATEGORY_OPTIONS = [
     # so this always stays a human-selected, per-transaction judgment call
     # in the Review Queue.
     ("packaging_supplies", "Packaging Supplies"),
+    # Added 2026-09-05 alongside the new CONTRACT_LABOR operating-expense
+    # account (see ledger/chart_of_accounts.py and CLAUDE.md) — same reason
+    # 'interest_income' needed its own category above: a plain
+    # 'operating_expense' label always resolves to GENERAL_OPEX (see
+    # ingestion.matching._post_one_row), which would misclassify a real
+    # contract-labor cost instead of posting it to its own dedicated line.
+    ("contract_labor", "Contract Labor"),
+    # Added 2026-09-24 — a real, roughly-monthly recurring cost: the business
+    # periodically pays for a team meal (e.g. a QR-code debit to a local
+    # cafe — the real trigger, a -Rp 520,000 "MLINJO CAF" line). Needs its
+    # own category for the same reason 'contract_labor'/'shipping_cost'/
+    # 'packaging_supplies' did: a plain 'operating_expense' label always
+    # resolves to GENERAL_OPEX (see ingestion.matching._post_one_row), which
+    # would bury a real, recurring cost the user wants separately visible.
+    # Deliberately NO keyword auto-match rule for this — same reasoning as
+    # 'packaging_supplies': a QR/debit line to a cafe or restaurant could
+    # plausibly be something else (a business meeting, a different kind of
+    # expense) with no way to tell from the raw bank line alone, so this
+    # always stays a human-selected, per-transaction judgment call in the
+    # Review Queue.
+    ("staff_meals_welfare", "Staff Meals & Welfare"),
+    # Added 2026-09-02 alongside the bank_keyword_rules seeding fix (see
+    # ingestion/seed.py, ledger.posting.post_interest_income_line): without
+    # this, a human could never correctly hand-label a leftover
+    # interest-related Needs Review row (e.g. the Bridging account's "Pajak
+    # rekening" line, which the seeded keyword rules deliberately do NOT
+    # auto-match — see ingestion/seed.py's note) — they'd be forced to
+    # mislabel it 'operating_expense', posting it to GENERAL_OPEX instead of
+    # netting it against INTEREST_INCOME as CLAUDE.md's Chart of accounts
+    # section requires.
+    ("interest_income", "Interest Income"),
+    ("internal_transfer", "Internal Transfer"),
+    ("consignment_payout", "Consignment Payout"),
+    # Added 2026-09-10 — a real, one-off loan disbursement to an employee
+    # (see ledger/chart_of_accounts.py's EMPLOYEE_LOAN_RECEIVABLE note).
+    # Posts to that new asset account, never P&L. Uses the same "Consignor/
+    # Item Ref" field below for the employee's name (traceability only, one
+    # aggregate account, same pattern as Consignor Payable).
+    ("employee_loan_disbursement", "Employee Loan Disbursement"),
+    ("owners_draw", "Owner's Draw"),
+    ("owners_contribution", "Owner's Contribution"),
     ("other", "Other"),
 ]
 
@@ -251,14 +265,19 @@ def label_row(row_id: int):
 
     conn.commit()
     flash("Saved — queued for the next sync run.", "success")
-    return _back_to_queue(request)
+    return _back_to_queue(request, row_id=row_id)
 
 
-def _back_to_queue(req):
-    return redirect(
-        url_for(
-            "review_queue.index",
-            period=req.form.get("period") or req.args.get("period"),
-            account_id=req.form.get("account_id") or req.args.get("account_id"),
-        )
+def _back_to_queue(req, row_id: int | None = None):
+    target = url_for(
+        "review_queue.index",
+        period=req.form.get("period") or req.args.get("period"),
+        account_id=req.form.get("account_id") or req.args.get("account_id"),
     )
+    # Anchors the redirect to the row the user just saved (Fix 3, 2026-09-25)
+    # so a full page reload doesn't dump the user back at the top of a long
+    # list — Flask's redirect()/url_for() don't support fragments natively,
+    # so it's appended to the built URL directly.
+    if row_id is not None:
+        target = f"{target}#rq-row-{row_id}"
+    return redirect(target)
