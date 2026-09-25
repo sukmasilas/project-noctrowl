@@ -85,6 +85,34 @@ def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
     app.config["SECRET_KEY"] = secret_key
     app.config["DRIVE_CLIENT"] = drive_client
 
+    # Distinct session cookie name (added 2026-09-25 — fixes a real
+    # production incident). Project-Noctrowl is deployed on the same domain
+    # (dotworks.net) as a separate sibling app, Dotworks, which owns
+    # dotworks.net/login and is the real login gate in front of both apps
+    # (see the module docstring above). Both apps are plain Flask apps, and
+    # Flask's default SESSION_COOKIE_NAME is the literal string "session" —
+    # if neither app overrides it, they collide on the same domain/path.
+    # Noctrowl still uses Flask's session purely for flash() (documents_bp.py's
+    # sync_now(), review_queue_bp.py's label_row(), settings_bp.py), which
+    # writes a Set-Cookie: session=... signed with THIS app's APP_SECRET_KEY.
+    # Because the cookie name/path matched Dotworks' own login-session
+    # cookie, that Set-Cookie silently overwrote the user's Dotworks login
+    # session in their browser — the next request through nginx's
+    # auth_request check against Dotworks then failed to verify a signature
+    # made with a different secret key, so Dotworks correctly (from its own
+    # point of view) treated the user as logged out and bounced them to
+    # /login. Reproduced live: log into Dotworks, submit Noctrowl's Sync Now
+    # form (flashes an error), next page load redirects to Dotworks' login
+    # with no warning.
+    #
+    # Giving this app's session cookie its own distinct, namespaced name
+    # means it can never collide with Dotworks' (or any other sibling app's,
+    # e.g. Alakazam if it ever adds sessions) cookie on the same domain.
+    # Flask's session mechanism doesn't care what the cookie is named, only
+    # that it's consistent for a given app, so this is a complete fix with
+    # no other code change needed.
+    app.config["SESSION_COOKIE_NAME"] = "noctrowl_session"
+
     from webapp import db as db_module
 
     db_module.init_app(app, engine=engine)
