@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 
-from flask import Flask
+from flask import Flask, redirect, url_for
 from sqlalchemy.engine import Engine
 
 
@@ -60,5 +60,16 @@ def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
     app.register_blueprint(subsidiary_ledger_bp)
 
     register_template_filters(app)
+
+    # Bare root path (added 2026-09-24). Before the login gate was removed
+    # (see the module docstring above), nobody ever hit "/" directly — a
+    # successful /login always redirected to url_for("reports.index").
+    # Dotworks now links straight to this app's URL, so "/" needs its own
+    # route rather than 404ing. Reuses the same default target the old login
+    # flow used, registered on the app directly (not owned by any one
+    # blueprint) since it's app-level routing.
+    @app.route("/")
+    def root():
+        return redirect(url_for("reports.index"))
 
     return app
