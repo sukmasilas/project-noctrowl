@@ -364,6 +364,30 @@ review_queue = Table(
     # the overwhelming majority. Cleared on a later successful post, same as
     # sign_mismatch_reason.
     Column("missing_reference_reason", Text, nullable=True),
+    # Added 2026-09-28 (incident fix — see ingestion/matching.py's
+    # post_pending_rows and PostResult.failed_to_post): a row can pass every
+    # pre-check above (correct sign, any required reference present) and
+    # STILL fail while actually being posted, for a reason none of those
+    # pre-checks catch — e.g. a 'revenue_settlement' row with no
+    # ebay_account_id (and no wallet-group-derivable one), which
+    # ledger.entities.get_account_id has no EBAY_WALLET account instance to
+    # resolve against and raises for. Real incident, 2026-09-28: two such
+    # rows (manually mislabeled 'revenue_settlement' on 2026-09-03 despite
+    # lacking the ebay_account_id that path structurally requires) made
+    # _post_one_row raise, and that exception used to propagate straight out
+    # of post_pending_rows' loop, aborting posting for every OTHER row in the
+    # same sync batch. This column is deliberately separate from
+    # sign_mismatch_reason/missing_reference_reason above — those are
+    # specific, named pre-checks; this is the generic "the actual posting
+    # attempt itself blew up" catch-all, since the failure mode here is
+    # whatever exception the posting layer happens to raise, not a single
+    # fixed condition this module can name in advance. Same "never silently
+    # post, never crash the batch" treatment: the row stays/returns to
+    # needs_review, unposted, with this reason recorded for a human to see in
+    # the Review Queue UI. NULL for every row that never hit this — the
+    # overwhelming majority. Cleared on a later successful post, same as the
+    # two reason columns above.
+    Column("posting_error_reason", Text, nullable=True),
     Column("labeled_at", DateTime(timezone=True), nullable=True),
     Column("posted_at", DateTime(timezone=True), nullable=True),
     Column("posted_journal_entry_id", Integer, ForeignKey("journal_entries.id"), nullable=True),

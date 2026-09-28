@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -32,6 +33,8 @@ from ledger.schema import consignment_sales, ebay_accounts, payoneer_withdrawals
 # these are the exact numbers every rule below uses.
 AMOUNT_TOLERANCE_IDR = Decimal("100")
 DATE_TOLERANCE_DAYS = 3
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -521,6 +524,23 @@ class PostResult:
     # employee reference on an aggregate account (same reasoning CLAUDE.md
     # already applies to Consignor Payable).
     skipped_missing_employee_ref: int = 0
+    # INCIDENT FIX (2026-09-28): a row that's structurally valid (correct
+    # category, correct sign, any required reference present — i.e. it got
+    # past every pre-check above) can STILL fail while actually posting, for
+    # a reason none of those pre-checks catch — e.g. a 'revenue_settlement'
+    # row with no ebay_account_id and no wallet-group-derivable one, which
+    # ledger.entities.get_account_id has no EBAY_WALLET account instance to
+    # resolve against and raises UnknownAccountInstanceError for. Real
+    # incident: two such rows (both manually mislabeled 'revenue_settlement'
+    # by a human back on 2026-09-03 despite lacking the ebay_account_id that
+    # path structurally requires) made _post_one_row raise, and — before this
+    # fix — that exception propagated straight out of this function's loop,
+    # aborting posting for EVERY OTHER row in the same batch (89+ legitimate
+    # August transactions also failed to post, even though nothing was wrong
+    # with them). See PostResult.failed_to_post below and post_pending_rows'
+    # per-row try/except for the fix: one bad row must never take the rest of
+    # the batch down with it.
+    failed_to_post: int = 0
 
 
 # Category -> the one real-world direction that category inherently implies,
@@ -769,7 +789,65 @@ def post_pending_rows(conn: Connection) -> PostResult:
             result.skipped_missing_employee_ref += 1
             continue
 
-        journal_entry_id = _post_one_row(conn, row)
+        # INCIDENT FIX (2026-09-28): _post_one_row can raise for a row that
+        # passed every pre-check above but is still, structurally, not
+        # postable (e.g. a 'revenue_settlement' row with no ebay_account_id
+        # to resolve an EBAY_WALLET account instance against — see
+        # PostResult.failed_to_post). Before this fix, that exception
+        # propagated straight out of this loop and aborted posting for every
+        # OTHER row in the batch too — a single bad row took down the whole
+        # sync. Caught here, per-row, so the loop always continues: the
+        # failure is logged (a real bug is still visible to whoever's running
+        # the server) and recorded on the row itself (posting_error_reason)
+        # for a human to see in the Review Queue UI, but posted_at/
+        # posted_journal_entry_id are left untouched (still unposted) and
+        # every other row in the batch is completely unaffected.
+        #
+        # Wrapped in a SAVEPOINT (``conn.begin_nested()``, same pattern
+        # already used by ``scheduling.fx_revaluation._revalue_wallet_group``
+        # for the identical reason): this whole function runs inside ONE
+        # shared transaction across every row in the batch, committed once by
+        # the caller at the very end (see ingestion/sync.py, webapp/
+        # documents_bp.py). The real incident's actual exception
+        # (UnknownAccountInstanceError) happens to be a pure-Python raise
+        # before any SQL runs, so a bare try/except alone would have
+        # contained THAT specific case — but a genuine DB-level failure
+        # (e.g. a constraint violation partway through a multi-statement
+        # post, like ``_post_internal_transfer``'s claim-then-post sequence)
+        # would otherwise mark the ENTIRE shared Postgres transaction
+        # "aborted", so every subsequent statement for every OTHER row —
+        # even a perfectly valid one — would then fail too, recreating the
+        # exact batch-wide outage this fix exists to close, just one layer
+        # deeper. The SAVEPOINT contains any partial writes this ONE row's
+        # attempt made (e.g. a half-claimed transfer pairing) to a rollback
+        # boundary that doesn't touch the rest of the transaction, so every
+        # other row's work — already committed-within-the-transaction or
+        # still to come — is genuinely unaffected either way.
+        try:
+            with conn.begin_nested():
+                journal_entry_id = _post_one_row(conn, row)
+        except Exception as exc:  # noqa: BLE001 — any row-posting failure must never abort the batch
+            logger.exception(
+                "post_pending_rows: row %s (category=%r) failed to post — leaving it unposted "
+                "and continuing with the rest of the batch",
+                row.id,
+                row.category,
+            )
+            conn.execute(
+                update(review_queue)
+                .where(review_queue.c.id == row.id)
+                .values(
+                    match_status="needs_review",
+                    posting_error_reason=(
+                        f"Failed to post while classified as '{row.category}': {exc}. "
+                        "Not posted — please re-check the classification or contact support "
+                        "if this looks like a data/mapping issue rather than a mislabel."
+                    ),
+                )
+            )
+            result.failed_to_post += 1
+            continue
+
         if journal_entry_id is None:
             # c-sweep, pair not found yet — see PostResult.skipped_pending_pair.
             result.skipped_pending_pair += 1
@@ -781,12 +859,13 @@ def post_pending_rows(conn: Connection) -> PostResult:
                 match_status="matched",
                 posted_at=_dt.datetime.now(_dt.timezone.utc),
                 posted_journal_entry_id=journal_entry_id,
-                # Clear any earlier mismatch/missing-reference flag now that
-                # this row posted correctly (e.g. a human fixed the category
-                # or filled in the reference after seeing the flag) — no
-                # stale reason left on a resolved row.
+                # Clear any earlier mismatch/missing-reference/posting-error
+                # flag now that this row posted correctly (e.g. a human fixed
+                # the category or filled in the reference after seeing the
+                # flag) — no stale reason left on a resolved row.
                 sign_mismatch_reason=None,
                 missing_reference_reason=None,
+                posting_error_reason=None,
             )
         )
         if row.linked_invoice_id is not None:

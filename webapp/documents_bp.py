@@ -289,9 +289,24 @@ def sync_now():
     # produced 0 new rows but the message still said "392 new".
     posted_count = result.posted.posted if result.posted else 0
     needs_review = result.auto_match.needs_review if result.auto_match else 0
-    flash(
+    # INCIDENT FIX (2026-09-28): a single bad review_queue row used to crash
+    # the entire post_pending_rows loop, which (via the generic except Exception
+    # branch above) made every OTHER legitimate row in the batch look like it
+    # had also failed, with no honest breakdown of what actually happened.
+    # post_pending_rows now isolates a per-row posting failure instead of
+    # raising (see ingestion/matching.py's PostResult.failed_to_post) — surface
+    # it here plainly rather than silently reporting a clean "success" while a
+    # row quietly failed to post. Zero failed_to_post rows (the overwhelming
+    # common case) keeps the message exactly as it always was.
+    failed_count = result.posted.failed_to_post if result.posted else 0
+    flash_message = (
         f"Synced just now — {new_files} sources checked, {posted_count} row(s) posted, "
-        f"{needs_review} Needs Review item(s) outstanding (across all periods).",
-        "success",
+        f"{needs_review} Needs Review item(s) outstanding (across all periods)."
     )
+    if failed_count:
+        flash_message += (
+            f" {failed_count} row(s) FAILED to post due to a data/posting error — see the Review "
+            "Queue for details; they were NOT posted and did not block any other row."
+        )
+    flash(flash_message, "success" if not failed_count else "error")
     return redirect(url_for("documents.index", period=period_month.isoformat(), account_id=account.id))

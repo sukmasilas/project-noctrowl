@@ -56,6 +56,7 @@
           {% if row.posted_at %}<span class="badge green">✓ {{ row.posted_at.strftime('%Y-%m-%d %H:%M') }}</span>
           {% elif row.sign_mismatch_reason %}<span class="badge red" title="{{ row.sign_mismatch_reason }}">⚠ Not posted — sign/category mismatch</span>
           {% elif row.missing_reference_reason %}<span class="badge red" title="{{ row.missing_reference_reason }}">⚠ Not posted — missing employee reference</span>
+          {% elif row.posting_error_reason %}<span class="badge red" title="{{ row.posting_error_reason }}">⚠ Not posted — posting error</span>
           {% elif row.labeled_at %}<span class="small">Queued for next sync</span>
           {% else %}—{% endif %}
         </td>
@@ -68,6 +69,11 @@
       {% if row.missing_reference_reason and not row.posted_at %}
       <tr class="figure-row">
         <td colspan="7"><span class="small">{{ row.missing_reference_reason }}</span></td>
+      </tr>
+      {% endif %}
+      {% if row.posting_error_reason and not row.posted_at %}
+      <tr class="figure-row">
+        <td colspan="7"><span class="small">{{ row.posting_error_reason }}</span></td>
       </tr>
       {% endif %}
       {% if row.match_status == 'needs_review' and not row.posted_at %}

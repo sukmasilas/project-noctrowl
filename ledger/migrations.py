@@ -696,6 +696,32 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
         ),
     ),
     MigrationStep(
+        id="review_queue_posting_error_reason",
+        description=(
+            "review_queue.posting_error_reason (nullable) — 2026-09-28 "
+            "incident fix, backs ingestion.matching.post_pending_rows' new "
+            "per-row try/except around _post_one_row: a row that passes "
+            "every pre-check (sign, references) can still raise while "
+            "actually being posted (e.g. a 'revenue_settlement' row with no "
+            "ebay_account_id to resolve an EBAY_WALLET instance against). "
+            "Before this fix that exception propagated out of the whole "
+            "post_pending_rows loop and aborted posting for every OTHER row "
+            "in the batch — a real production incident, 2026-09-28. The row "
+            "is now left unposted with the reason recorded here instead, "
+            "same 'never silently post, never crash the batch' pattern as "
+            "sign_mismatch_reason/missing_reference_reason above."
+        ),
+        table="review_queue",
+        already_applied_check=(
+            "SELECT 1 FROM information_schema.columns WHERE table_name="
+            "'review_queue' AND column_name='posting_error_reason'"
+        ),
+        apply_sql=(
+            "ALTER TABLE review_queue ADD COLUMN IF NOT EXISTS "
+            "posting_error_reason TEXT",
+        ),
+    ),
+    MigrationStep(
         id="reconciliation_checks_source_document_fk",
         description=(
             "reconciliation_checks.source_document_id gets its real FK to "

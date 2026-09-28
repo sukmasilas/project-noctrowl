@@ -2571,3 +2571,257 @@ def test_manually_labeled_staff_meals_welfare_row_posts_to_its_own_account_not_g
     # Idempotent: a second sync run must not double-post the same row.
     post_result2 = post_pending_rows(conn)
     assert post_result2.posted == 0
+
+
+# ---------------------------------------------------------------------------
+# INCIDENT FIX (2026-09-28): one bad review_queue row must never abort
+# posting for the rest of the batch. Real incident: two rows had been
+# manually labeled 'revenue_settlement' despite lacking the ebay_account_id
+# that path structurally requires (one Payoneer-sourced with no matching
+# expected payout, one a Master Account line that turned out to be
+# Shopee/Airpay-related, not eBay revenue at all) — _post_one_row's
+# 'revenue_settlement' branch calls posting.post_inter_account_transfer,
+# which calls ledger.entities.get_account_id for EBAY_WALLET with
+# ebay_account_id=None/wallet_group_id=None, and there is no such accounts
+# row — UnknownAccountInstanceError. Before this fix that exception
+# propagated straight out of post_pending_rows' loop and aborted posting for
+# every OTHER row in the same batch, even though nothing was wrong with them.
+# ---------------------------------------------------------------------------
+
+
+def test_bad_revenue_settlement_row_fails_to_post_without_blocking_the_rest_of_the_batch(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)  # Master Account — no wallet_group_id, no ebay_account_id
+
+    # The broken row: a correctly-SIGNED (positive, inflow) 'revenue_settlement'
+    # row with no ebay_account_id — passes the sign-mismatch and
+    # missing-employee-ref pre-checks (neither applies to this category), but
+    # genuinely cannot resolve an EBAY_WALLET account instance to post
+    # against. This is exactly the real journal_entry-less incident case,
+    # reproduced synthetically.
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 10),
+                raw_description="SPAYLATER settlement — ambiguous, mislabeled by a human",
+                amount_idr=Decimal("2500000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    bad_row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="revenue_settlement", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == bad_row_id)
+    )
+
+    # Several genuinely valid rows in the SAME batch — must all still post.
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 8, 11), raw_description="Valid opex 1", amount_idr=Decimal("-100000"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 8, 12), raw_description="Valid opex 2", amount_idr=Decimal("-200000"), occurrence_index=1),
+            RawLine(transaction_date=_dt.date(2026, 8, 13), raw_description="Valid opex 3", amount_idr=Decimal("-300000"), occurrence_index=1),
+        ],
+    )
+    valid_row_ids = conn.execute(
+        select(review_queue.c.id).where(review_queue.c.id != bad_row_id).order_by(review_queue.c.id)
+    ).scalars().all()
+    assert len(valid_row_ids) == 3
+    conn.execute(
+        update(review_queue)
+        .values(category="operating_expense", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id.in_(valid_row_ids))
+    )
+
+    post_result = post_pending_rows(conn)
+
+    # The valid rows posted successfully, completely unaffected by the
+    # broken one — this is the actual containment property the incident
+    # fix guarantees.
+    assert post_result.posted == 3
+    assert post_result.failed_to_post == 1
+    for valid_id in valid_row_ids:
+        row = conn.execute(
+            select(review_queue.c.posted_at, review_queue.c.posted_journal_entry_id, review_queue.c.match_status)
+            .where(review_queue.c.id == valid_id)
+        ).one()
+        assert row.posted_at is not None
+        assert row.posted_journal_entry_id is not None
+        assert row.match_status == "matched"
+
+    # The broken row is left unposted, flagged, and visible — never a
+    # silent guess, never a crash.
+    bad_row = conn.execute(
+        select(
+            review_queue.c.posted_at,
+            review_queue.c.posted_journal_entry_id,
+            review_queue.c.match_status,
+            review_queue.c.category,
+            review_queue.c.posting_error_reason,
+        ).where(review_queue.c.id == bad_row_id)
+    ).one()
+    assert bad_row.posted_at is None
+    assert bad_row.posted_journal_entry_id is None
+    assert bad_row.match_status == "needs_review"
+    assert bad_row.category == "revenue_settlement"  # left as-is for a human to see/fix, not silently cleared
+    assert bad_row.posting_error_reason is not None
+    assert "revenue_settlement" in bad_row.posting_error_reason
+
+    # No phantom journal entry exists for the broken row.
+    assert len(conn.execute(select(journal_entries.c.id)).all()) == 3
+
+    # A second sync run, unchanged, produces the exact same result — no
+    # double-posting of the valid rows, and the broken row still fails the
+    # same clean way rather than crashing again.
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 0
+    assert post_result2.failed_to_post == 1
+
+    # A human then re-classifies the broken row correctly (its real nature —
+    # some OTHER inflow, per CLAUDE.md's 'other' catch-all) and the next sync
+    # posts it cleanly, clearing the stale error reason.
+    conn.execute(
+        update(review_queue).values(category="other").where(review_queue.c.id == bad_row_id)
+    )
+    post_result3 = post_pending_rows(conn)
+    assert post_result3.posted == 1
+    assert post_result3.failed_to_post == 0
+    fixed_row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.posting_error_reason).where(review_queue.c.id == bad_row_id)
+    ).one()
+    assert fixed_row.posted_at is not None
+    assert fixed_row.posting_error_reason is None
+
+
+def test_partial_writes_from_a_failed_post_are_rolled_back_not_left_dangling(iprototype):
+    """A deeper correctness property than the previous test: post_pending_rows
+    runs every row in ONE shared transaction, committed once by the caller at
+    the very end. If a row's posting attempt makes a REAL partial database
+    write (not just a Python-level raise before any SQL) and then fails
+    later in the same attempt, that partial write must not leak into the
+    rest of the batch/transaction — otherwise a single bad row could still
+    corrupt other rows' state even though it no longer crashes the loop.
+
+    Reproduced here via the c-sweep internal-transfer pairing path
+    (``_post_internal_transfer``), which does a real SQL UPDATE (claiming
+    ``paired_review_queue_id`` on BOTH sides) BEFORE calling
+    ``posting.post_inter_account_transfer`` — engineered to fail here by
+    scoping the Bridging-side row to a wallet-group that was never actually
+    provisioned with a BCA_BRIDGING account instance (a real, if unusual,
+    data-integrity gap; not a contrived exception). Without the SAVEPOINT
+    (``conn.begin_nested()``) wrapping the whole per-row attempt, the pairing
+    claim would remain committed within the batch's shared transaction even
+    though nothing posted — silently corrupting both rows' pairing state for
+    every future sync attempt at this same real-world transfer.
+    """
+    conn, topo = iprototype
+    from ledger.entities import create_wallet_group
+
+    ghost_wallet_group_id = create_wallet_group(conn, name="Ghost Wallet Group (no BCA_BRIDGING account)")
+
+    bridging_src = _make_bank_source(conn, wallet_group_id=ghost_wallet_group_id)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=bridging_src,
+        wallet_group_id=ghost_wallet_group_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 14),
+                raw_description="Sweep out to Main",
+                amount_idr=Decimal("-5000000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    bridging_row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+
+    master_src = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=master_src,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 14),
+                raw_description="Sweep in from Bridging",
+                amount_idr=Decimal("5000000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    master_row_id = conn.execute(
+        select(review_queue.c.id).where(review_queue.c.id != bridging_row_id)
+    ).scalar_one()
+
+    conn.execute(
+        update(review_queue)
+        .values(category="internal_transfer", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id.in_([bridging_row_id, master_row_id]))
+    )
+
+    # One entirely unrelated, genuinely valid row in the SAME batch — must
+    # post normally regardless of what happens to the doomed transfer pair,
+    # proving the shared transaction itself was never poisoned. Reuses
+    # master_src (only one 'bank_statement_master' source_documents row is
+    # allowed per period_month — ux_source_documents_consolidated).
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=master_src,
+        lines=[
+            RawLine(transaction_date=_dt.date(2026, 8, 15), raw_description="Unrelated valid opex", amount_idr=Decimal("-75000"), occurrence_index=1)
+        ],
+    )
+    other_row_id = conn.execute(
+        select(review_queue.c.id).where(review_queue.c.id.notin_([bridging_row_id, master_row_id]))
+    ).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="operating_expense", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == other_row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+
+    # The unrelated valid row posted fine — the shared transaction survived
+    # both transfer-pair rows failing.
+    assert post_result.posted == 1
+    other_row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status).where(review_queue.c.id == other_row_id)
+    ).one()
+    assert other_row.posted_at is not None
+    assert other_row.match_status == "matched"
+
+    # Both transfer-pair rows failed (each independently re-attempts and
+    # re-fails the same doomed post, since the savepoint rolls the pairing
+    # claim back to NULL each time — never a lingering half-claimed pair).
+    assert post_result.failed_to_post == 2
+    for rid in (bridging_row_id, master_row_id):
+        row = conn.execute(
+            select(
+                review_queue.c.posted_at,
+                review_queue.c.match_status,
+                review_queue.c.paired_review_queue_id,
+                review_queue.c.posting_error_reason,
+            ).where(review_queue.c.id == rid)
+        ).one()
+        assert row.posted_at is None
+        assert row.match_status == "needs_review"
+        # The crux assertion: the partial pairing-claim write must be rolled
+        # back, not left dangling, once the attempt that made it failed.
+        assert row.paired_review_queue_id is None
+        assert row.posting_error_reason is not None
+        assert "BCA_BRIDGING" in row.posting_error_reason
+
+    # No inter_account_transfer journal entry exists — only the unrelated
+    # valid row's own entry.
+    all_entries = conn.execute(select(journal_entries.c.source_type)).all()
+    assert [e.source_type for e in all_entries] == ["bank_other"]

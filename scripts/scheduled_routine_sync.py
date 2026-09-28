@@ -92,11 +92,18 @@ def main() -> int:
     exit_code = 0
     for outcome in result.outcomes:
         posted = outcome.result.posted.posted if (outcome.result and outcome.result.posted) else 0
+        # INCIDENT FIX (2026-09-28): a per-row posting failure no longer
+        # crashes post_pending_rows (see ingestion/matching.py's
+        # PostResult.failed_to_post) — surface it here too so a cron-run
+        # sync's own logs don't silently look clean while a row quietly
+        # failed to post.
+        failed = outcome.result.posted.failed_to_post if (outcome.result and outcome.result.posted) else 0
+        failed_note = f" FAILED_TO_POST={failed}" if failed else ""
         print(
             f"  [{outcome.status:>22}] account={outcome.ebay_account_name!r} "
-            f"period={outcome.period_month.isoformat()} posted={posted} {outcome.detail or ''}".rstrip()
+            f"period={outcome.period_month.isoformat()} posted={posted}{failed_note} {outcome.detail or ''}".rstrip()
         )
-        if outcome.status == "error":
+        if outcome.status == "error" or failed:
             exit_code = 1
     return exit_code
 

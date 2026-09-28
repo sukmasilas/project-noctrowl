@@ -79,6 +79,36 @@ def test_review_queue_page_renders_with_empty_state(client, wtopology):
     assert b"No bank statement uploaded yet" in resp.data
 
 
+def test_posting_error_reason_renders_visibly_on_the_review_queue_page(client, wtopology):
+    """INCIDENT FIX (2026-09-28): a row that fails while actually being
+    posted (see ingestion.matching.post_pending_rows' per-row try/except and
+    PostResult.failed_to_post) must be visibly explained in the Review Queue
+    UI, mirroring how sign_mismatch_reason/missing_reference_reason already
+    render — a human should never need to check server logs to see why a
+    row didn't post.
+    """
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_wallet_group", period_month=PERIOD, wallet_group_id=topo["wallet_group_id"])
+    row_id = make_review_queue_row(
+        conn,
+        source_document_id=src_id,
+        transaction_date=DAY,
+        wallet_group_id=topo["wallet_group_id"],
+        category="revenue_settlement",
+        posting_error_reason=(
+            "Failed to post while classified as 'revenue_settlement': No accounts row for "
+            "'EBAY_WALLET' (ebay_account_id=None, wallet_group_id=None). Not posted — please "
+            "re-check the classification."
+        ),
+    )
+    conn.commit()
+
+    resp = client.get(f"/review-queue/?period={PERIOD.isoformat()[:7]}")
+    assert resp.status_code == 200
+    assert b"posting error" in resp.data
+    assert b"EBAY_WALLET" in resp.data
+
+
 def test_contract_labor_is_a_selectable_category(client, wtopology):
     """2026-09-05: the new CONTRACT_LABOR operating-expense account (see
     ledger/chart_of_accounts.py) must be selectable from the Review Queue
