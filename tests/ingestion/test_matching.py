@@ -2825,3 +2825,381 @@ def test_partial_writes_from_a_failed_post_are_rolled_back_not_left_dangling(ipr
     # valid row's own entry.
     all_entries = conn.execute(select(journal_entries.c.source_type)).all()
     assert [e.source_type for e in all_entries] == ["bank_other"]
+
+
+# ---------------------------------------------------------------------------
+# 'customer_refund' (added 2026-09-29) — wires a human-labeled review-queue
+# row to the existing posting.post_refund(), previously only reachable from
+# the eBay-CSV Refund path. Real trigger: a Payoneer CSV row, "Card charge
+# (PAYPAL *CHRISNELFRANCO)", -Rp 1,899,765 (-$115.91), confirmed by the user
+# as a refund issued to a customer. The real backlog row itself is
+# deliberately left untouched (out of scope) — these use synthetic rows with
+# the same real amounts/description.
+# ---------------------------------------------------------------------------
+
+
+def test_manually_labeled_customer_refund_via_payoneer_posts_to_sales_returns_allowances(iprototype):
+    conn, topo = iprototype
+    src_id = make_source_document(
+        conn, document_type="payoneer_csv", period_month=_dt.date(2026, 8, 1), wallet_group_id=topo["wallet_group_id"]
+    )
+    stage_raw_lines(
+        conn,
+        source_type="payoneer_csv",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 12),
+                raw_description="Card charge (PAYPAL *CHRISNELFRANCO)",
+                amount_idr=Decimal("-1899765"),
+                amount_usd_ref=Decimal("-115.91"),
+                external_ref="chrisnelfranco-refund-1",
+            )
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="customer_refund", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+
+    returns_id = get_account_id(conn, "SALES_RETURNS_ALLOWANCES")
+    assert returns_id is not None
+    assert "SALES_RETURNS_ALLOWANCES" in lines
+    assert lines["SALES_RETURNS_ALLOWANCES"][0].debit_amount_idr == Decimal("1899765")
+    assert lines["SALES_RETURNS_ALLOWANCES"][0].amount_usd_ref == Decimal("115.91")  # positive magnitude
+    assert "PAYONEER_WALLET" in lines
+    assert lines["PAYONEER_WALLET"][0].credit_amount_idr == Decimal("1899765")
+    assert_balanced(conn, entry_id)
+
+    # Idempotent: a second sync run must not double-post the same row.
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 0
+
+
+def test_manually_labeled_customer_refund_via_ebay_wallet_posts_to_sales_returns_allowances(iprototype):
+    """A 'customer_refund' row scoped to a specific eBay account (rather
+    than a wallet-group) maps to post_refund's other supported stage,
+    'ebay_wallet' — see _post_customer_refund's docstring.
+    """
+    conn, topo = iprototype
+    src_id = make_source_document(
+        conn, document_type="ebay_sales_csv", period_month=_dt.date(2026, 8, 1), ebay_account_id=topo["ebay_account_id"]
+    )
+    stage_raw_lines(
+        conn,
+        source_type="ebay_sales_csv",
+        source_document_id=src_id,
+        ebay_account_id=topo["ebay_account_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 5),
+                raw_description="Refund issued directly from the eBay Wallet",
+                amount_idr=Decimal("-500000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="customer_refund", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+    assert lines["SALES_RETURNS_ALLOWANCES"][0].debit_amount_idr == Decimal("500000")
+    assert lines["EBAY_WALLET"][0].credit_amount_idr == Decimal("500000")
+    assert_balanced(conn, entry_id)
+
+
+def test_customer_refund_sign_mismatch_is_flagged_not_posted(iprototype):
+    """A 'customer_refund' is inherently an outflow (the business paying
+    money back out) — a positive-amount row wrongly labeled this way must
+    never post, per _DIRECTIONAL_CATEGORY_SIGNS.
+    """
+    conn, topo = iprototype
+    src_id = make_source_document(
+        conn, document_type="payoneer_csv", period_month=_dt.date(2026, 8, 1), wallet_group_id=topo["wallet_group_id"]
+    )
+    stage_raw_lines(
+        conn,
+        source_type="payoneer_csv",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 12),
+                raw_description="Mislabeled — actually an inflow",
+                amount_idr=Decimal("1899765"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="customer_refund", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_sign_mismatch == 1
+
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status, review_queue.c.sign_mismatch_reason)
+        .where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is None
+    assert row.match_status == "needs_review"
+    assert row.sign_mismatch_reason is not None
+    assert "customer_refund" in row.sign_mismatch_reason
+
+
+def test_customer_refund_unsupported_scope_fails_cleanly_without_blocking_batch(iprototype):
+    """post_refund() has no consolidated (Master Account) or Bridging-Account
+    stage — a 'customer_refund' row with neither ebay_account_id nor a
+    payoneer_csv-sourced wallet_group_id must fail cleanly (caught by
+    post_pending_rows' per-row failure isolation), never silently post
+    against the wrong account, and never take the rest of the batch down.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)  # Master Account — no wallet_group_id, no ebay_account_id
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 12),
+                raw_description="A Master Account line mislabeled customer_refund",
+                amount_idr=Decimal("-1899765"),
+                occurrence_index=1,
+            ),
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 13),
+                raw_description="Unrelated, valid opex",
+                amount_idr=Decimal("-50000"),
+                occurrence_index=1,
+            ),
+        ],
+    )
+    rows = conn.execute(select(review_queue.c.id, review_queue.c.amount_idr).order_by(review_queue.c.id)).all()
+    bad_row_id = next(r.id for r in rows if r.amount_idr == Decimal("-1899765"))
+    valid_row_id = next(r.id for r in rows if r.amount_idr == Decimal("-50000"))
+    conn.execute(
+        update(review_queue)
+        .values(category="customer_refund", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == bad_row_id)
+    )
+    conn.execute(
+        update(review_queue)
+        .values(category="operating_expense", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == valid_row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    assert post_result.failed_to_post == 1
+
+    valid_row = conn.execute(
+        select(review_queue.c.posted_at).where(review_queue.c.id == valid_row_id)
+    ).one()
+    assert valid_row.posted_at is not None
+
+    bad_row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status, review_queue.c.posting_error_reason)
+        .where(review_queue.c.id == bad_row_id)
+    ).one()
+    assert bad_row.posted_at is None
+    assert bad_row.match_status == "needs_review"
+    assert bad_row.posting_error_reason is not None
+    assert "customer_refund" in bad_row.posting_error_reason
+
+
+# ---------------------------------------------------------------------------
+# 'cogs_refund' (added 2026-09-29) — money returned that reduces a
+# previously-recorded COGS purchase (an employee's cash-advance excess
+# refunded back, or a supplier refund for undelivered inventory — one
+# unified category for both, see ledger.posting.post_cogs_refund). Real
+# examples: Rico's Rp 415,000 unspent excess from a Rp 10,000,000 watch
+# cash-advance, and a supplier refund for an undeliverable item. Synthetic
+# rows with the same real amount/description — the real backlog rows are
+# deliberately left untouched (out of scope).
+# ---------------------------------------------------------------------------
+
+
+def test_manually_labeled_cogs_refund_row_posts_credit_to_cogs(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)  # Master Account — same scope as COGS itself
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 18),
+                raw_description="Rico — refund of unspent cash advance (jam tangan purchase)",
+                amount_idr=Decimal("415000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="cogs_refund", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+
+    cogs_id = get_account_id(conn, "COGS")
+    assert cogs_id is not None
+    assert "COGS" in lines
+    # COGS is debit-normal — a REDUCTION credits it (the opposite of a
+    # purchase, which debits it — see post_cogs_purchase).
+    assert lines["COGS"][0].credit_amount_idr == Decimal("415000")
+    assert lines["COGS"][0].debit_amount_idr == Decimal("0")
+    assert "BCA_MAIN" in lines
+    assert lines["BCA_MAIN"][0].debit_amount_idr == Decimal("415000")
+    assert_balanced(conn, entry_id)
+
+    # Idempotent: a second sync run must not double-post the same row.
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 0
+
+
+def test_cogs_refund_sign_mismatch_is_flagged_not_posted(iprototype):
+    """A 'cogs_refund' is inherently an inflow (money coming back) — a
+    negative-amount row wrongly labeled this way must never post.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 18),
+                raw_description="Mislabeled — actually an outflow",
+                amount_idr=Decimal("-415000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="cogs_refund", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_sign_mismatch == 1
+
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status, review_queue.c.sign_mismatch_reason)
+        .where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is None
+    assert row.match_status == "needs_review"
+    assert row.sign_mismatch_reason is not None
+    assert "cogs_refund" in row.sign_mismatch_reason
+
+
+def test_cogs_refund_unsupported_scope_fails_cleanly_without_blocking_batch(iprototype):
+    """post_cogs_refund() is hardcoded to BCA_MAIN (same shape as
+    post_cogs_purchase) — a 'cogs_refund' row that's actually scoped to a
+    wallet-group (e.g. a Bridging Account line) must fail cleanly rather
+    than silently debit BCA_MAIN for money that didn't land there, and must
+    never take the rest of the batch down.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 18),
+                raw_description="A Bridging Account line mislabeled cogs_refund",
+                amount_idr=Decimal("415000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    bad_row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="cogs_refund", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == bad_row_id)
+    )
+
+    master_src = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=master_src,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 18),
+                raw_description="Unrelated, valid opex",
+                amount_idr=Decimal("-50000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    valid_row_id = conn.execute(
+        select(review_queue.c.id).where(review_queue.c.id != bad_row_id)
+    ).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="operating_expense", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == valid_row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    assert post_result.failed_to_post == 1
+
+    valid_row = conn.execute(
+        select(review_queue.c.posted_at).where(review_queue.c.id == valid_row_id)
+    ).one()
+    assert valid_row.posted_at is not None
+
+    bad_row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status, review_queue.c.posting_error_reason)
+        .where(review_queue.c.id == bad_row_id)
+    ).one()
+    assert bad_row.posted_at is None
+    assert bad_row.match_status == "needs_review"
+    assert bad_row.posting_error_reason is not None
+    assert "cogs_refund" in bad_row.posting_error_reason

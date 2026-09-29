@@ -326,6 +326,53 @@ def test_cash_flow_staff_meals_welfare_negative_control_breaks_identity_if_white
     assert report.difference_idr == Decimal("-520000")
 
 
+def test_cash_flow_cogs_refund_nets_against_cogs_purchases_bucket(prototype):
+    """2026-09-29: post_cogs_refund() posts to the EXISTING COGS account (no
+    new account type) — a light positive-reconciliation test, not a
+    negative-control one, since COGS was already confirmed present in both
+    of this project's known "whitelist" spots (webapp.reporting._CASH_FLOW_
+    CODE_TO_KEY and webapp.reports_bp._DRILLDOWN_CODES) well before this
+    task, from when COGS itself was originally built — there is no NEW
+    whitelist entry this task adds for either account touched by these two
+    features (SALES_RETURNS_ALLOWANCES was already confirmed present too,
+    exercised by test_cash_flow_refund_at_ebay_wallet_reduces_customer_
+    receipts above). This proves the identity holds exactly when a real
+    cogs_refund-shaped credit posts, using the same _CASH_FLOW_CODE_TO_KEY
+    generic (credit - debit) netting every other COGS/expense line already
+    goes through — no code change was needed in reporting.py for this.
+    """
+    conn, topo = prototype
+    posting.post_cogs_purchase(conn, entry_date=DAY, amount_idr=Decimal("10000000"))
+    posting.post_cogs_refund(conn, entry_date=DAY, amount_idr=Decimal("415000"))
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    # The refund nets against the SAME bucket as the purchase — a real Rico
+    # -shaped scenario: Rp 10,000,000 advanced, Rp 415,000 returned, net real
+    # cash-out for COGS is Rp 9,585,000.
+    assert _bucket(report, "cogs_purchases") == Decimal("-9585000")
+    assert report.total_operating_idr == Decimal("-9585000")
+    assert report.difference_idr == Decimal("0")
+
+
+def test_cash_flow_customer_refund_via_payoneer_reduces_customer_receipts(prototype):
+    """2026-09-29: the new 'customer_refund' review-queue category posts via
+    the existing posting.post_refund() at the Payoneer stage — same light
+    positive-reconciliation reasoning as the COGS test above (no new
+    whitelist entry needed; SALES_RETURNS_ALLOWANCES already covered).
+    """
+    conn, topo = prototype
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=DAY, gross_sale_price_usd=Decimal("500"),
+        ebay_fee_usd=Decimal("0"), kurs_pajak_rate=RATE, ebay_order_ref="S-refund",
+    )
+    posting.post_refund(
+        conn, entry_date=DAY, amount_idr=Decimal("1899765"), stage="payoneer",
+        wallet_group_id=topo["wallet_group_id"], usd_amount=Decimal("115.91"),
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert _bucket(report, "cash_from_customers") == (Decimal("500") * RATE) - Decimal("1899765")
+    assert report.difference_idr == Decimal("0")
+
+
 def test_cash_flow_inter_account_transfer_never_appears_in_any_bucket(prototype):
     """An inter_account_transfer only ever touches two cash accounts (see
     ledger/schema.py's trg_check_transfer_accounts) — it should net to zero
@@ -471,6 +518,23 @@ def test_pnl_report_gross_profit_and_net_income(prototype):
     assert report.total_opex_idr == (Decimal("20") * RATE) + Decimal("300000")
     assert report.operating_income_idr == report.gross_profit_idr - report.total_opex_idr
     assert report.net_income_idr == report.operating_income_idr  # no FX/interest posted in this test
+
+
+def test_pnl_report_cogs_refund_reduces_cogs_and_raises_gross_profit(prototype):
+    """2026-09-29: post_cogs_refund() (a credit to the existing debit-normal
+    COGS account) must correctly REDUCE the P&L's cogs_idr figure, not get
+    dropped or double-counted — pnl_report's generic
+    `sum(debit - credit)` over statement_section='cogs' already handles this
+    with no code change needed (same reasoning as the Cash Flow
+    reconciliation test above).
+    """
+    conn, topo = prototype
+    posting.post_cogs_purchase(conn, entry_date=DAY, amount_idr=Decimal("10000000"))
+    posting.post_cogs_refund(conn, entry_date=DAY, amount_idr=Decimal("415000"))
+
+    report = reporting.pnl_report(conn, period_month=PERIOD)
+    assert report.cogs_idr == Decimal("9585000")
+    assert report.gross_profit_idr == report.total_revenue_idr - Decimal("9585000")
 
 
 def test_pnl_report_keeps_realized_and_unrealized_fx_as_distinct_lines(prototype):

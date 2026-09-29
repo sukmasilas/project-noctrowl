@@ -363,10 +363,19 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "expense type; 'cogs_purchase' itself is kept, unchanged) — see "
             "ingestion/matching.py's _post_one_row; 'packaging_supplies', "
             "added 2026-09-10 for the new PACKAGING_SUPPLIES operating "
-            "-expense account (see ledger/chart_of_accounts.py); and "
+            "-expense account (see ledger/chart_of_accounts.py); "
             "'staff_meals_welfare', added 2026-09-24 for the new "
             "STAFF_MEALS_WELFARE operating-expense account (see ledger/"
-            "chart_of_accounts.py) — brings the "
+            "chart_of_accounts.py); and 'customer_refund' / 'cogs_refund', "
+            "added 2026-09-29 — 'customer_refund' wires a human-labeled row "
+            "to the existing ledger.posting.post_refund() (Sales Returns & "
+            "Allowances, contra-revenue), previously only reachable from the "
+            "eBay-CSV Refund path; 'cogs_refund' posts via the new "
+            "ledger.posting.post_cogs_refund() (a credit reducing the "
+            "existing COGS account, no new account type) for money returned "
+            "that reduces a previously-recorded COGS purchase (an employee's "
+            "cash-advance excess, or a supplier refund for undelivered "
+            "inventory) — brings the "
             "constraint to whatever the LATEST code defines in one step, "
             "regardless of which of those historical widenings a given "
             "database happens to be missing."
@@ -381,7 +390,7 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "'interest_income','contract_labor','shipping_cost','payroll',"
             "'employee_loan_disbursement','item_purchase','inbound_shipping',"
             "'item_purchase_and_inbound_shipping','packaging_supplies',"
-            "'staff_meals_welfare','other'))",
+            "'staff_meals_welfare','customer_refund','cogs_refund','other'))",
         ),
     ),
     MigrationStep(

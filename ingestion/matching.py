@@ -591,6 +591,19 @@ _DIRECTIONAL_CATEGORY_SIGNS: dict[str, str] = {
     # see ledger/chart_of_accounts.py). Inherently one-direction real-world
     # event, same reasoning as every entry above.
     "staff_meals_welfare": "outflow",
+    # Added 2026-09-29 — a refund the business PAYS OUT to a customer is
+    # always an outflow from the business's own cash account (confirmed
+    # against the real trigger: a Payoneer CSV row, "Card charge (PAYPAL
+    # *CHRISNELFRANCO)", -Rp 1,899,765 / -$115.91). See
+    # ingestion.matching._post_customer_refund and
+    # ledger.posting.post_refund.
+    "customer_refund": "outflow",
+    # Added 2026-09-29 — money coming BACK to reduce a previously-recorded
+    # COGS purchase is always an inflow (confirmed against both real
+    # examples: an employee's Rp 415,000 unspent cash-advance excess
+    # returned, and a supplier's refund for undelivered inventory). See
+    # ledger.posting.post_cogs_refund.
+    "cogs_refund": "inflow",
 }
 
 
@@ -892,6 +905,69 @@ def post_pending_rows(conn: Connection) -> PostResult:
     return result
 
 
+def _post_customer_refund(conn: Connection, row) -> int:
+    """'customer_refund' (added 2026-09-29) wires a human-labeled
+    review-queue row to the existing, already-correct ``posting.post_refund``
+    — built for eBay-CSV-typed 'Refund' rows (see ``ingestion.ebay_csv``) and
+    previously its ONLY caller, with zero connection to the manual-labeling
+    path. Real trigger: a Payoneer CSV row, "Card charge (PAYPAL
+    *CHRISNELFRANCO)", -Rp 1,899,765 (-$115.91), confirmed by the user as a
+    refund issued to a customer.
+
+    ``post_refund`` only supports two stages (see its docstring), each
+    requiring a specific scope:
+    - ``stage='ebay_wallet'`` — needs ``ebay_account_id``.
+    - ``stage='payoneer'`` — needs ``wallet_group_id``, and — to actually
+      credit the correct asset account — must genuinely be a
+      payoneer_csv-sourced line. A Bridging-scoped BANK-STATEMENT line also
+      carries a ``wallet_group_id`` but refers to a completely different
+      asset account (BCA_BRIDGING, not PAYONEER_WALLET) that
+      ``post_refund`` has no stage for.
+
+    A Master-Account-scoped (consolidated, no ``ebay_account_id``/
+    ``wallet_group_id`` at all) or Bridging-scoped bank line therefore has no
+    structurally correct stage to map to — CLAUDE.md's Money flow section
+    only ever describes a refund/discount clawback happening at the eBay
+    Wallet or Payoneer stage, never later in the chain. Rather than guessing
+    a stage for either unsupported case, this raises a clear, human-readable
+    error — caught by ``post_pending_rows``'s existing per-row failure
+    isolation (``posting_error_reason``), the same "structurally not
+    postable" treatment already used for a mis-scoped 'revenue_settlement'
+    row (see ``PostResult.failed_to_post``), not a new stability risk.
+    """
+    usd_kwargs = _usd_reference_kwargs(row)
+    if row.ebay_account_id is not None:
+        return posting.post_refund(
+            conn,
+            entry_date=row.transaction_date,
+            amount_idr=abs(row.amount_idr),
+            stage="ebay_wallet",
+            ebay_account_id=row.ebay_account_id,
+            usd_amount=usd_kwargs["amount_usd_ref"],
+            kurs_pajak_rate=usd_kwargs["fx_rate_used"],
+            memo=row.raw_description,
+        )
+    if row.wallet_group_id is not None and row.source_type == "payoneer_csv":
+        return posting.post_refund(
+            conn,
+            entry_date=row.transaction_date,
+            amount_idr=abs(row.amount_idr),
+            stage="payoneer",
+            wallet_group_id=row.wallet_group_id,
+            usd_amount=usd_kwargs["amount_usd_ref"],
+            kurs_pajak_rate=usd_kwargs["fx_rate_used"],
+            memo=row.raw_description,
+        )
+    raise ValueError(
+        "Category 'customer_refund' requires this line to be scoped to a specific eBay account "
+        "(eBay Wallet stage) or to be a Payoneer-CSV-sourced, wallet-group-scoped line (Payoneer "
+        "stage) — post_refund() has no consolidated (Master Account) or Bridging-Account stage to "
+        "post a customer refund against (see CLAUDE.md's Money flow section: a refund clawback "
+        "only ever happens at the eBay Wallet or Payoneer stage). Not posted — please re-check the "
+        "classification or scope of this row."
+    )
+
+
 def _post_one_row(conn: Connection, row) -> int | None:
     """Returns the journal_entry_id this row should link to, or None if
     it's classified but genuinely not ready to post yet (see
@@ -960,6 +1036,32 @@ def _post_one_row(conn: Connection, row) -> int | None:
         ) if paying_code != "BCA_MAIN" else posting.post_cogs_purchase(
             conn, entry_date=entry_date, amount_idr=abs(row.amount_idr), memo=row.raw_description
         )
+
+    if row.category == "cogs_refund":
+        # Added 2026-09-29 — money returned that reduces a previously
+        # -recorded COGS purchase (see ledger.posting.post_cogs_refund's
+        # docstring for the two real trigger examples). post_cogs_refund is
+        # deliberately hardcoded to BCA_MAIN, no scope parameter — same
+        # shape as post_cogs_purchase — mirroring COGS itself being a plain
+        # consolidated singleton account (both real examples are Master
+        # Account bank lines). If this row is actually scoped to a
+        # wallet-group or eBay account, that's a genuine mismatch this
+        # function has no way to post correctly against the right asset
+        # account — raise rather than silently debit BCA_MAIN for money
+        # that didn't land there (caught by post_pending_rows' existing
+        # per-row failure isolation, same treatment as
+        # _post_customer_refund's unsupported-scope case above).
+        if row.wallet_group_id is not None or row.ebay_account_id is not None:
+            raise ValueError(
+                "Category 'cogs_refund' only supports a Master Account (consolidated) bank line — "
+                "COGS is a plain consolidated singleton account (see ledger.posting.post_cogs_refund) "
+                "and this row is scoped to a wallet-group/eBay account instead. Not posted — please "
+                "re-check the classification or scope of this row."
+            )
+        return posting.post_cogs_refund(conn, entry_date=entry_date, amount_idr=abs(row.amount_idr), memo=row.raw_description)
+
+    if row.category == "customer_refund":
+        return _post_customer_refund(conn, row)
 
     if row.category == "operating_expense":
         if row.linked_invoice_id is not None:

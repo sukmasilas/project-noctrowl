@@ -457,12 +457,34 @@ review_queue = Table(
     # 'packaging_supplies' — a QR/debit line to a cafe or restaurant could
     # plausibly be something else and can't be told apart from the raw
     # description alone, so this always stays a human-selected label.
+    # 'customer_refund' added 2026-09-29 — a real Payoneer CSV row, "Card
+    # charge (PAYPAL *CHRISNELFRANCO)", -Rp 1,899,765 (-$115.91), confirmed
+    # by the user as a refund issued to a customer, had no category that
+    # fit. Wires a human-labeled row to the existing, already-correct
+    # ledger.posting.post_refund() (previously only ever called from
+    # ingestion/ebay_csv.py for an eBay-CSV-typed 'Refund' row, with no
+    # connection at all to the manual-labeling path) — posts to Sales
+    # Returns & Allowances (contra-revenue), never netted into Sales
+    # Revenue. See ingestion.matching._post_one_row's 'customer_refund'
+    # branch for the two scopes it supports (eBay Wallet / Payoneer) and the
+    # explicit error for any other scope post_refund structurally can't
+    # handle.
+    # 'cogs_refund' added 2026-09-29 — money returned that reduces a
+    # previously-recorded (or about-to-be-recorded) COGS purchase: (1) an
+    # employee's cash-advance excess refunded back after a purchase, (2) a
+    # supplier refund for undelivered inventory. Same underlying mechanism,
+    # one unified category (the raw bank description already documents
+    # which reason applies — no need to track it structurally). Posts via
+    # the new ledger.posting.post_cogs_refund() — a genuinely different
+    # account/direction from 'customer_refund' above (COGS/expense-side, not
+    # revenue-side), so deliberately NOT the same posting function.
     CheckConstraint(
         "category IS NULL OR category IN ('revenue_settlement','cogs_purchase','consignment_payout',"
         "'internal_transfer','internal_transfer_landing','operating_expense','owners_draw',"
         "'owners_contribution','interest_income','contract_labor','shipping_cost','payroll',"
         "'employee_loan_disbursement','item_purchase','inbound_shipping',"
-        "'item_purchase_and_inbound_shipping','packaging_supplies','staff_meals_welfare','other')",
+        "'item_purchase_and_inbound_shipping','packaging_supplies','staff_meals_welfare',"
+        "'customer_refund','cogs_refund','other')",
         name="ck_review_queue_category",
     ),
     # The idempotency invariant from CLAUDE.md rule 6, structural: a row can

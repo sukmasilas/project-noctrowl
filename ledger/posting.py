@@ -310,6 +310,61 @@ def post_cogs_purchase(
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="cogs_purchase", lines=lines, memo=memo)
 
 
+def post_cogs_refund(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    memo: str | None = None,
+) -> int:
+    """Money returned that reduces a previously-recorded (or about-to-be
+    -recorded) COGS purchase — added 2026-09-29 for two real, same-shaped
+    triggers: (1) an employee's cash-advance excess refunded back after a
+    purchase (e.g. Rp 10,000,000 advanced, Rp 415,000 unspent returned the
+    next day — the real cost of that purchase was Rp 9,585,000, not the full
+    advance already posted), and (2) a supplier refund for inventory that
+    couldn't be delivered. Both are the SAME underlying mechanism (money back
+    that should reduce a COGS figure already posted or about to be) — one
+    unified category/function, not split by reason (see
+    ingestion.matching._post_one_row's 'cogs_refund' branch and CLAUDE.md).
+
+    This is deliberately NOT ``post_refund`` reused/repurposed — that
+    function's SALES_RETURNS_ALLOWANCES is a REVENUE-side contra account (a
+    refund paid TO a customer); this is the COGS/expense side, a genuinely
+    different account and a genuinely different direction of "who pays
+    whom". COGS is a debit-normal account (see
+    ledger/chart_of_accounts.py) — a purchase DEBITS it (increases the
+    expense, see ``post_cogs_purchase`` above) and a reduction to it is
+    therefore the opposite: a CREDIT, mirrored by a DEBIT to whichever
+    account actually received the money back.
+
+    Both real triggering examples are Master Account (BCA Main, consolidated)
+    bank lines — the exact same scope COGS itself already is (see
+    ``post_cogs_purchase``, which is also hardcoded to BCA_MAIN with no
+    scope parameter) — so this deliberately takes no ebay_account_id/
+    wallet_group_id parameter either. If a line that isn't actually a plain
+    Master Account line is ever labeled 'cogs_refund', that's a genuine
+    scope mismatch this function has no way to post correctly — see
+    ingestion.matching._post_one_row's explicit guard for that case (never
+    silently posts against the wrong asset account).
+
+    Uses ``source_type='bank_other'`` (the same generic catch-all already
+    used by every other review-queue-driven posting function with no
+    dedicated ``journal_entries.source_type`` value — e.g.
+    ``post_operating_expense``, ``post_employee_loan_disbursement``) rather
+    than ``'cogs_purchase'``, since this is the reverse-direction event, not
+    a purchase.
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_idr <= 0:
+        raise ValueError("amount_idr must be > 0 — a refund is a real, positive amount received back.")
+    cogs_id = _singleton(conn, "COGS")
+    bca_main_id = _singleton(conn, "BCA_MAIN")
+
+    lines = [debit(bca_main_id, amount_idr), credit(cogs_id, amount_idr)]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
+
+
 def post_shipping_cost_purchase(
     conn: Connection,
     *,
