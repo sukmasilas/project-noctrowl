@@ -7,7 +7,7 @@ from __future__ import annotations
 import datetime as _dt
 from decimal import Decimal, InvalidOperation
 
-from flask import Blueprint, flash, redirect, render_template, request, url_for
+from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
 from sqlalchemy import func, select, update
 
 from ingestion.schema import review_queue
@@ -18,6 +18,14 @@ bp = Blueprint("review_queue", __name__, url_prefix="/review-queue")
 
 CATEGORY_OPTIONS = [
     ("revenue_settlement", "Revenue Settlement"),
+    # Added 2026-09-29 — a real gap found in live use: a Payoneer CSV row,
+    # "Card charge (PAYPAL *CHRISNELFRANCO)", -Rp 1,899,765 (-$115.91),
+    # confirmed by the user as a refund issued to a customer, had no
+    # category that fit. Wires to the existing ledger.posting.post_refund()
+    # (Sales Returns & Allowances, contra-revenue — never netted into Sales
+    # Revenue), previously only reachable via the eBay-CSV Refund path.
+    # Placed next to Revenue Settlement — same revenue side of the P&L.
+    ("customer_refund", "Customer Refund"),
     ("cogs_purchase", "COGS"),
     # Added 2026-09-10 — more specific COGS sub-labels (see CLAUDE.md and
     # ledger/chart_of_accounts.py's COGS account). All three post to the
@@ -30,6 +38,16 @@ CATEGORY_OPTIONS = [
     ("item_purchase", "COGS — Item Purchase"),
     ("inbound_shipping", "COGS — Inbound Shipping / Freight-In"),
     ("item_purchase_and_inbound_shipping", "COGS — Item Purchase + Inbound Shipping"),
+    # Added 2026-09-29 — a real gap found in live use, same underlying
+    # mechanism for two confirmed examples: (1) an employee's unspent
+    # cash-advance excess refunded back the day after a purchase already
+    # posted as COGS, (2) a supplier refund for inventory that couldn't be
+    # delivered. Both reduce a COGS figure already posted or about to be —
+    # ONE unified category (the raw bank description already documents
+    # which reason applies), not split by reason. Posts via the new
+    # ledger.posting.post_cogs_refund() (a credit reducing the existing COGS
+    # account — no new GL line). Placed next to the other COGS labels above.
+    ("cogs_refund", "COGS Refund / Purchase Return"),
     # Added 2026-09-10 — the existing PAYROLL account had no review-queue
     # category/posting path at all until now (same pre-existing gap
     # CONTRACT_LABOR/SHIPPING_COST each had before their own category was
@@ -111,6 +129,11 @@ CATEGORY_OPTIONS = [
     ("other", "Other"),
 ]
 
+# Lookup used to build the AJAX JSON response's human-readable
+# "category_label" (see label_row below) — same labels shown in the
+# <select>, just addressable by code without re-walking the list.
+CATEGORY_LABELS = dict(CATEGORY_OPTIONS)
+
 
 @bp.route("/")
 def index():
@@ -172,6 +195,28 @@ def _next_month(d: _dt.date) -> _dt.date:
     return d.replace(month=d.month + 1)
 
 
+def _wants_json() -> bool:
+    """AJAX-style requests set this header explicitly (see
+    review_queue.html's fetch() handler) — a plain browser form POST never
+    sends it, so this is a reliable, additive signal to branch the response
+    shape on without touching the existing redirect-based behavior at all.
+    """
+    return request.headers.get("X-Requested-With") == "XMLHttpRequest"
+
+
+def _fail(message: str, status: int = 400):
+    """Shared failure path for label_row: JSON for the AJAX caller (so
+    fetch() can distinguish success/failure cleanly via a non-2xx status),
+    the original flash-and-redirect for a plain form submission. Validation
+    rules themselves are unchanged — this only changes how the outcome is
+    delivered.
+    """
+    if _wants_json():
+        return jsonify({"success": False, "message": message}), status
+    flash(message, "error")
+    return _back_to_queue(request)
+
+
 @bp.route("/<int:row_id>", methods=["POST"])
 def label_row(row_id: int):
     conn = get_db()
@@ -186,8 +231,7 @@ def label_row(row_id: int):
     consignor_item_ref = (request.form.get("consignor_item_ref") or "").strip() or None
     valid_categories = {c for c, _ in CATEGORY_OPTIONS}
     if category not in valid_categories:
-        flash("Please choose a valid category.", "error")
-        return _back_to_queue(request)
+        return _fail("Please choose a valid category.")
 
     # Added 2026-09-10 — the optional embedded employee-loan-repayment split
     # on a 'payroll' row (see CLAUDE.md's Core accounting rules and
@@ -198,24 +242,19 @@ def label_row(row_id: int):
     loan_repayment_amount_idr = None
     if raw_loan_repayment:
         if category != "payroll":
-            flash("Loan repayment amount only applies to the Payroll category.", "error")
-            return _back_to_queue(request)
+            return _fail("Loan repayment amount only applies to the Payroll category.")
         try:
             loan_repayment_amount_idr = Decimal(raw_loan_repayment)
         except InvalidOperation:
-            flash("Loan repayment amount must be a number (e.g. 1500000).", "error")
-            return _back_to_queue(request)
+            return _fail("Loan repayment amount must be a number (e.g. 1500000).")
         if loan_repayment_amount_idr <= 0:
-            flash("Loan repayment amount must be greater than zero.", "error")
-            return _back_to_queue(request)
+            return _fail("Loan repayment amount must be greater than zero.")
         if not consignor_item_ref:
-            flash(
+            return _fail(
                 "Please also fill in the employee's name (Consignor/Item Ref field) "
                 "when specifying a loan repayment amount — it's needed to know whose "
-                "loan balance to draw down.",
-                "error",
+                "loan balance to draw down."
             )
-            return _back_to_queue(request)
 
     # QA-found gap (2026-09-10): 'employee_loan_disbursement' ALWAYS needs a
     # real employee reference — same reasoning as the loan-repayment check
@@ -225,12 +264,10 @@ def label_row(row_id: int):
     # (see ingestion/matching.py's _missing_employee_ref_reason, the
     # matching defense-in-depth backstop for this same requirement).
     if category == "employee_loan_disbursement" and not consignor_item_ref:
-        flash(
+        return _fail(
             "Please fill in the employee's name (Consignor/Item Ref field) for an "
-            "Employee Loan Disbursement — it's needed to know whose loan this is.",
-            "error",
+            "Employee Loan Disbursement — it's needed to know whose loan this is."
         )
-        return _back_to_queue(request)
 
     # The posted_at IS NULL guard is a deliberate, explicit match to
     # CLAUDE.md's "corrections to an already-posted row are out of scope"
@@ -252,19 +289,26 @@ def label_row(row_id: int):
         existing = conn.execute(
             select(review_queue.c.posted_at).where(review_queue.c.id == row_id)
         ).first()
+        conn.rollback()
         if existing is not None and existing.posted_at is not None:
-            flash(
+            return _fail(
                 "This row has already posted to the ledger — corrections to a posted row "
                 "are not supported yet (see CLAUDE.md's deferred-corrections note).",
-                "error",
+                status=409,
             )
-        else:
-            flash("Could not find that review-queue row.", "error")
-        conn.rollback()
-        return _back_to_queue(request)
+        return _fail("Could not find that review-queue row.", status=404)
 
     conn.commit()
-    flash("Saved — queued for the next sync run.", "success")
+    success_message = "Saved — queued for the next sync run."
+    if _wants_json():
+        return jsonify(
+            {
+                "success": True,
+                "message": success_message,
+                "category_label": CATEGORY_LABELS.get(category, category),
+            }
+        )
+    flash(success_message, "success")
     return _back_to_queue(request, row_id=row_id)
 
 

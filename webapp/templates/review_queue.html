@@ -51,7 +51,7 @@
           {% if row.match_status == 'matched' %}<span class="badge green">Matched</span>
           {% else %}<span class="badge amber">Needs Review</span>{% endif %}
         </td>
-        <td>{{ row.category or '—' }}</td>
+        <td id="rq-category-{{ row.id }}">{{ row.category or '—' }}</td>
         <td>
           {% if row.posted_at %}<span class="badge green">✓ {{ row.posted_at.strftime('%Y-%m-%d %H:%M') }}</span>
           {% elif row.sign_mismatch_reason %}<span class="badge red" title="{{ row.sign_mismatch_reason }}">⚠ Not posted — sign/category mismatch</span>
@@ -79,9 +79,10 @@
       {% if row.match_status == 'needs_review' and not row.posted_at %}
       <tr id="rq-editor-{{ row.id }}" class="inline-editor hidden-row">
         <td colspan="7">
-          <form method="post" action="{{ url_for('review_queue.label_row', row_id=row.id) }}">
+          <form method="post" action="{{ url_for('review_queue.label_row', row_id=row.id) }}" class="rq-editor-form" data-row-id="{{ row.id }}">
             <input type="hidden" name="period" value="{{ period_month.isoformat() }}">
             <input type="hidden" name="account_id" value="{{ selected_account_id or '' }}">
+            <div id="rq-editor-error-{{ row.id }}" class="rq-editor-error small" style="display:none;"></div>
             <label>Category
               <select name="category" required onchange="rqCategoryChanged({{ row.id }})">
                 <option value="">— choose —</option>
@@ -106,7 +107,16 @@
   </tbody>
 </table>
 {% endif %}
-<style>.hidden-row { display: none; }</style>
+<style>
+.hidden-row { display: none; }
+.rq-editor-error { color: #b00020; margin-bottom: 6px; }
+/* Brief post-save confirmation flash (Fix 1/2, 2026-09-29) — background
+   fades back to normal over ~2s via the transition, giving a clear visual
+   cue on the row itself that something just saved, without any page
+   reload/scroll (see the fetch() handler below). */
+.rq-just-saved { background-color: #d9f2d9 !important; transition: background-color 2s ease; }
+.rq-just-saved.rq-just-saved-fade { background-color: transparent !important; }
+</style>
 <script>
 // Fix 2 (2026-09-25): the Loan repayment field only ever applies to a
 // 'payroll' row (see review_queue_bp.py's label_row validation) — this
@@ -155,6 +165,105 @@ document.addEventListener('DOMContentLoaded', function () {
   if (editor) {
     editor.classList.remove('hidden-row');
   }
+});
+
+// AJAX save (2026-09-29 UX fix): submits a row's editor via fetch() instead
+// of a native form POST, so the page never reloads/navigates. This is what
+// actually fixes both reported complaints — there's no redirect to anchor a
+// scroll position against (nothing jumps, by construction) and a successful
+// save gets a real, row-local confirmation (collapse + updated Category
+// cell + brief highlight) instead of the editor just sitting there open.
+//
+// Progressive enhancement only: if this script doesn't run (JS disabled/
+// fails), each <form> above still has its own real method="post" action, so
+// a plain submission falls back to the exact original redirect-based
+// behavior unchanged (see review_queue_bp.py's label_row — the JSON branch
+// is purely additive, gated on the X-Requested-With header this handler
+// sets below).
+//
+// Scoped per-row throughout (dataset.rowId read off the submitting form
+// itself, every element looked up by that row's own id) — same convention
+// already used by rqCategoryChanged above — so one row's save can never
+// affect another row's editor/category cell/highlight on this same page.
+document.addEventListener('DOMContentLoaded', function () {
+  var forms = document.querySelectorAll('.rq-editor-form');
+  forms.forEach(function (form) {
+    form.addEventListener('submit', function (evt) {
+      evt.preventDefault();
+
+      var rowId = form.dataset.rowId;
+      var errorEl = document.getElementById('rq-editor-error-' + rowId);
+      var submitBtn = form.querySelector('button[type="submit"]');
+      if (errorEl) {
+        errorEl.textContent = '';
+        errorEl.style.display = 'none';
+      }
+      if (submitBtn) submitBtn.disabled = true;
+
+      fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form),
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        credentials: 'same-origin'
+      })
+        .then(function (resp) {
+          return resp.json().then(function (data) {
+            return { ok: resp.ok, data: data };
+          });
+        })
+        .then(function (result) {
+          if (result.ok && result.data && result.data.success) {
+            // Success: update the visible Category cell, collapse the
+            // editor back to its default hidden state (the confirmation
+            // signal itself — see complaint 1), and briefly highlight the
+            // row so it's obvious something just changed even if the user
+            // isn't looking right at the Category column.
+            var categoryCell = document.getElementById('rq-category-' + rowId);
+            if (categoryCell) {
+              categoryCell.textContent = result.data.category_label || '—';
+            }
+            var editor = document.getElementById('rq-editor-' + rowId);
+            if (editor) {
+              editor.classList.add('hidden-row');
+            }
+            var mainRow = document.getElementById('rq-row-' + rowId);
+            if (mainRow) {
+              mainRow.classList.add('rq-just-saved');
+              // Two-step class toggle so the highlight fades OUT via a real
+              // transition (see .rq-just-saved/.rq-just-saved-fade above)
+              // instead of the background just disappearing instantly.
+              window.requestAnimationFrame(function () {
+                window.requestAnimationFrame(function () {
+                  mainRow.classList.add('rq-just-saved-fade');
+                });
+              });
+              setTimeout(function () {
+                mainRow.classList.remove('rq-just-saved', 'rq-just-saved-fade');
+              }, 2000);
+            }
+          } else {
+            // Failure (validation rejected, row already posted, etc.): keep
+            // the editor open and show the real server-side error message
+            // right where the user is already looking — never collapse on
+            // a failed save.
+            var msg = (result.data && result.data.message) || 'Could not save — please try again.';
+            if (errorEl) {
+              errorEl.textContent = msg;
+              errorEl.style.display = 'block';
+            }
+          }
+        })
+        .catch(function () {
+          if (errorEl) {
+            errorEl.textContent = 'Network error — could not save. Please try again.';
+            errorEl.style.display = 'block';
+          }
+        })
+        .finally(function () {
+          if (submitBtn) submitBtn.disabled = false;
+        });
+    });
+  });
 });
 </script>
 {% endblock %}

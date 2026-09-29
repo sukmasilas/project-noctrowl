@@ -297,13 +297,21 @@ def test_category_options_follow_pl_statement_order():
     types, with 'other' staying last. This is an intentional display-order
     change (values/labels/posting logic are untouched) — not a regression to
     revert if it ever fails after another category is added; update the
-    expected order below deliberately instead."""
+    expected order below deliberately instead.
+
+    Updated 2026-09-29 for the two new refund categories (see CLAUDE.md):
+    'customer_refund' is revenue-side (posts to Sales Returns & Allowances,
+    a contra-revenue line) — placed right after 'revenue_settlement'.
+    'cogs_refund' is COGS-side (a credit reducing the existing COGS account)
+    — placed with the other COGS labels, right before 'payroll'."""
     expected_order = [
         "revenue_settlement",
+        "customer_refund",
         "cogs_purchase",
         "item_purchase",
         "inbound_shipping",
         "item_purchase_and_inbound_shipping",
+        "cogs_refund",
         "payroll",
         "operating_expense",
         "shipping_cost",
@@ -375,6 +383,136 @@ def test_validation_failure_redirect_has_no_row_anchor(client, wtopology):
     assert "#rq-row-" not in resp.headers["Location"]
 
 
+def test_ajax_save_returns_json_success_and_does_not_redirect(client, wtopology):
+    """2026-09-29 UX fix: a request that signals it wants an AJAX response
+    (X-Requested-With: XMLHttpRequest, set by review_queue.html's fetch()
+    handler) must get a JSON body back — not the redirect a plain form POST
+    gets — so the front end can update the row in place instead of
+    navigating. The save itself (DB row updated, never auto-posted) is
+    identical to the non-AJAX path; only the response shape differs."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "operating_expense", "consignor_item_ref": "", "period": PERIOD.isoformat()},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert resp.status_code == 200
+    assert resp.is_json
+    body = resp.get_json()
+    assert body["success"] is True
+    assert body["category_label"] == "Operating Expense"
+    assert "Location" not in resp.headers  # no redirect for the AJAX path
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "operating_expense"
+    assert row.labeled_at is not None
+    assert row.posted_at is None  # saving a label never posts by itself
+
+
+def test_ajax_save_returns_json_failure_for_invalid_category(client, wtopology):
+    """The AJAX path must surface a validation failure as a non-2xx JSON
+    response (so fetch() can tell success apart from failure), not a
+    redirect — and the row must be left unlabeled, same guard as the plain
+    form path."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "not_a_real_category"},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert resp.status_code == 400
+    assert resp.is_json
+    body = resp.get_json()
+    assert body["success"] is False
+    assert body["message"]
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None
+
+
+def test_ajax_save_returns_json_failure_for_missing_loan_reference(client, wtopology):
+    """A validation rule with money implications (loan repayment needs a
+    real employee reference) must still be enforced identically on the AJAX
+    path — only the response shape changes, never the rule itself."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-8500000)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "payroll",
+            "consignor_item_ref": "",
+            "loan_repayment_amount_idr": "1500000",
+            "period": PERIOD.isoformat(),
+        },
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["success"] is False
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None
+
+
+def test_ajax_save_returns_json_failure_for_already_posted_row(client, wtopology):
+    """A row that's already posted must never be silently relabeled via the
+    AJAX path either — same 'corrections to a posted row are out of scope'
+    guard as the plain-form path, just returned as a non-2xx JSON body
+    instead of a redirect+flash."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_wallet_group", period_month=PERIOD, wallet_group_id=topo["wallet_group_id"])
+    row_id = make_review_queue_row(
+        conn, source_document_id=src_id, transaction_date=DAY, wallet_group_id=topo["wallet_group_id"]
+    )
+    conn.execute(
+        review_queue.update()
+        .where(review_queue.c.id == row_id)
+        .values(category="operating_expense", labeled_at=_dt.datetime.now(_dt.timezone.utc), posted_at=_dt.datetime.now(_dt.timezone.utc))
+    )
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "owners_draw", "consignor_item_ref": "", "period": PERIOD.isoformat()},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert resp.status_code == 409
+    body = resp.get_json()
+    assert body["success"] is False
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "operating_expense"  # unchanged
+
+
+def test_plain_form_post_still_redirects_when_ajax_header_absent(client, wtopology):
+    """Regression guard for the AJAX addition: a request with no
+    X-Requested-With header (the graceful-degradation/no-JS case) must keep
+    getting the exact original redirect-based response, not JSON."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "operating_expense", "consignor_item_ref": "", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+    assert resp.headers["Location"].endswith(f"#rq-row-{row_id}")
+    assert not resp.is_json
+
+
 def test_row_and_editor_markup_wired_for_loan_field_toggle(client, wtopology):
     """2026-09-25 (Fixes 2 & 3): the row has a stable id for the redirect
     anchor, the category select calls the per-row toggle function, and the
@@ -396,3 +534,24 @@ def test_row_and_editor_markup_wired_for_loan_field_toggle(client, wtopology):
     editor_match = re.search(rf'id="rq-editor-{row_id}".*?</tr>', html, re.DOTALL)
     assert editor_match is not None
     assert re.search(r'name="loan_repayment_amount_idr"[^>]*disabled', editor_match.group(0))
+
+
+def test_row_markup_wired_for_ajax_save(client, wtopology):
+    """2026-09-29 UX fix: the row/editor markup needed by review_queue.html's
+    fetch() handler must actually be present — the category cell has a
+    stable id to update in place, the form is flagged for the AJAX handler
+    to pick up (class + data-row-id, since a plain <form method=post> alone
+    would just be a normal submission), and there's a dedicated inline error
+    element scoped to this row."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    resp = client.get(f"/review-queue/?period={PERIOD.isoformat()[:7]}")
+    html = resp.data.decode()
+    assert f'id="rq-category-{row_id}"' in html
+    assert f'data-row-id="{row_id}"' in html
+    assert 'class="rq-editor-form' in html
+    assert f'id="rq-editor-error-{row_id}"' in html
+    assert "rq-editor-form" in html and "addEventListener('submit'" in html
