@@ -595,6 +595,50 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
         ),
     ),
     MigrationStep(
+        id="review_queue_shipping_portion_idr",
+        description=(
+            "review_queue.shipping_portion_idr (nullable) — 2026-09-29, "
+            "backs an optional split for a single bundled bank payment that "
+            "covers both an item purchase (COGS) and outbound shipping to a "
+            "customer (Shipping Cost) — real trigger: a Master Account bank "
+            "line, 'TRSF E-BANKING DB ... / BANK NEO COM ...', -Rp "
+            "4,140,000 (Rp 2,140,000 item purchase + Rp 2,000,000 outbound "
+            "shipping), confirmed by the user as a recurring bundling "
+            "pattern. NULL (the overwhelming default) means a plain, "
+            "single-account COGS posting, unchanged from before this field "
+            "existed. See ingestion.matching._post_one_row and "
+            "ledger.posting.post_cogs_purchase_with_shipping_split."
+        ),
+        table="review_queue",
+        already_applied_check=(
+            "SELECT 1 FROM information_schema.columns WHERE table_name="
+            "'review_queue' AND column_name='shipping_portion_idr'"
+        ),
+        apply_sql=(
+            "ALTER TABLE review_queue ADD COLUMN IF NOT EXISTS "
+            "shipping_portion_idr NUMERIC(20,2)",
+        ),
+    ),
+    MigrationStep(
+        id="review_queue_shipping_portion_amount_positive_check",
+        description=(
+            "ck_review_queue_shipping_portion_amount_positive — 2026-09-29, "
+            "same DB-level backstop pattern as "
+            "ck_review_queue_loan_repayment_amount_positive above, for the "
+            "new shipping_portion_idr column. DROP+ADD unconditionally "
+            "re-run, same idempotency pattern as the CHECK-constraint "
+            "-widening steps above."
+        ),
+        table="review_queue",
+        apply_sql=(
+            "ALTER TABLE review_queue DROP CONSTRAINT IF EXISTS "
+            "ck_review_queue_shipping_portion_amount_positive",
+            "ALTER TABLE review_queue ADD CONSTRAINT "
+            "ck_review_queue_shipping_portion_amount_positive CHECK "
+            "(shipping_portion_idr IS NULL OR shipping_portion_idr > 0)",
+        ),
+    ),
+    MigrationStep(
         id="review_queue_missing_reference_reason",
         description=(
             "review_queue.missing_reference_reason (nullable) — 2026-09-10, "

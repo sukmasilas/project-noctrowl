@@ -35,6 +35,18 @@ CATEGORY_OPTIONS = [
     # here means freight-in (getting PURCHASED inventory delivered to the
     # business) — never confused with 'shipping_cost' above, which is
     # OUTBOUND shipping to a customer.
+    # 'item_purchase'/'cogs_purchase' (not 'inbound_shipping'/
+    # 'item_purchase_and_inbound_shipping' — those already represent a
+    # DIFFERENT, inbound freight-in shipping concept blended into the same
+    # COGS line, see below) reveal an optional "Outbound Shipping portion"
+    # field in the editor (see review_queue.html) — a single bundled bank
+    # payment covering both an item purchase and outbound shipping to a
+    # customer, split into a COGS line + a Shipping Cost line instead of
+    # posting the whole amount to COGS. Added 2026-09-29 — real trigger: a
+    # Master Account bank line, "TRSF E-BANKING DB ... / BANK NEO COM ...",
+    # -Rp 4,140,000 (Rp 2,140,000 item purchase + Rp 2,000,000 outbound
+    # shipping), confirmed by the user as a recurring bundling pattern. See
+    # ledger.posting.post_cogs_purchase_with_shipping_split.
     ("item_purchase", "COGS — Item Purchase"),
     ("inbound_shipping", "COGS — Inbound Shipping / Freight-In"),
     ("item_purchase_and_inbound_shipping", "COGS — Item Purchase + Inbound Shipping"),
@@ -273,6 +285,43 @@ def label_row(row_id: int):
                 "loan balance to draw down."
             )
 
+    # Added 2026-09-29 — the optional bundled-item-purchase +
+    # outbound-shipping split on a 'cogs_purchase'/'item_purchase' row (see
+    # CLAUDE.md and ledger.posting.post_cogs_purchase_with_shipping_split).
+    # Deliberately only ever set by an explicit human entry here, never
+    # inferred — same "never silently guess" rule as every other category
+    # in this file. Unlike loan_repayment_amount_idr (which is ADDITIVE, no
+    # upper bound), this field is SUBTRACTIVE — carved OUT of the row's own
+    # total amount — so it needs its own "strictly less than the total"
+    # check that loan_repayment_amount_idr never needed.
+    raw_shipping_portion = (request.form.get("shipping_portion_idr") or "").strip()
+    shipping_portion_idr = None
+    if raw_shipping_portion:
+        if category not in ("cogs_purchase", "item_purchase"):
+            return _fail(
+                "Outbound Shipping portion only applies to the COGS / COGS — Item Purchase "
+                "categories (a plain item purchase with no shipping already implied) — not to "
+                "COGS — Inbound Shipping / Freight-In or COGS — Item Purchase + Inbound "
+                "Shipping, which already represent a different, inbound shipping concept."
+            )
+        try:
+            shipping_portion_idr = Decimal(raw_shipping_portion)
+        except InvalidOperation:
+            return _fail("Outbound Shipping portion must be a number (e.g. 2000000).")
+        if shipping_portion_idr <= 0:
+            return _fail("Outbound Shipping portion must be greater than zero.")
+        existing_row = conn.execute(
+            select(review_queue.c.amount_idr).where(review_queue.c.id == row_id)
+        ).first()
+        if existing_row is None:
+            return _fail("Could not find that review-queue row.", status=404)
+        total_amount = abs(existing_row.amount_idr)
+        if shipping_portion_idr >= total_amount:
+            return _fail(
+                "Outbound Shipping portion must be less than this line's total amount "
+                f"({total_amount}) — there must be something left over for COGS."
+            )
+
     # QA-found gap (2026-09-10): 'employee_loan_disbursement' ALWAYS needs a
     # real employee reference — same reasoning as the loan-repayment check
     # above, and CLAUDE.md's existing Consignor Payable traceability rule.
@@ -311,6 +360,7 @@ def label_row(row_id: int):
             category=category,
             consignor_item_ref=consignor_item_ref,
             loan_repayment_amount_idr=loan_repayment_amount_idr,
+            shipping_portion_idr=shipping_portion_idr,
             labeled_at=_dt.datetime.now(_dt.timezone.utc),
             # 2026-09-29 (AJAX Posted-cell fix): a row can reach this route a
             # second time already carrying a stale sign_mismatch_reason /

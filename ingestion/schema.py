@@ -349,6 +349,46 @@ review_queue = Table(
     # column needed, per Main-agent's brief ("follow that shape rather than
     # inventing something structurally different").
     Column("loan_repayment_amount_idr", Numeric(20, 2), nullable=True),
+    # Added 2026-09-29 — backs an OPTIONAL split field for a single bundled
+    # bank payment that actually covers TWO different things: an item
+    # purchase (COGS) and OUTBOUND shipping to a customer (Shipping Cost).
+    # Real trigger: a Master Account bank line, "TRSF E-BANKING DB ... /
+    # BANK NEO COM ...", -Rp 4,140,000, confirmed by the user as Rp
+    # 2,140,000 item purchase + Rp 2,000,000 outbound shipping bundled into
+    # one payment — a recurring pattern the user confirmed, not a one-off.
+    # NULL (the default) is a plain single-account COGS posting, unchanged
+    # from before this field existed; a positive value tells
+    # post_pending_rows to post a 2-expense-line split instead (debit COGS
+    # for amount_idr - shipping_portion_idr, debit SHIPPING_COST for
+    # shipping_portion_idr, credit the paying account for the full
+    # amount_idr) via ledger.posting.post_cogs_purchase_with_shipping_split.
+    #
+    # Mirrors loan_repayment_amount_idr's shape (an optional embedded split
+    # field, same "reveals a field in the editor when a specific category is
+    # selected" UI pattern) but is a GENUINELY DIFFERENT math shape, not a
+    # copy: loan_repayment_amount_idr is ADDITIVE (added on top of the real
+    # net transfer to compute a gross Payroll expense, no upper bound
+    # relative to anything), while this is SUBTRACTIVE (carved OUT of a
+    # single total payment) — hence the separate
+    # ck_review_queue_shipping_portion_amount_positive CHECK below and the
+    # "strictly less than the total" validation enforced at the webapp/
+    # posting layers (see webapp/review_queue_bp.py and
+    # ledger.posting.post_cogs_purchase_with_shipping_split).
+    #
+    # Only ever meaningful for the 'cogs_purchase'/'item_purchase'
+    # categories (a pure item purchase with no shipping already implied) —
+    # deliberately NOT 'inbound_shipping'/'item_purchase_and_inbound_
+    # shipping', which already represent a DIFFERENT shipping concept
+    # (inbound freight-in, getting PURCHASED stock delivered TO the
+    # business) blended into the same COGS line; adding an "outbound
+    # shipping portion" field there would let one bank line carry two
+    # conflicting "shipping" meanings with no way to tell which is which
+    # after the fact. This is enforced at the webapp layer (the field is
+    # only ever settable when 'cogs_purchase'/'item_purchase' is selected,
+    # same category-gating style as loan_repayment_amount_idr's own
+    # payroll-only gate) — NOT a DB-level constraint, same trust boundary
+    # already accepted for loan_repayment_amount_idr's own category-gating.
+    Column("shipping_portion_idr", Numeric(20, 2), nullable=True),
     # Added 2026-09-10 (QA-found gap): 'employee_loan_disbursement' always,
     # and 'payroll' whenever it carries a loan_repayment_amount_idr, require
     # a real employee reference (consignor_item_ref, above) to know whose
@@ -510,6 +550,23 @@ review_queue = Table(
     CheckConstraint(
         "loan_repayment_amount_idr IS NULL OR loan_repayment_amount_idr > 0",
         name="ck_review_queue_loan_repayment_amount_positive",
+    ),
+    # Added 2026-09-29, mirrors ck_review_queue_loan_repayment_amount_positive
+    # above — same DB-level backstop pattern for the new shipping_portion_idr
+    # split field. The stronger "strictly less than amount_idr" constraint
+    # (there must be a nonzero COGS remainder) is deliberately NOT expressed
+    # here as a CHECK — amount_idr's sign varies (a bank line can be positive
+    # or negative before this category is even chosen) and the real
+    # comparison is against abs(amount_idr), which a portable CHECK
+    # expression would need a CASE for no real benefit over the existing
+    # app-layer validation already enforced at both the webapp
+    # (webapp/review_queue_bp.py) and posting
+    # (ledger.posting.post_cogs_purchase_with_shipping_split) layers — this
+    # CHECK only guards the same "never a zero/negative amount" invariant
+    # loan_repayment_amount_idr's own CHECK already guards.
+    CheckConstraint(
+        "shipping_portion_idr IS NULL OR shipping_portion_idr > 0",
+        name="ck_review_queue_shipping_portion_amount_positive",
     ),
 )
 

@@ -840,3 +840,49 @@ def test_balance_sheet_inventory_deposits_drops_once_fully_converted(prototype):
     assert deposits_line.balance_idr == Decimal("0")
     assert bs.difference_idr == Decimal("0")
     assert bs.total_assets_idr == bs.total_liabilities_and_equity_idr
+
+
+def test_cash_flow_cogs_shipping_split_hits_both_lines_correctly(prototype):
+    """2026-09-29: ledger.posting.post_cogs_purchase_with_shipping_split
+    produces a 3-line entry (COGS debit + SHIPPING_COST debit + a single
+    cash credit) — verifies the Cash Flow Statement's whitelist
+    (webapp.reporting._CASH_FLOW_CODE_TO_KEY) handles a split posting
+    correctly with NO code change: both COGS and SHIPPING_COST are already
+    whitelisted account codes, and _cash_flow_source_lines aggregates
+    per-JOURNAL-LINE (not per-entry or per-source_type), so a single entry
+    touching two different non-cash accounts correctly contributes to BOTH
+    buckets independently, with the identity still holding exactly.
+    """
+    conn, topo = prototype
+    posting.post_cogs_purchase_with_shipping_split(
+        conn,
+        entry_date=DAY,
+        amount_idr=Decimal("4140000"),
+        shipping_portion_idr=Decimal("2000000"),
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert _bucket(report, "cogs_purchases") == Decimal("-2140000")
+    assert _bucket(report, "shipping_cost") == Decimal("-2000000")
+    assert report.total_operating_idr == Decimal("-4140000")
+    assert report.difference_idr == Decimal("0")
+
+
+def test_pnl_cogs_shipping_split_reduces_gross_profit_and_shows_shipping_opex(prototype):
+    """Same split posting as above, verified against the P&L: COGS gets the
+    non-shipping remainder (reducing gross profit), SHIPPING_COST shows as
+    its own opex line — no code change needed since pnl_report's
+    _section_lines already groups generically by statement_section, not by
+    a hardcoded account list.
+    """
+    conn, topo = prototype
+    posting.post_cogs_purchase_with_shipping_split(
+        conn,
+        entry_date=DAY,
+        amount_idr=Decimal("4140000"),
+        shipping_portion_idr=Decimal("2000000"),
+    )
+    report = reporting.pnl_report(conn, period_month=PERIOD)
+    assert report.cogs_idr == Decimal("2140000")
+    shipping_line = next(l for l in report.opex_lines if l.code == "SHIPPING_COST")
+    assert shipping_line.amount_idr == Decimal("2000000")
+    assert report.total_opex_idr == Decimal("2000000")

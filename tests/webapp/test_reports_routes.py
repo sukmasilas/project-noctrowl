@@ -87,6 +87,36 @@ def test_drilldown_unknown_figure_404s(client, wtopology):
     assert resp.status_code == 404
 
 
+def test_cogs_and_opex_drilldowns_both_show_the_shipping_split_entry(client, wtopology):
+    """2026-09-29: ledger.posting.post_cogs_purchase_with_shipping_split
+    produces one journal entry with lines touching BOTH the COGS and
+    SHIPPING_COST accounts — confirms webapp.reports_bp._DRILLDOWN_CODES
+    (already listing both codes, one under 'cogs', the other under 'opex')
+    needs no change: each drilldown page shows only its own account's line
+    from the entry (never the other side), with the correct, distinct
+    amount.
+    """
+    conn, topo = wtopology
+    posting.post_cogs_purchase_with_shipping_split(
+        conn,
+        entry_date=DAY,
+        amount_idr=Decimal("4140000"),
+        shipping_portion_idr=Decimal("2000000"),
+        memo="BANK NEO COM split",
+    )
+    conn.commit()
+
+    cogs_resp = client.get("/reports/drilldown/cogs?period=2026-07")
+    assert cogs_resp.status_code == 200
+    assert b"BANK NEO COM split" in cogs_resp.data
+    assert "Rp 2.140.000".encode() in cogs_resp.data  # webapp.report_extras.format_idr's dot-grouped format
+
+    opex_resp = client.get("/reports/drilldown/opex?period=2026-07")
+    assert opex_resp.status_code == 200
+    assert b"BANK NEO COM split" in opex_resp.data
+    assert "Rp 2.000.000".encode() in opex_resp.data
+
+
 def test_balance_sheet_renders_empty_period(client, wtopology):
     resp = client.get("/reports/balance-sheet?period=2026-07")
     assert resp.status_code == 200

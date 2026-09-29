@@ -781,6 +781,7 @@ def post_pending_rows(conn: Connection) -> PostResult:
             review_queue.c.linked_invoice_id,
             review_queue.c.linked_payoneer_withdrawal_id,
             review_queue.c.loan_repayment_amount_idr,
+            review_queue.c.shipping_portion_idr,
         ).where(review_queue.c.posted_at.is_(None))
     ).all()
 
@@ -1044,6 +1045,46 @@ def _post_one_row(conn: Connection, row) -> int | None:
         # needed since post_operating_expense/post_cogs_purchase already
         # generalize by account-type-code, not by review-queue category.
         paying_code, paying_kwargs = _paying_account_for_row(row)
+
+        # Added 2026-09-29 — the optional bundled-item-purchase +
+        # outbound-shipping split (see CLAUDE.md, ledger.posting.
+        # post_cogs_purchase_with_shipping_split, and
+        # webapp/review_queue_bp.py's label_row, which is the ONLY place a
+        # human can actually set shipping_portion_idr — always gated to
+        # 'cogs_purchase'/'item_purchase' there). Deliberately does NOT apply
+        # to 'inbound_shipping'/'item_purchase_and_inbound_shipping' — those
+        # already represent a DIFFERENT (inbound freight-in) shipping concept
+        # blended into the same COGS line; letting an outbound-shipping split
+        # apply there too would let one bank line carry two conflicting
+        # "shipping" meanings. This is a defense-in-depth guard, not the
+        # primary enforcement point (the webapp layer never lets this
+        # combination be saved in the first place) — a row that somehow
+        # reaches here with both anyway is never silently posted; it fails
+        # loudly and is caught by post_pending_rows' existing per-row
+        # try/except (recorded as posting_error_reason), the same "structurally
+        # not postable" treatment already used for _post_customer_refund's
+        # unsupported-scope case and 'cogs_refund'/'inventory_deposit''s
+        # wrong-scope raises above.
+        if row.shipping_portion_idr:
+            if row.category not in ("cogs_purchase", "item_purchase"):
+                raise ValueError(
+                    f"Category '{row.category}' does not support an outbound-shipping-portion "
+                    "split — that field only applies to 'cogs_purchase'/'item_purchase' (see "
+                    "CLAUDE.md: 'inbound_shipping'/'item_purchase_and_inbound_shipping' already "
+                    "represent a different, inbound freight-in shipping concept). Not posted — "
+                    "please re-check the classification."
+                )
+            return posting.post_cogs_purchase_with_shipping_split(
+                conn,
+                entry_date=entry_date,
+                amount_idr=abs(row.amount_idr),
+                shipping_portion_idr=row.shipping_portion_idr,
+                paying_account_type_code=paying_code,
+                **paying_kwargs,
+                **_usd_reference_kwargs(row),
+                memo=row.raw_description,
+            )
+
         return posting.post_operating_expense(
             conn,
             entry_date=entry_date,

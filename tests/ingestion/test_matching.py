@@ -3417,3 +3417,229 @@ def test_inventory_deposit_unsupported_scope_fails_cleanly_without_blocking_batc
     assert bad_row.match_status == "needs_review"
     assert bad_row.posting_error_reason is not None
     assert "inventory_deposit" in bad_row.posting_error_reason
+
+
+# ---------------------------------------------------------------------------
+# Optional bundled item-purchase + outbound-shipping split (2026-09-29). See
+# CLAUDE.md and ledger.posting.post_cogs_purchase_with_shipping_split. Real
+# trigger: a Master Account bank line, "TRSF E-BANKING DB ... / BANK NEO
+# COM ...", -Rp 4,140,000, confirmed by the user as Rp 2,140,000 item
+# purchase + Rp 2,000,000 outbound shipping bundled into one payment.
+# ---------------------------------------------------------------------------
+
+
+def _stage_bank_neo_com_row(conn, amount_idr=Decimal("-4140000"), source_document_id=None):
+    src_id = source_document_id if source_document_id is not None else _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 9, 15),
+                raw_description="TRSF E-BANKING DB ... / BANK NEO COM ...",
+                amount_idr=amount_idr,
+                occurrence_index=1,
+            )
+        ],
+    )
+    return conn.execute(
+        select(review_queue.c.id).order_by(review_queue.c.id.desc())
+    ).scalars().first()
+
+
+def test_cogs_purchase_with_shipping_portion_posts_two_line_split(iprototype):
+    conn, topo = iprototype
+    row_id = _stage_bank_neo_com_row(conn)
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="cogs_purchase",
+            shipping_portion_idr=Decimal("2000000"),
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is not None
+    lines = lines_by_code(conn, row.posted_journal_entry_id)
+    assert lines["COGS"][0].debit_amount_idr == Decimal("2140000")
+    assert lines["SHIPPING_COST"][0].debit_amount_idr == Decimal("2000000")
+    assert lines["BCA_MAIN"][0].credit_amount_idr == Decimal("4140000")
+    assert_balanced(conn, row.posted_journal_entry_id)
+
+
+def test_item_purchase_with_shipping_portion_also_splits(iprototype):
+    """'item_purchase' (not just plain 'cogs_purchase') supports the split
+    too — both are "a pure item purchase with no shipping already implied"."""
+    conn, topo = iprototype
+    row_id = _stage_bank_neo_com_row(conn)
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="item_purchase",
+            shipping_portion_idr=Decimal("2000000"),
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+    assert lines["COGS"][0].debit_amount_idr == Decimal("2140000")
+    assert lines["SHIPPING_COST"][0].debit_amount_idr == Decimal("2000000")
+
+
+def test_cogs_purchase_without_shipping_portion_posts_single_line_unchanged(iprototype):
+    """Leaving the field blank (NULL, the overwhelming default) posts
+    exactly as it did before this feature existed — 100% to COGS, no split,
+    no SHIPPING_COST line at all."""
+    conn, topo = iprototype
+    row_id = _stage_bank_neo_com_row(conn)
+    conn.execute(
+        update(review_queue)
+        .values(category="cogs_purchase", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+    assert lines["COGS"][0].debit_amount_idr == Decimal("4140000")
+    assert "SHIPPING_COST" not in lines
+    assert lines["BCA_MAIN"][0].credit_amount_idr == Decimal("4140000")
+    assert_balanced(conn, entry_id)
+
+
+def test_shipping_portion_on_inbound_shipping_category_never_posts(iprototype):
+    """'inbound_shipping'/'item_purchase_and_inbound_shipping' already
+    represent a DIFFERENT (inbound freight-in) shipping concept — a
+    shipping_portion_idr somehow set on one of these (bypassing the webapp's
+    own category-gating, e.g. a direct DB write) must never silently post
+    with an ambiguous double meaning; it fails loudly and is caught by the
+    existing per-row failure isolation, same as every other structurally
+    -not-postable case (see PostResult.failed_to_post)."""
+    conn, topo = iprototype
+    row_id = _stage_bank_neo_com_row(conn)
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="inbound_shipping",
+            shipping_portion_idr=Decimal("2000000"),
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.failed_to_post == 1
+    assert conn.execute(select(journal_entries.c.id)).all() == []
+
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status, review_queue.c.posting_error_reason)
+        .where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is None
+    assert row.match_status == "needs_review"
+    assert row.posting_error_reason is not None
+    assert "inbound_shipping" in row.posting_error_reason
+
+
+def test_shipping_portion_split_does_not_affect_sign_mismatch_check(iprototype):
+    """The sign-vs-category directional guard runs BEFORE the split logic
+    and is completely unaffected by whether shipping_portion_idr is set — a
+    wrongly-signed row still never posts, split or not."""
+    conn, topo = iprototype
+    row_id = _stage_bank_neo_com_row(conn, amount_idr=Decimal("4140000"))  # wrong sign: inflow, not outflow
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="cogs_purchase",
+            shipping_portion_idr=Decimal("2000000"),
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_sign_mismatch == 1
+    assert conn.execute(select(journal_entries.c.id)).all() == []
+
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.sign_mismatch_reason).where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is None
+    assert row.sign_mismatch_reason is not None
+
+
+def test_shipping_portion_greater_than_total_fails_isolated_not_batch_wide(iprototype):
+    """A structurally invalid split (shipping_portion_idr >= the row's own
+    total amount, e.g. from a stale/bypassed value) fails loudly for THAT
+    row only — the existing per-row failure isolation (SAVEPOINT-wrapped
+    try/except in post_pending_rows) must still let every other row in the
+    same batch post normally, same as every other structurally-not-postable
+    case already covered (PostResult.failed_to_post)."""
+    conn, topo = iprototype
+    master_src = _make_bank_source(conn)
+    bad_row_id = _stage_bank_neo_com_row(conn, source_document_id=master_src)
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="cogs_purchase",
+            shipping_portion_idr=Decimal("4140000"),  # equal to the total -- invalid
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == bad_row_id)
+    )
+
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=master_src,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 9, 16),
+                raw_description="Unrelated, valid COGS purchase",
+                amount_idr=Decimal("-300000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    valid_row_id = conn.execute(
+        select(review_queue.c.id).where(review_queue.c.id != bad_row_id)
+    ).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="cogs_purchase", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == valid_row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    assert post_result.failed_to_post == 1
+
+    valid_row = conn.execute(select(review_queue.c.posted_at).where(review_queue.c.id == valid_row_id)).one()
+    assert valid_row.posted_at is not None
+
+    bad_row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status, review_queue.c.posting_error_reason)
+        .where(review_queue.c.id == bad_row_id)
+    ).one()
+    assert bad_row.posted_at is None
+    assert bad_row.match_status == "needs_review"
+    assert bad_row.posting_error_reason is not None

@@ -1713,3 +1713,121 @@ def post_inventory_deposit_received(
     return _insert_journal_entry(
         conn, entry_date=entry_date, source_type="inventory_deposit_received", lines=lines, memo=memo
     )
+
+
+# ---------------------------------------------------------------------------
+# COGS / Outbound-Shipping split (added 2026-09-29) — an OPTIONAL split for a
+# single bundled bank payment that actually covers TWO different things: an
+# item purchase (COGS) and OUTBOUND shipping to a customer (Shipping Cost).
+# Real trigger: a Master Account bank line, "TRSF E-BANKING DB ... / BANK
+# NEO COM ...", -Rp 4,140,000, confirmed by the user as Rp 2,140,000 item
+# purchase + Rp 2,000,000 outbound shipping bundled into one payment — a
+# recurring pattern the user confirmed, not a one-off, so this needs a real,
+# permanent solution rather than a one-off correction.
+#
+# Deliberately MIRRORS post_payroll_with_loan_repayment's shape (an OPTIONAL
+# embedded split field that turns a single bank payment into a multi-line
+# entry instead of a single-account posting) but is NOT a copy of it — the
+# underlying math is genuinely different: the payroll case is ADDITIVE
+# (loan_repayment_idr is added ON TOP of the real net transfer to compute the
+# gross Payroll expense, no upper bound relative to anything), while this is
+# SUBTRACTIVE (shipping_portion_idr is carved OUT of a single total payment,
+# nothing added) — hence this function's own "strictly less than the total"
+# validation, which the payroll case never needed.
+#
+# Deliberately does NOT apply to 'inbound_shipping'/'item_purchase_and_
+# inbound_shipping' (see ingestion.matching._post_one_row's guard, which is
+# the only place this exclusion is enforced) — those categories already
+# represent a DIFFERENT shipping concept (inbound freight-in, getting
+# PURCHASED stock delivered TO the business — both SAK documents in
+# source-of-truth/ treat this as part of COGS itself, not a separate opex
+# line) blended into the same COGS line; letting an "outbound shipping
+# portion" field apply there too would let one bank line carry two
+# conflicting "shipping" meanings with no way to tell which is which after
+# the fact. Only 'cogs_purchase'/'item_purchase' (a pure item purchase with
+# no shipping already implied) ever reach this function.
+# ---------------------------------------------------------------------------
+
+
+def post_cogs_purchase_with_shipping_split(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    shipping_portion_idr: Decimal,
+    paying_account_type_code: str = "BCA_MAIN",
+    paying_ebay_account_id: int | None = None,
+    paying_wallet_group_id: int | None = None,
+    amount_usd_ref: Decimal | None = None,
+    fx_rate_used: Decimal | None = None,
+    memo: str | None = None,
+) -> int:
+    """Split a single bundled bank payment into a COGS line and a Shipping
+    Cost line, instead of posting the whole amount to COGS the way
+    ``post_cogs_purchase``/``post_operating_expense(expense_account_type_
+    code='COGS')`` do.
+
+    Posts a 3-line entry:
+      debit  COGS for (amount_idr - shipping_portion_idr)
+      debit  SHIPPING_COST for shipping_portion_idr
+      credit the paying account for the FULL amount_idr (the whole bundled
+             payment left the paying account in one real bank transaction —
+             never split on the cash side, only on the expense side)
+
+    ``shipping_portion_idr`` must be strictly positive AND strictly less
+    than ``amount_idr`` — there must be a real, nonzero COGS remainder left
+    after carving out the shipping portion. A caller with no shipping
+    portion to split out should use ``post_cogs_purchase``/
+    ``post_operating_expense`` instead, exactly as before this function
+    existed — this is purely an ADDITIVE, optional alternative path (see
+    ``ingestion.matching._post_one_row``'s 'cogs_purchase'/'item_purchase'
+    branch, which only calls this when a human has actually filled in a
+    shipping-portion amount on the review-queue row; leaving it blank is a
+    100%-unchanged, single-line-COGS posting).
+
+    ``paying_account_type_code``/``paying_ebay_account_id``/
+    ``paying_wallet_group_id``/``amount_usd_ref``/``fx_rate_used`` mirror
+    ``post_operating_expense``'s generic asset-account resolution and
+    optional-USD-reference convention exactly (tagged on every line, same
+    "reference on the whole TRANSACTION" convention used throughout this
+    module) — this is the same generic review-queue-driven posting shape,
+    just producing two expense lines instead of one.
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    _require_decimal(shipping_portion_idr, "shipping_portion_idr")
+    if amount_idr <= 0:
+        raise ValueError("amount_idr must be > 0 — the real, positive total amount of the bundled payment.")
+    if shipping_portion_idr <= 0:
+        raise ValueError(
+            "shipping_portion_idr must be > 0 — call post_cogs_purchase/post_operating_expense"
+            "(expense_account_type_code='COGS') instead for a plain item purchase with no "
+            "bundled outbound-shipping split."
+        )
+    if shipping_portion_idr >= amount_idr:
+        raise ValueError(
+            f"shipping_portion_idr ({shipping_portion_idr}) must be strictly less than the total "
+            f"amount_idr ({amount_idr}) — there must be a nonzero COGS remainder left after "
+            "carving out the shipping portion."
+        )
+    if amount_usd_ref is not None:
+        _require_decimal(amount_usd_ref, "amount_usd_ref")
+    if fx_rate_used is not None:
+        _require_decimal(fx_rate_used, "fx_rate_used")
+
+    cogs_idr = amount_idr - shipping_portion_idr
+    cogs_id = _singleton(conn, "COGS")
+    shipping_id = _singleton(conn, "SHIPPING_COST")
+    paying_id = get_account_id(
+        conn,
+        paying_account_type_code,
+        ebay_account_id=paying_ebay_account_id,
+        wallet_group_id=paying_wallet_group_id,
+    )
+
+    common_kwargs = dict(amount_usd_ref=amount_usd_ref, fx_rate_used=fx_rate_used)
+    lines = [
+        debit(cogs_id, cogs_idr, **common_kwargs),
+        debit(shipping_id, shipping_portion_idr, **common_kwargs),
+        credit(paying_id, amount_idr, **common_kwargs),
+    ]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)

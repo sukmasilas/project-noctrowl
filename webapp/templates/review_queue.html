@@ -98,6 +98,10 @@
               <input type="number" step="1" min="1" name="loan_repayment_amount_idr" value="{{ row.loan_repayment_amount_idr or '' }}" placeholder="e.g. 1500000" {% if row.category != 'payroll' %}disabled{% endif %}>
             </label>
             <span class="small">For a Payroll row that includes an employee-loan installment deduction — leave blank for a plain payroll payment. Use the Consignor/Item Ref field above for the employee's name.</span>
+            <label>Outbound Shipping portion (IDR, COGS / COGS — Item Purchase only)
+              <input type="number" step="1" min="1" name="shipping_portion_idr" value="{{ row.shipping_portion_idr or '' }}" placeholder="e.g. 2000000" {% if row.category not in ('cogs_purchase', 'item_purchase') %}disabled{% endif %}>
+            </label>
+            <span class="small">If this payment actually bundles an item purchase together with OUTBOUND shipping to a customer in one bank line — enter just the shipping portion here; the rest posts to COGS. Leave blank for a plain item purchase with no bundled shipping. Does not apply to COGS — Inbound Shipping / Freight-In or COGS — Item Purchase + Inbound Shipping, which already represent a different (inbound) shipping concept.</span>
             <button type="submit">Save</button>
           </form>
         </td>
@@ -133,8 +137,16 @@ function rqCategoryChanged(rowId) {
   if (!editor) return;
   var category = editor.querySelector('select[name="category"]');
   var loanInput = editor.querySelector('input[name="loan_repayment_amount_idr"]');
+  var shippingPortionInput = editor.querySelector('input[name="shipping_portion_idr"]');
   var refLabel = editor.querySelector('.rq-ref-label-text');
   var isPayroll = category && category.value === 'payroll';
+  // 2026-09-29: the Outbound Shipping portion split only applies to a plain
+  // item purchase with no shipping already implied — NOT 'inbound_shipping'/
+  // 'item_purchase_and_inbound_shipping', which already represent a
+  // different (inbound freight-in) shipping concept — see
+  // webapp/review_queue_bp.py's label_row validation, the real server-side
+  // guard this only mirrors client-side.
+  var isPlainCogs = category && (category.value === 'cogs_purchase' || category.value === 'item_purchase');
 
   if (loanInput) {
     loanInput.disabled = !isPayroll;
@@ -143,6 +155,12 @@ function rqCategoryChanged(rowId) {
       // stale amount never lingers if the user flips categories back and
       // forth before eventually submitting.
       loanInput.value = '';
+    }
+  }
+  if (shippingPortionInput) {
+    shippingPortionInput.disabled = !isPlainCogs;
+    if (!isPlainCogs) {
+      shippingPortionInput.value = '';
     }
   }
   if (refLabel) {

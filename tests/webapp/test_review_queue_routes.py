@@ -692,3 +692,220 @@ def test_row_markup_wired_for_ajax_save(client, wtopology):
     assert 'class="rq-editor-form' in html
     assert f'id="rq-editor-error-{row_id}"' in html
     assert "rq-editor-form" in html and "addEventListener('submit'" in html
+
+
+# ---------------------------------------------------------------------------
+# Optional bundled item-purchase + outbound-shipping split (2026-09-29). See
+# CLAUDE.md and ledger.posting.post_cogs_purchase_with_shipping_split. Real
+# trigger: a Master Account bank line, "TRSF E-BANKING DB ... / BANK NEO
+# COM ...", -Rp 4,140,000, confirmed by the user as Rp 2,140,000 item
+# purchase + Rp 2,000,000 outbound shipping bundled into one payment.
+# ---------------------------------------------------------------------------
+
+
+def test_cogs_row_can_save_with_shipping_portion_amount(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-4140000)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "cogs_purchase",
+            "shipping_portion_idr": "2000000",
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "cogs_purchase"
+    assert row.shipping_portion_idr == 2000000
+
+
+def test_item_purchase_row_can_also_save_with_shipping_portion_amount(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-4140000)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "item_purchase",
+            "shipping_portion_idr": "2000000",
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "item_purchase"
+    assert row.shipping_portion_idr == 2000000
+
+
+def test_cogs_row_can_still_save_with_no_shipping_portion(client, wtopology):
+    """Leaving the field blank is a no-op — the row posts exactly as it
+    always has (verified end-to-end by the ingestion-layer tests)."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-300000)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "cogs_purchase", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "cogs_purchase"
+    assert row.shipping_portion_idr is None
+
+
+def test_shipping_portion_rejected_for_non_cogs_category(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-4140000)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "operating_expense",
+            "shipping_portion_idr": "2000000",
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None  # rejected entirely, never silently saved with the wrong category
+
+
+def test_shipping_portion_rejected_for_inbound_shipping_category(client, wtopology):
+    """'inbound_shipping' already represents a DIFFERENT (inbound
+    freight-in) shipping concept — must not accept the outbound-shipping
+    split field."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-4140000)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "inbound_shipping",
+            "shipping_portion_idr": "2000000",
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None
+
+
+def test_shipping_portion_rejected_for_item_purchase_and_inbound_shipping_category(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-4140000)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "item_purchase_and_inbound_shipping",
+            "shipping_portion_idr": "2000000",
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None
+
+
+def test_shipping_portion_rejected_when_zero(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-4140000)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "cogs_purchase", "shipping_portion_idr": "0", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None
+
+
+def test_shipping_portion_rejected_when_negative(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-4140000)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "cogs_purchase", "shipping_portion_idr": "-1", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None
+
+
+def test_shipping_portion_rejected_when_equal_to_total(client, wtopology):
+    """There must be something left over for COGS — a shipping portion
+    equal to the row's own total amount is invalid."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-4140000)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "cogs_purchase", "shipping_portion_idr": "4140000", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None
+
+
+def test_shipping_portion_rejected_when_greater_than_total(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-4140000)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "cogs_purchase", "shipping_portion_idr": "5000000", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None
+
+
+def test_shipping_portion_field_disabled_in_markup_for_non_cogs_category(client, wtopology):
+    """Mirrors test_row_and_editor_markup_wired_for_loan_field_toggle — the
+    Outbound Shipping portion input starts disabled in the rendered markup
+    for a row whose category isn't 'cogs_purchase'/'item_purchase' yet."""
+    import re
+
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    resp = client.get(f"/review-queue/?period={PERIOD.isoformat()[:7]}")
+    html = resp.data.decode()
+    editor_match = re.search(rf'id="rq-editor-{row_id}".*?</tr>', html, re.DOTALL)
+    assert editor_match is not None
+    assert re.search(r'name="shipping_portion_idr"[^>]*disabled', editor_match.group(0))
