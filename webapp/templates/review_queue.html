@@ -52,7 +52,7 @@
           {% else %}<span class="badge amber">Needs Review</span>{% endif %}
         </td>
         <td id="rq-category-{{ row.id }}">{{ row.category or '—' }}</td>
-        <td>
+        <td id="rq-posted-{{ row.id }}">
           {% if row.posted_at %}<span class="badge green">✓ {{ row.posted_at.strftime('%Y-%m-%d %H:%M') }}</span>
           {% elif row.sign_mismatch_reason %}<span class="badge red" title="{{ row.sign_mismatch_reason }}">⚠ Not posted — sign/category mismatch</span>
           {% elif row.missing_reference_reason %}<span class="badge red" title="{{ row.missing_reference_reason }}">⚠ Not posted — missing employee reference</span>
@@ -62,17 +62,17 @@
         </td>
       </tr>
       {% if row.sign_mismatch_reason and not row.posted_at %}
-      <tr class="figure-row">
+      <tr class="figure-row" id="rq-reason-sign-{{ row.id }}">
         <td colspan="7"><span class="small">{{ row.sign_mismatch_reason }}</span></td>
       </tr>
       {% endif %}
       {% if row.missing_reference_reason and not row.posted_at %}
-      <tr class="figure-row">
+      <tr class="figure-row" id="rq-reason-ref-{{ row.id }}">
         <td colspan="7"><span class="small">{{ row.missing_reference_reason }}</span></td>
       </tr>
       {% endif %}
       {% if row.posting_error_reason and not row.posted_at %}
-      <tr class="figure-row">
+      <tr class="figure-row" id="rq-reason-error-{{ row.id }}">
         <td colspan="7"><span class="small">{{ row.posting_error_reason }}</span></td>
       </tr>
       {% endif %}
@@ -222,6 +222,34 @@ document.addEventListener('DOMContentLoaded', function () {
             if (categoryCell) {
               categoryCell.textContent = result.data.category_label || '—';
             }
+
+            // Posted-cell fix (2026-09-29): a successful save from this
+            // route always means "labeled, not posted, no error reason" —
+            // review_queue_bp.py's label_row now explicitly clears
+            // sign_mismatch_reason/missing_reference_reason/
+            // posting_error_reason on every successful save (it previously
+            // left a stale reason from an earlier failed post_pending_rows
+            // attempt in place), so the server-side Posted-column chain in
+            // this same template would render exactly this markup — the
+            // plain "Queued for next sync" branch — on the next page load.
+            // Mirrored here verbatim so there's no post-save/post-reload
+            // mismatch.
+            var postedCell = document.getElementById('rq-posted-' + rowId);
+            if (postedCell) {
+              postedCell.innerHTML = '<span class="small">Queued for next sync</span>';
+            }
+            // Any stale red reason-explanation row from an earlier failed
+            // post attempt is now out of date too (the backend just cleared
+            // the underlying reason) — remove it so the DOM matches what a
+            // reload would show (none of these render once posted_at is
+            // still null but every reason field is null).
+            ['rq-reason-sign-', 'rq-reason-ref-', 'rq-reason-error-'].forEach(function (prefix) {
+              var reasonRow = document.getElementById(prefix + rowId);
+              if (reasonRow) {
+                reasonRow.remove();
+              }
+            });
+
             var editor = document.getElementById('rq-editor-' + rowId);
             if (editor) {
               editor.classList.add('hidden-row');

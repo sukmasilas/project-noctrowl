@@ -536,6 +536,65 @@ def test_row_and_editor_markup_wired_for_loan_field_toggle(client, wtopology):
     assert re.search(r'name="loan_repayment_amount_idr"[^>]*disabled', editor_match.group(0))
 
 
+def test_row_markup_wired_with_stable_posted_cell_id(client, wtopology):
+    """2026-09-29 (Posted-cell AJAX fix): the Posted column's <td> needs a
+    stable per-row id, same convention as rq-category-<id>, so the AJAX
+    success handler in review_queue.html can update it in place without a
+    page reload."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    resp = client.get(f"/review-queue/?period={PERIOD.isoformat()[:7]}")
+    html = resp.data.decode()
+    assert f'id="rq-posted-{row_id}"' in html
+
+
+def test_successful_relabel_clears_stale_posting_error_reason(client, wtopology):
+    """2026-09-29 (Posted-cell AJAX fix): a row can reach label_row a second
+    time already carrying a stale sign_mismatch_reason / missing_reference_
+    reason / posting_error_reason left over from an earlier failed
+    post_pending_rows attempt (that's exactly what flips it back to
+    needs_review with a reason set, but posted_at still NULL, making the
+    editor reachable again — see ingestion/matching.py).
+
+    Before this fix, a successful relabel left the OLD reason on the row, so
+    the server-side Posted-column template would keep showing the stale red
+    "Not posted — ..." badge even though the row was freshly relabeled and
+    genuinely queued for the next sync with no error yet. A successful save
+    must always mean 'labeled, not posted, no error reason' — the same
+    invariant post_pending_rows itself already guarantees on an actual
+    successful post.
+    """
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(
+        conn,
+        source_document_id=src_id,
+        transaction_date=DAY,
+        category="revenue_settlement",
+        posting_error_reason="Failed to post while classified as 'revenue_settlement': some earlier error.",
+    )
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "operating_expense", "consignor_item_ref": "", "period": PERIOD.isoformat()},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["success"] is True
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "operating_expense"
+    assert row.posting_error_reason is None
+    assert row.sign_mismatch_reason is None
+    assert row.missing_reference_reason is None
+    assert row.posted_at is None
+
+
 def test_row_markup_wired_for_ajax_save(client, wtopology):
     """2026-09-29 UX fix: the row/editor markup needed by review_queue.html's
     fetch() handler must actually be present — the category cell has a

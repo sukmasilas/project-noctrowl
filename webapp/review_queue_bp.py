@@ -283,6 +283,25 @@ def label_row(row_id: int):
             consignor_item_ref=consignor_item_ref,
             loan_repayment_amount_idr=loan_repayment_amount_idr,
             labeled_at=_dt.datetime.now(_dt.timezone.utc),
+            # 2026-09-29 (AJAX Posted-cell fix): a row can reach this route a
+            # second time already carrying a stale sign_mismatch_reason /
+            # missing_reference_reason / posting_error_reason from an earlier
+            # failed post_pending_rows attempt (see ingestion/matching.py —
+            # that's exactly what flips it back to needs_review with a reason
+            # set, and not posted_at, so the editor here is reachable again).
+            # Without clearing these, a freshly-relabeled row would still
+            # show its OLD red "Not posted — ..." reason (review_queue.html's
+            # Posted-column chain checks these before labeled_at) even though
+            # nothing has attempted to re-post it yet under the new label.
+            # Cleared here so a successful label_row response always means
+            # exactly "labeled, not posted, no error reason" — the same
+            # clearing post_pending_rows itself already does on an actual
+            # successful post (see its own sign_mismatch_reason=None etc.) —
+            # the next sync re-validates and will re-set these if the new
+            # label still doesn't work.
+            sign_mismatch_reason=None,
+            missing_reference_reason=None,
+            posting_error_reason=None,
         )
     )
     if result.rowcount == 0:
