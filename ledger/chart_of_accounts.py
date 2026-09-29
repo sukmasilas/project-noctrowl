@@ -42,6 +42,46 @@ ACCOUNT_TYPES = [
     # ingestion/matching.py's 'employee_loan_disbursement'/'payroll'
     # categories for how it's posted to.
     ("EMPLOYEE_LOAN_RECEIVABLE", "Employee Loan Receivable", "asset", "debit", "consolidated", False),
+    # Added 2026-09-29 — a down-payment/deposit paid toward inventory that
+    # hasn't been delivered yet (real trigger: a Master Account bank line,
+    # "TRSF E-BANKING DB ... / DP Box op / FARIZ PRADANA", -Rp 9,840,000,
+    # confirmed by the user as a deposit for goods not yet received). This is
+    # DELIBERATELY DISTINCT from CLAUDE.md's Stock-model COGS-timing rule
+    # ("COGS recognized at time of purchase, not held as an Inventory
+    # asset") — that rule assumes the purchase corresponds to something
+    # actually RECEIVED, even if it can't be tied to a specific eventual sale
+    # item. A deposit for goods that haven't arrived yet has nothing to
+    # expense: booking it as COGS immediately would overstate expenses for
+    # goods not in hand, and if the deal falls through, it would need the
+    # same COGS Refund/Purchase Return workaround (see that category, added
+    # 2026-09-29) for something that was never really a completed purchase.
+    # Tracked as ONE aggregate asset account (consolidated — like COGS
+    # itself, these are Master-Account-funded, never per-eBay-account or
+    # per-wallet-group) with a per-transaction deposit reference retained on
+    # the posted journal line (reusing the existing generic
+    # ``consignor_item_ref`` field — same "one aggregate account + per
+    # -transaction reference" pattern already used for CONSIGNOR_PAYABLE and
+    # EMPLOYEE_LOAN_RECEIVABLE above), NOT a full per-supplier/per-PO GL
+    # sub-ledger.
+    #
+    # Resolution mechanism (see ledger/posting.py's post_inventory_deposit /
+    # post_inventory_deposit_received and webapp/inventory_deposits_bp.py):
+    # unlike EMPLOYEE_LOAN_RECEIVABLE (which resolves via cash installments
+    # over time, always tied to a real bank line) a deposit resolves in ONE
+    # LUMP conversion-to-COGS event when the goods actually arrive — an event
+    # that has NO cash movement of its own (a human simply confirms "the
+    # goods showed up"), unlike every other review-queue-driven posting in
+    # this codebase. Because of that structural difference, the resolution
+    # step is deliberately NOT a review-queue category (there is often no
+    # bank line to hang it on — see webapp/inventory_deposits_bp.py's module
+    # docstring for the full reasoning) — only the INITIAL deposit payment
+    # (a real, bank-line-triggered cash outflow) gets a review-queue category
+    # ('inventory_deposit', see webapp/review_queue_bp.py's CATEGORY_OPTIONS
+    # and ingestion/matching.py). Visibility into outstanding deposits reuses
+    # the existing Subsidiary Ledger screen (webapp/subsidiary_ledger_bp.py's
+    # SUBSIDIARY_LEDGER_ACCOUNTS) rather than new UI — the resolution action
+    # itself lives on its own small, dedicated screen.
+    ("INVENTORY_DEPOSITS", "Inventory Deposits / Advances to Suppliers", "asset", "debit", "consolidated", False),
     # Liabilities
     ("CONSIGNOR_PAYABLE", "Consignor Payable", "liability", "credit", "consolidated", False),
     # Equity

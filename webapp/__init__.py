@@ -120,6 +120,7 @@ def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
     from webapp.bank_reconciliation_bp import bp as bank_reconciliation_bp
     from webapp.documents_bp import bp as documents_bp
     from webapp.general_ledger_bp import bp as general_ledger_bp
+    from webapp.inventory_deposits_bp import bp as inventory_deposits_bp
     from webapp.journal_entries_bp import bp as journal_entries_bp
     from webapp.report_extras import register_template_filters
     from webapp.reports_bp import bp as reports_bp
@@ -137,6 +138,7 @@ def create_app(*, engine: Engine | None = None, drive_client=None) -> Flask:
     app.register_blueprint(journal_entries_bp)
     app.register_blueprint(general_ledger_bp)
     app.register_blueprint(subsidiary_ledger_bp)
+    app.register_blueprint(inventory_deposits_bp)
 
     register_template_filters(app)
 

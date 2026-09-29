@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as _dt
 from decimal import Decimal
 
+from ledger import posting
 from ledger.posting import (
     create_consignment_sale,
     post_consignment_sale,
@@ -32,11 +33,14 @@ PERIOD = _dt.date(2026, 7, 1)
 RATE = Decimal("16300")
 
 
-def test_list_subsidiary_ledger_accounts_returns_both_wired_accounts(wtopology):
+def test_list_subsidiary_ledger_accounts_returns_all_wired_accounts(wtopology):
+    """Updated 2026-09-29: INVENTORY_DEPOSITS added as a third subsidiary
+    -ledger control account (see ledger/chart_of_accounts.py and
+    webapp/subsidiary_ledger_bp.py's SUBSIDIARY_LEDGER_ACCOUNTS)."""
     conn, topo = wtopology
     accounts = list_subsidiary_ledger_accounts(conn)
     codes = [a.account_type_code for a in accounts]
-    assert codes == ["CONSIGNOR_PAYABLE", "EMPLOYEE_LOAN_RECEIVABLE"]
+    assert codes == ["CONSIGNOR_PAYABLE", "EMPLOYEE_LOAN_RECEIVABLE", "INVENTORY_DEPOSITS"]
 
 
 def test_consignor_payable_empty_state_reconciles_at_exactly_zero(wtopology):
@@ -172,6 +176,41 @@ def test_employee_loan_receivable_shows_real_fariz_style_balance_and_reconciles(
     recon = reconciliation(conn, account_option=receivable, period_month=PERIOD, balances=balances)
     assert recon.control_account_balance_idr == Decimal("24000000")
     assert recon.sum_of_sub_entities_idr == Decimal("24000000")
+    assert recon.matches is True
+
+
+def test_inventory_deposits_shows_real_fariz_style_balance_and_reconciles(wtopology):
+    """Real-shaped scenario (2026-09-29): a Rp 9,840,000 deposit paid toward
+    inventory not yet received, then a partial Rp 4,000,000 conversion to
+    COGS once part of the goods arrive — leaving Rp 5,840,000 still
+    outstanding on this one deposit reference.
+    """
+    conn, topo = wtopology
+    posting.post_inventory_deposit(
+        conn,
+        entry_date=_dt.date(2026, 6, 1),
+        amount_idr=Decimal("9840000"),
+        deposit_ref="DP Box op — Fariz — 2026-06-01",
+    )
+    posting.post_inventory_deposit_received(
+        conn,
+        entry_date=DAY,
+        amount_idr=Decimal("4000000"),
+        deposit_ref="DP Box op — Fariz — 2026-06-01",
+    )
+    conn.commit()
+
+    all_accounts = list_all_accounts(conn)
+    deposits_account = next(a for a in all_accounts if a.account_type_code == "INVENTORY_DEPOSITS")
+
+    balances = sub_entity_balances(conn, account_option=deposits_account, period_month=PERIOD)
+    assert len(balances) == 1
+    assert balances[0].reference == "DP Box op — Fariz — 2026-06-01"
+    assert balances[0].balance_idr == Decimal("5840000")  # 9,840,000 - 4,000,000
+
+    recon = reconciliation(conn, account_option=deposits_account, period_month=PERIOD, balances=balances)
+    assert recon.control_account_balance_idr == Decimal("5840000")
+    assert recon.sum_of_sub_entities_idr == Decimal("5840000")
     assert recon.matches is True
 
 

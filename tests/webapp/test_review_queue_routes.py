@@ -223,6 +223,78 @@ def test_employee_loan_disbursement_rejects_whitespace_only_employee_reference(c
     assert row.category is None  # rejected entirely, never silently saved as "labeled" with a blank reference
 
 
+def test_inventory_deposit_is_a_selectable_category(client, wtopology):
+    """2026-09-29: the new 'inventory_deposit' category must be selectable
+    from the UI, same interaction pattern as every other category."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    index_resp = client.get(f"/review-queue/?period={PERIOD.isoformat()[:7]}")
+    assert index_resp.status_code == 200
+    assert b"Inventory Deposit (Advance to Supplier)" in index_resp.data
+
+
+def test_inventory_deposit_saves_with_deposit_reference(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(
+        conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-9840000
+    )
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "inventory_deposit", "consignor_item_ref": "DP Box op", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "inventory_deposit"
+    assert row.consignor_item_ref == "DP Box op"
+    assert row.posted_at is None  # saving a label never posts by itself
+
+
+def test_inventory_deposit_requires_deposit_reference(client, wtopology):
+    """Same reasoning as employee_loan_disbursement above — an aggregate
+    asset account with no per-supplier sub-ledger needs a real
+    per-transaction reference, never silently saved blank."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(
+        conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-9840000
+    )
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "inventory_deposit", "consignor_item_ref": "", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None  # rejected entirely, never silently saved with no deposit reference
+
+
+def test_inventory_deposit_rejects_whitespace_only_deposit_reference(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(
+        conn, source_document_id=src_id, transaction_date=DAY, amount_idr=-9840000
+    )
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "inventory_deposit", "consignor_item_ref": "   ", "period": PERIOD.isoformat()},
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None  # rejected entirely, never silently saved as "labeled" with a blank reference
+
+
 def test_payroll_row_can_save_with_loan_repayment_amount(client, wtopology):
     conn, topo = wtopology
     src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
@@ -303,7 +375,12 @@ def test_category_options_follow_pl_statement_order():
     'customer_refund' is revenue-side (posts to Sales Returns & Allowances,
     a contra-revenue line) — placed right after 'revenue_settlement'.
     'cogs_refund' is COGS-side (a credit reducing the existing COGS account)
-    — placed with the other COGS labels, right before 'payroll'."""
+    — placed with the other COGS labels, right before 'payroll'.
+
+    Updated again 2026-09-29 for 'inventory_deposit' (a new, non-P&L
+    balance-sheet asset category, same grouping as 'employee_loan_
+    disbursement' — see CLAUDE.md's INVENTORY_DEPOSITS note) — placed right
+    after 'employee_loan_disbursement'."""
     expected_order = [
         "revenue_settlement",
         "customer_refund",
@@ -322,6 +399,7 @@ def test_category_options_follow_pl_statement_order():
         "internal_transfer",
         "consignment_payout",
         "employee_loan_disbursement",
+        "inventory_deposit",
         "owners_draw",
         "owners_contribution",
         "other",

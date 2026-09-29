@@ -3,18 +3,30 @@ the individual real-world party behind each transaction — one level more
 granular than ``webapp/general_ledger_bp.py`` (read that module's docstring
 first; this screen follows the same conceptual approach).
 
-Two control accounts are wired up for now, per Main-agent's brief:
+Three control accounts are wired up for now, per Main-agent's brief:
 - CONSIGNOR_PAYABLE (aggregate liability) — by individual consignor.
 - EMPLOYEE_LOAN_RECEIVABLE (aggregate asset) — by individual employee.
+- INVENTORY_DEPOSITS (aggregate asset, added 2026-09-29) — by individual
+  deposit reference. This is exactly the "a way to see currently-outstanding
+  inventory deposits (which ones, how much, since when)" visibility Main
+  -agent's brief asked for — reused here for free rather than building a new
+  screen, since this control account already carries the exact same
+  per-transaction reference pattern (``consignor_item_ref``) as the other
+  two. The ACTUAL resolution action (converting an outstanding deposit to
+  COGS once goods arrive) does NOT live here — this screen stays strictly
+  read-only, per its own docstring below — see
+  ``webapp/inventory_deposits_bp.py`` for that separate, small, write
+  -capable screen.
 
-Both already carry a per-transaction party reference on every posted line
-(``journal_lines.consignor_item_ref`` — reused for both consignors and
-employees, see CLAUDE.md's Core accounting rules and
-``ledger/chart_of_accounts.py``'s EMPLOYEE_LOAN_RECEIVABLE note). Payroll is
-explicitly NOT added as a third subsidiary ledger yet — not every payroll
-row carries an employee reference today (only loan-repayment rows do), so a
-Payroll subsidiary ledger would silently misrepresent employees with no
-loan as having zero payroll activity. Revisit once that gap is closed.
+All three already carry a per-transaction party reference on every posted
+line (``journal_lines.consignor_item_ref`` — reused for consignors,
+employees, and now inventory-deposit references, see CLAUDE.md's Core
+accounting rules and ``ledger/chart_of_accounts.py``'s EMPLOYEE_LOAN_
+RECEIVABLE/INVENTORY_DEPOSITS notes). Payroll is explicitly NOT added as a
+fourth subsidiary ledger yet — not every payroll row carries an employee
+reference today (only loan-repayment rows do), so a Payroll subsidiary
+ledger would silently misrepresent employees with no loan as having zero
+payroll activity. Revisit once that gap is closed.
 
 The defining property of a subsidiary ledger, and the one thing this screen
 must show explicitly rather than assume: the sum of every sub-entity's own
@@ -65,6 +77,7 @@ ZERO = Decimal("0")
 SUBSIDIARY_LEDGER_ACCOUNTS: list[str] = [
     "CONSIGNOR_PAYABLE",
     "EMPLOYEE_LOAN_RECEIVABLE",
+    "INVENTORY_DEPOSITS",
 ]
 
 

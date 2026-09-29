@@ -1587,3 +1587,129 @@ def post_payroll_with_loan_repayment(
         credit(paying_id, net_transfer_idr, **common_kwargs),
     ]
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
+
+
+# ---------------------------------------------------------------------------
+# Inventory deposits (added 2026-09-29) — down-payments/deposits paid toward
+# inventory not yet received. See ledger/chart_of_accounts.py's
+# INVENTORY_DEPOSITS note for the full accounting reasoning (why this is
+# DISTINCT from the Stock-model "COGS at time of purchase" rule: that rule
+# assumes something was actually RECEIVED; a deposit for undelivered goods
+# has nothing to expense yet).
+#
+# Two functions, two genuinely different shapes — NOT a copy of the
+# EMPLOYEE_LOAN_RECEIVABLE pattern, because the underlying money mechanics
+# differ (a loan repays in cash installments over time; a deposit resolves
+# in one lump, non-cash conversion-to-expense event when goods arrive):
+#   - post_inventory_deposit: a real cash outflow (bank-line-triggered, via
+#     the review queue's 'inventory_deposit' category) — debits
+#     INVENTORY_DEPOSITS, credits whatever paid it.
+#   - post_inventory_deposit_received: NO cash movement at all — a human
+#     confirming "the goods arrived" converts the deposit straight to COGS.
+#     Deliberately NOT reachable from the review queue (see
+#     webapp/inventory_deposits_bp.py for where this is actually called from
+#     and why) — a 2-line, non-cash reclassification entry, same shape as a
+#     depreciation or inventory adjustment entry in conventional accounting.
+# ---------------------------------------------------------------------------
+
+
+def post_inventory_deposit(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    deposit_ref: str,
+    memo: str | None = None,
+) -> int:
+    """The INITIAL deposit payment — a real cash outflow, always funded from
+    the consolidated BCA Main account (deliberately hardcoded, no
+    paying_account_type_code parameter — same shape as ``post_cogs_purchase``
+    /``post_cogs_refund`` above, and for the identical reason: per CLAUDE.md's
+    Accounting scope, inventory purchases/deposits are Master-Account-funded
+    and never trace back to one specific eBay account or wallet-group).
+
+    ``deposit_ref`` is REQUIRED (traceability, same pattern as
+    ``consignor_item_ref``/``employee_ref`` elsewhere in this module) — this
+    is the only way to later identify which outstanding deposit a
+    ``post_inventory_deposit_received`` conversion clears, on an aggregate
+    account with no per-supplier/per-PO sub-ledger.
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_idr <= 0:
+        raise ValueError("amount_idr must be > 0 — a deposit is a real, positive amount paid out.")
+    if not deposit_ref:
+        raise ValueError("deposit_ref is required (traceability — identifies this deposit for later resolution).")
+
+    deposits_id = _singleton(conn, "INVENTORY_DEPOSITS")
+    bca_main_id = _singleton(conn, "BCA_MAIN")
+
+    lines = [
+        debit(deposits_id, amount_idr, consignor_item_ref=deposit_ref),
+        credit(bca_main_id, amount_idr, consignor_item_ref=deposit_ref),
+    ]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
+
+
+def post_inventory_deposit_received(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    deposit_ref: str,
+    memo: str | None = None,
+) -> int:
+    """Convert an outstanding inventory deposit to COGS once the goods it was
+    paid toward have actually been received — matching this project's
+    existing "no per-item inventory tracking, just expense it in aggregate
+    once the purchase is actually complete" pattern (see CLAUDE.md's
+    Business model, Stock model). A plain 2-line, NON-CASH entry: debit COGS,
+    credit INVENTORY_DEPOSITS — no cash account is touched here (see the
+    module-level note above for why this is deliberately NOT a review-queue
+    -driven posting).
+
+    ``amount_idr`` is "the amount of the *original* deposit being cleared"
+    (per Main-agent's brief) — normally the deposit's full outstanding
+    balance for ``deposit_ref``, but a partial conversion is allowed (e.g. a
+    delivery that only partially fulfills a purchase order) as long as it
+    doesn't exceed what's actually still outstanding.
+
+    SAFETY CHECK (deliberately built into this function, not left to the
+    caller): refuses to convert more than ``deposit_ref``'s own current
+    outstanding balance on INVENTORY_DEPOSITS (sum of debits minus sum of
+    credits for that reference, on this debit-normal account) — protects
+    against a double-submitted conversion or a typo'd amount silently
+    pushing a specific deposit's traceable balance negative, independent of
+    whichever caller (webapp route, script) invokes this.
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_idr <= 0:
+        raise ValueError("amount_idr must be > 0 — this converts a real, positive deposit balance to COGS.")
+    if not deposit_ref:
+        raise ValueError("deposit_ref is required (traceability — identifies which outstanding deposit this clears).")
+
+    deposits_id = _singleton(conn, "INVENTORY_DEPOSITS")
+    cogs_id = _singleton(conn, "COGS")
+
+    outstanding = conn.execute(
+        select(
+            func.coalesce(func.sum(journal_lines.c.debit_amount_idr), 0)
+            - func.coalesce(func.sum(journal_lines.c.credit_amount_idr), 0)
+        ).where(
+            journal_lines.c.account_id == deposits_id,
+            journal_lines.c.consignor_item_ref == deposit_ref,
+        )
+    ).scalar_one()
+    outstanding = Decimal(outstanding)
+    if amount_idr > outstanding:
+        raise ValueError(
+            f"Cannot convert {amount_idr} for deposit_ref={deposit_ref!r} — only {outstanding} is "
+            "currently outstanding on INVENTORY_DEPOSITS for this reference."
+        )
+
+    lines = [
+        debit(cogs_id, amount_idr, consignor_item_ref=deposit_ref),
+        credit(deposits_id, amount_idr, consignor_item_ref=deposit_ref),
+    ]
+    return _insert_journal_entry(
+        conn, entry_date=entry_date, source_type="inventory_deposit_received", lines=lines, memo=memo
+    )

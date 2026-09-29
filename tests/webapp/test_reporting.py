@@ -740,3 +740,103 @@ def test_balance_sheet_account_instance_drilldown_sums_to_the_line_balance(proto
     lines = reporting.account_instance_drilldown(conn, account_id=bca_main_line.account_id, period_month=PERIOD)
     summed = sum((l.debit_idr - l.credit_idr for l in lines), Decimal("0"))
     assert summed == bca_main_line.balance_idr
+
+
+# ---------------------------------------------------------------------------
+# INVENTORY_DEPOSITS (added 2026-09-29) — new asset account for down-payments
+# /deposits paid toward inventory not yet received. See ledger/chart_of_
+# accounts.py's inline note and the real trigger: a Master Account bank
+# line, "DP Box op / FARIZ PRADANA", -Rp 9,840,000.
+# ---------------------------------------------------------------------------
+
+
+def test_cash_flow_inventory_deposit_payment_is_operating_outflow(prototype):
+    """The INITIAL deposit payment is a real cash outflow — must post as its
+    own bucketed Operating outflow and reconcile exactly, same shape as
+    test_cash_flow_cogs_purchase_is_operating_outflow above.
+    """
+    conn, topo = prototype
+    posting.post_inventory_deposit(
+        conn, entry_date=DAY, amount_idr=Decimal("9840000"), deposit_ref="DP Box op"
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert _bucket(report, "inventory_deposits") == Decimal("-9840000")
+    assert report.total_operating_idr == Decimal("-9840000")
+    assert report.difference_idr == Decimal("0")
+
+
+def test_cash_flow_inventory_deposits_negative_control_breaks_identity_if_whitelist_omits_it(prototype, monkeypatch):
+    """Negative-control regression test (per CLAUDE.md's Packaging Supplies
+    precedent): proves the Beginning+NetChange=Ending identity ACTUALLY
+    DEPENDS on INVENTORY_DEPOSITS being present in
+    webapp.reporting._CASH_FLOW_CODE_TO_KEY, not merely that the code
+    doesn't crash without it.
+    """
+    conn, topo = prototype
+    patched = dict(reporting._CASH_FLOW_CODE_TO_KEY)
+    del patched["INVENTORY_DEPOSITS"]
+    monkeypatch.setattr(reporting, "_CASH_FLOW_CODE_TO_KEY", patched)
+
+    posting.post_inventory_deposit(
+        conn, entry_date=DAY, amount_idr=Decimal("9840000"), deposit_ref="DP Box op"
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert _bucket(report, "inventory_deposits") is None  # bucket silently vanished
+    assert report.difference_idr == Decimal("-9840000")
+
+
+def test_cash_flow_inventory_deposit_conversion_to_cogs_never_appears_as_a_phantom_cash_movement(prototype):
+    """The LATER conversion-to-COGS event (post_inventory_deposit_received)
+    has NO cash leg at all — it must be excluded from the Cash Flow
+    Statement entirely (never a phantom 'Cash paid for COGS purchases'
+    outflow, never a phantom 'Cash paid — Inventory Deposits' inflow), even
+    though both COGS and INVENTORY_DEPOSITS are legitimately whitelisted for
+    their OTHER, real cash-touching events. See webapp.reporting's THIRD
+    deliberate exclusion note.
+    """
+    conn, topo = prototype
+    posting.post_inventory_deposit(
+        conn, entry_date=DAY, amount_idr=Decimal("9840000"), deposit_ref="DP Box op"
+    )
+    posting.post_inventory_deposit_received(
+        conn, entry_date=DAY, amount_idr=Decimal("9840000"), deposit_ref="DP Box op"
+    )
+    report = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    # Only the ORIGINAL deposit payment's real cash outflow shows — the
+    # conversion contributes nothing further to either bucket.
+    assert _bucket(report, "inventory_deposits") == Decimal("-9840000")
+    assert _bucket(report, "cogs_purchases") is None
+    assert report.total_operating_idr == Decimal("-9840000")
+    assert report.difference_idr == Decimal("0")
+
+    # But the conversion DOES correctly show up as a real period expense on
+    # the P&L — it's a genuine COGS recognition event, just not a cash one.
+    pnl = reporting.pnl_report(conn, period_month=PERIOD)
+    assert pnl.cogs_idr == Decimal("9840000")
+
+
+def test_balance_sheet_shows_inventory_deposits_as_its_own_asset_line(prototype):
+    conn, topo = prototype
+    posting.post_inventory_deposit(
+        conn, entry_date=DAY, amount_idr=Decimal("9840000"), deposit_ref="DP Box op"
+    )
+    bs = reporting.balance_sheet_report(conn, period_month=PERIOD)
+    deposits_line = next(l for l in bs.asset_lines if l.account_type_code == "INVENTORY_DEPOSITS")
+    assert deposits_line.balance_idr == Decimal("9840000")
+    assert bs.difference_idr == Decimal("0")
+    assert bs.total_assets_idr == bs.total_liabilities_and_equity_idr
+
+
+def test_balance_sheet_inventory_deposits_drops_once_fully_converted(prototype):
+    conn, topo = prototype
+    posting.post_inventory_deposit(
+        conn, entry_date=DAY, amount_idr=Decimal("9840000"), deposit_ref="DP Box op"
+    )
+    posting.post_inventory_deposit_received(
+        conn, entry_date=DAY, amount_idr=Decimal("9840000"), deposit_ref="DP Box op"
+    )
+    bs = reporting.balance_sheet_report(conn, period_month=PERIOD)
+    deposits_line = next(l for l in bs.asset_lines if l.account_type_code == "INVENTORY_DEPOSITS")
+    assert deposits_line.balance_idr == Decimal("0")
+    assert bs.difference_idr == Decimal("0")
+    assert bs.total_assets_idr == bs.total_liabilities_and_equity_idr

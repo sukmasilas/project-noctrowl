@@ -604,6 +604,14 @@ _DIRECTIONAL_CATEGORY_SIGNS: dict[str, str] = {
     # returned, and a supplier's refund for undelivered inventory). See
     # ledger.posting.post_cogs_refund.
     "cogs_refund": "inflow",
+    # Added 2026-09-29 (new INVENTORY_DEPOSITS asset account — see
+    # ledger/chart_of_accounts.py). A deposit PAYMENT is always an outflow
+    # (real trigger: a Master Account bank line, "DP Box op / FARIZ
+    # PRADANA", -Rp 9,840,000). The LATER conversion-to-COGS event
+    # (post_inventory_deposit_received) is deliberately NOT reachable via
+    # this review-queue category at all — see
+    # webapp/inventory_deposits_bp.py.
+    "inventory_deposit": "outflow",
 }
 
 
@@ -660,6 +668,17 @@ def _missing_employee_ref_reason(category: str, consignor_item_ref: str | None, 
         return (
             "A Payroll row with a loan repayment amount requires a real employee reference "
             "(Consignor/Item Ref) to know whose loan balance to draw down — not posted."
+        )
+    # Added 2026-09-29 (new INVENTORY_DEPOSITS asset account) — same
+    # reasoning as 'employee_loan_disbursement' above: an aggregate asset
+    # account with no per-supplier sub-ledger needs a real per-transaction
+    # reference to know which outstanding deposit a future
+    # post_inventory_deposit_received conversion should clear.
+    if category == "inventory_deposit" and not ref:
+        return (
+            "Category 'inventory_deposit' requires a real deposit reference "
+            "(Consignor/Item Ref) to know which outstanding deposit this is, so it can be "
+            "resolved later when the goods arrive — not posted."
         )
     return None
 
@@ -1059,6 +1078,40 @@ def _post_one_row(conn: Connection, row) -> int | None:
                 "re-check the classification or scope of this row."
             )
         return posting.post_cogs_refund(conn, entry_date=entry_date, amount_idr=abs(row.amount_idr), memo=row.raw_description)
+
+    if row.category == "inventory_deposit":
+        # Added 2026-09-29 — the INITIAL down-payment/deposit paid toward
+        # inventory not yet received (see ledger.posting.post_inventory_
+        # deposit's docstring for the full reasoning). Deliberately hardcoded
+        # to BCA_MAIN, no scope parameter — same shape as 'cogs_refund'/
+        # 'cogs_purchase' above, mirroring INVENTORY_DEPOSITS being a plain
+        # consolidated singleton account funded from the shared Master
+        # Account (never per-eBay-account or per-wallet-group — see
+        # CLAUDE.md's Accounting scope). If this row is actually scoped to a
+        # wallet-group or eBay account, that's a genuine mismatch this
+        # function has no way to post correctly against the right asset
+        # account — raise rather than silently debit BCA_MAIN for money that
+        # didn't land there (same treatment as 'cogs_refund'/
+        # '_post_customer_refund''s unsupported-scope cases above).
+        if row.wallet_group_id is not None or row.ebay_account_id is not None:
+            raise ValueError(
+                "Category 'inventory_deposit' only supports a Master Account (consolidated) bank "
+                "line — INVENTORY_DEPOSITS is a plain consolidated singleton account (see "
+                "ledger.posting.post_inventory_deposit) and this row is scoped to a wallet-group/"
+                "eBay account instead. Not posted — please re-check the classification or scope of "
+                "this row."
+            )
+        # row.consignor_item_ref is guaranteed non-blank here —
+        # post_pending_rows' _missing_employee_ref_reason pre-check already
+        # flags a blank reference back to needs_review and never reaches
+        # this branch.
+        return posting.post_inventory_deposit(
+            conn,
+            entry_date=entry_date,
+            amount_idr=abs(row.amount_idr),
+            deposit_ref=row.consignor_item_ref,
+            memo=row.raw_description,
+        )
 
     if row.category == "customer_refund":
         return _post_customer_refund(conn, row)

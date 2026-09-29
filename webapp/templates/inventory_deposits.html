@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Inventory Deposits — Noctrowl{% endblock %}
+{% block topbar %}<div><strong>Inventory Deposits</strong></div>{% endblock %}
+{% block content %}
+<h1>Inventory Deposits</h1>
+<div class="subtitle">Down-payments/deposits paid toward inventory that hasn't been delivered yet. Nothing here counts as COGS until the goods actually arrive and you convert the deposit below. Full history (including already-resolved deposits) is on the Subsidiary Ledger screen.</div>
+
+{% if not deposits %}
+<div class="empty-state">No outstanding inventory deposits right now.</div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Deposit Reference</th>
+      <th class="num">Outstanding (IDR)</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in deposits %}
+      <tr class="figure-row" onclick="document.getElementById('deposit-convert-{{ loop.index }}').classList.toggle('hidden-row')">
+        <td>{{ d.reference }}</td>
+        <td class="num">{{ d.outstanding_idr | idr }}</td>
+        <td><span class="small">goods received?</span></td>
+      </tr>
+      <tr id="deposit-convert-{{ loop.index }}" class="inline-editor hidden-row">
+        <td colspan="3">
+          <form method="post" action="{{ url_for('inventory_deposits.convert') }}" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <input type="hidden" name="deposit_ref" value="{{ d.reference }}">
+            <label>Amount to convert to COGS (IDR)
+              <input type="number" step="1" min="1" max="{{ d.outstanding_idr }}" name="amount_idr" value="{{ d.outstanding_idr }}" required>
+            </label>
+            <label>Date received <input type="date" name="entry_date" value="{{ today }}" required></label>
+            <button type="submit">Mark Received — Convert to COGS</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<style>.hidden-row { display: none; }</style>
+{% endblock %}

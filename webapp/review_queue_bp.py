@@ -124,6 +124,23 @@ CATEGORY_OPTIONS = [
     # Item Ref" field below for the employee's name (traceability only, one
     # aggregate account, same pattern as Consignor Payable).
     ("employee_loan_disbursement", "Employee Loan Disbursement"),
+    # Added 2026-09-29 — the INITIAL down-payment/deposit paid toward
+    # inventory not yet received (real trigger: a Master Account bank line,
+    # "DP Box op / FARIZ PRADANA", -Rp 9,840,000, confirmed by the user as a
+    # deposit for goods not yet received). Posts to the new
+    # INVENTORY_DEPOSITS asset account (see ledger/chart_of_accounts.py) via
+    # ledger.posting.post_inventory_deposit — deliberately NOT COGS yet,
+    # since nothing has been received. Placed next to
+    # 'employee_loan_disbursement' (same non-P&L, balance-sheet-only,
+    # aggregate-account-plus-per-transaction-reference grouping — see
+    # test_category_options_follow_pl_statement_order). Selecting this
+    # reveals the same "Consignor/Item Ref" field below, reused here as the
+    # deposit reference (required — identifies which outstanding deposit a
+    # later conversion-to-COGS should clear; see
+    # webapp/inventory_deposits_bp.py, which is where that later conversion
+    # actually happens — NOT a review-queue category, since it has no cash
+    # movement/bank line of its own to attach one to).
+    ("inventory_deposit", "Inventory Deposit (Advance to Supplier)"),
     ("owners_draw", "Owner's Draw"),
     ("owners_contribution", "Owner's Contribution"),
     ("other", "Other"),
@@ -267,6 +284,18 @@ def label_row(row_id: int):
         return _fail(
             "Please fill in the employee's name (Consignor/Item Ref field) for an "
             "Employee Loan Disbursement — it's needed to know whose loan this is."
+        )
+
+    # Added 2026-09-29 (new INVENTORY_DEPOSITS asset account) — same
+    # reasoning as 'employee_loan_disbursement' above: an aggregate asset
+    # account with no per-supplier sub-ledger needs a real per-transaction
+    # deposit reference so it can be found and resolved later (see
+    # webapp/inventory_deposits_bp.py). Mirrored as a defense-in-depth
+    # backstop in ingestion.matching._missing_employee_ref_reason.
+    if category == "inventory_deposit" and not consignor_item_ref:
+        return _fail(
+            "Please fill in a deposit reference (Consignor/Item Ref field) for an Inventory "
+            "Deposit — it's needed to identify and later resolve this specific deposit."
         )
 
     # The posted_at IS NULL guard is a deliberate, explicit match to

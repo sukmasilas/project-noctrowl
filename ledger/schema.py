@@ -240,7 +240,7 @@ journal_entries = Table(
         "source_type IN ('ebay_sale','ebay_refund','cogs_purchase','consignment_sale',"
         "'consignment_payout','inter_account_transfer','payoneer_withdrawal',"
         "'fx_revaluation','owner_contribution','owner_draw','bank_other',"
-        "'opening_balance')",
+        "'opening_balance','inventory_deposit_received')",
         name="ck_journal_entries_source_type",
     ),
 )

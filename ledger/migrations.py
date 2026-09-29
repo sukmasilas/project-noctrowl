@@ -375,8 +375,11 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "existing COGS account, no new account type) for money returned "
             "that reduces a previously-recorded COGS purchase (an employee's "
             "cash-advance excess, or a supplier refund for undelivered "
-            "inventory) — brings the "
-            "constraint to whatever the LATEST code defines in one step, "
+            "inventory); and 'inventory_deposit', added 2026-09-29 for the "
+            "new INVENTORY_DEPOSITS asset account (a down-payment/deposit "
+            "paid toward inventory not yet received — see ledger/chart_of_"
+            "accounts.py and ledger.posting.post_inventory_deposit) — brings "
+            "the constraint to whatever the LATEST code defines in one step, "
             "regardless of which of those historical widenings a given "
             "database happens to be missing."
         ),
@@ -390,7 +393,8 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "'interest_income','contract_labor','shipping_cost','payroll',"
             "'employee_loan_disbursement','item_purchase','inbound_shipping',"
             "'item_purchase_and_inbound_shipping','packaging_supplies',"
-            "'staff_meals_welfare','customer_refund','cogs_refund','other'))",
+            "'staff_meals_welfare','customer_refund','cogs_refund',"
+            "'inventory_deposit','other'))",
         ),
     ),
     MigrationStep(
@@ -401,9 +405,14 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "one-time entry recording a wallet/bank account's real balance "
             "as of just before ledger-tracking began, booked to Owner's "
             "Capital; closes the negative-Payoneer-balance gap described in "
-            "CLAUDE.md's Definition of done). DROP+ADD unconditionally "
-            "re-run, same pattern as the invoices/review_queue CHECK "
-            "-widening steps above."
+            "CLAUDE.md's Definition of done); and 'inventory_deposit_received' "
+            "(2026-09-29, see ledger/posting.py's post_inventory_deposit_"
+            "received — converting an outstanding inventory deposit to COGS "
+            "once goods arrive has no cash movement of its own, so unlike "
+            "'inventory_deposit' this is NOT a review-queue category, hence "
+            "its own distinct source_type rather than reusing 'bank_other'). "
+            "DROP+ADD unconditionally re-run, same pattern as the invoices/"
+            "review_queue CHECK-widening steps above."
         ),
         table="journal_entries",
         apply_sql=(
@@ -412,7 +421,7 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "(source_type IN ('ebay_sale','ebay_refund','cogs_purchase','consignment_sale',"
             "'consignment_payout','inter_account_transfer','payoneer_withdrawal',"
             "'fx_revaluation','owner_contribution','owner_draw','bank_other',"
-            "'opening_balance'))",
+            "'opening_balance','inventory_deposit_received'))",
         ),
     ),
     MigrationStep(
@@ -680,6 +689,44 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
     # STAFF_MEALS_WELFARE needs before anything can post to it) is
     # deliberately NOT a MIGRATIONS step, for the identical reason documented
     # there. See scripts/ensure_staff_meals_welfare_account.py for the
+    # one-off, idempotent real-database equivalent instead.
+    MigrationStep(
+        id="account_types_inventory_deposits",
+        description=(
+            "account_types row for INVENTORY_DEPOSITS (2026-09-29) — a new "
+            "Assets line for down-payments/deposits paid toward inventory "
+            "not yet received (see ledger/chart_of_accounts.py's inline "
+            "note; the real trigger is a Master Account bank line, 'DP Box "
+            "op / FARIZ PRADANA', -Rp 9,840,000, confirmed by the user as a "
+            "deposit for goods not yet received). Same exact pattern/"
+            "reasoning as 'account_types_contract_labor'/'account_types_"
+            "other_income'/'account_types_employee_loan_receivable'/"
+            "'account_types_packaging_supplies'/'account_types_staff_meals_"
+            "welfare' above: account_types.code has a UNIQUE constraint and "
+            "ledger.seed.seed_account_types is a plain INSERT with no "
+            "upsert guard, so a brand-new account_type added to the Python "
+            "catalog after a database was already seeded needs an explicit, "
+            "idempotent INSERT here."
+        ),
+        table="account_types",
+        already_applied_check=(
+            "SELECT 1 FROM account_types WHERE code = 'INVENTORY_DEPOSITS'"
+        ),
+        apply_sql=(
+            "INSERT INTO account_types (code, name, statement_section, "
+            "normal_balance, scope_kind, is_contra) "
+            "SELECT 'INVENTORY_DEPOSITS', 'Inventory Deposits / Advances to "
+            "Suppliers', 'asset', 'debit', 'consolidated', false "
+            "WHERE NOT EXISTS (SELECT 1 FROM account_types WHERE code = "
+            "'INVENTORY_DEPOSITS')",
+        ),
+    ),
+    # NOTE: same as the account_types_contract_labor/account_types_other_income
+    # steps above — this only creates the account_types CATALOG row. The
+    # actual postable `accounts` row (the consolidated singleton instance
+    # INVENTORY_DEPOSITS needs before anything can post to it) is
+    # deliberately NOT a MIGRATIONS step, for the identical reason documented
+    # there. See scripts/ensure_inventory_deposits_account.py for the
     # one-off, idempotent real-database equivalent instead.
     MigrationStep(
         id="review_queue_sign_mismatch_reason",

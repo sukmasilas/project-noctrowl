@@ -220,7 +220,7 @@ def revenue_report(conn: Connection, *, period_month: _dt.date, ebay_account_id:
 # actually happens — not held back until reimbursement, and not shown as a
 # strange negative "paid to consignors" figure at accrual time.
 #
-# TWO deliberate, explicit EXCLUSIONS from Operating/Investing/Financing
+# THREE deliberate, explicit EXCLUSIONS from Operating/Investing/Financing
 # (per Main-agent's brief):
 #   - source_type='opening_balance' entries (post_opening_balance) — these
 #     represent a pre-existing balance from before ledger-tracking began,
@@ -247,6 +247,27 @@ def revenue_report(conn: Connection, *, period_month: _dt.date, ebay_account_id:
 #     real accounting standard CLAUDE.md already cites for this feature,
 #     not an invented workaround; flagged explicitly in the Builder report
 #     for QA/Main-agent to double-check.
+#   - source_type='inventory_deposit_received' entries (added 2026-09-29,
+#     ledger.posting.post_inventory_deposit_received) — the conversion of an
+#     outstanding inventory deposit to COGS once goods arrive touches ONLY
+#     two non-cash accounts (debit COGS, credit INVENTORY_DEPOSITS) with NO
+#     cash leg in the entry at all, unlike a normal COGS purchase. Both
+#     account codes are otherwise legitimately in the Operating whitelist
+#     below (COGS for a real cash purchase; INVENTORY_DEPOSITS for the real
+#     cash outflow when the deposit is first PAID — see
+#     ledger.posting.post_inventory_deposit, source_type='bank_other',
+#     correctly still swept in) — without this exclusion, a conversion entry
+#     would sweep in too and show a phantom "Cash paid for COGS purchases"
+#     outflow (the cash for this COGS actually left the business back when
+#     the deposit was originally paid, a prior period's cash flow, not this
+#     one) exactly offset by a phantom "Cash paid — Inventory Deposits"
+#     inflow in the SAME period — netting to zero in total_operating (so
+#     difference_idr would still tie out even without this fix) but showing
+#     two individually WRONG line items. Excluded via a source_type filter
+#     in _cash_flow_source_lines (same mechanism as the opening_balance
+#     exclusion immediately above), since — unlike UNREALIZED_FX — this
+#     account code needs to stay in the whitelist for its real cash-touching
+#     sibling event.
 # ---------------------------------------------------------------------------
 
 CASH_STATEMENT_SECTION = "asset"  # kept for backward-compatible reference only — see CASH_ACCOUNT_TYPE_CODES below.
@@ -331,6 +352,27 @@ _CASH_FLOW_CODE_TO_KEY = {
     # Operating/Financing totals entirely, breaking the Beginning+NetChange
     # =Ending identity the moment a real staff-meals expense posts.
     "STAFF_MEALS_WELFARE": "staff_meals_welfare",
+    # Added 2026-09-29 alongside the new INVENTORY_DEPOSITS asset account
+    # (see ledger/chart_of_accounts.py). REQUIRED here, not optional
+    # decoration — same whitelist warning as EMPLOYEE_LOAN_RECEIVABLE/
+    # PACKAGING_SUPPLIES/STAFF_MEALS_WELFARE above: any cash-touching entry's
+    # non-cash counterpart line that isn't in this dict silently drops out of
+    # the Operating/Financing totals entirely, breaking the Beginning+
+    # NetChange=Ending identity the moment a real inventory-deposit payment
+    # posts. Bucketed under Operating (a single "inventory_deposits" line,
+    # same treatment as EMPLOYEE_LOAN_RECEIVABLE's "employee_loans" line) —
+    # deposits toward inventory are a working-capital movement tied directly
+    # to COGS/operating activity, not a capital-asset purchase, so Investing
+    # (this module's Investing bucket is explicitly unbuilt/always empty —
+    # see the docstring above) would be the wrong section even if it were
+    # built. This account code ONLY ever reaches this bucket for the real
+    # cash-touching deposit PAYMENT (post_inventory_deposit) — the later
+    # non-cash conversion-to-COGS event is excluded by source_type in
+    # _cash_flow_source_lines below (see the THIRD deliberate exclusion note
+    # above) so it never phantom-appears here. A reasonable, disclosed
+    # judgment call for a single real deposit, flagged for QA/Main-agent to
+    # confirm rather than silently assumed as the only valid treatment.
+    "INVENTORY_DEPOSITS": "inventory_deposits",
 }
 
 # side: 'credit' = the accrual (a consignment sale) -> bucketed with
@@ -356,6 +398,7 @@ _CASH_FLOW_LINE_LABELS = {
     "owners_capital": "Owner's Capital contributions",
     "owners_draw": "Owner's Draw",
     "employee_loans": "Employee Loans, net (disbursed / repaid)",
+    "inventory_deposits": "Cash paid — Inventory Deposits (advances to suppliers)",
 }
 
 _OPERATING_KEY_ORDER = [
@@ -374,6 +417,7 @@ _OPERATING_KEY_ORDER = [
     "realized_fx",
     "other_income",
     "employee_loans",
+    "inventory_deposits",
 ]
 _FINANCING_KEY_ORDER = ["owners_capital", "owners_draw"]
 
@@ -443,7 +487,11 @@ def _cash_flow_source_lines(conn: Connection, period_month: _dt.date):
     that appears somewhere in the Operating/Financing categorization
     (``_CASH_FLOW_CODE_TO_KEY`` union CONSIGNOR_PAYABLE) — excludes
     ``source_type='opening_balance'`` (see module docstring; the only
-    account type it touches here is OWNERS_CAPITAL).
+    account type it touches here is OWNERS_CAPITAL) and
+    ``source_type='inventory_deposit_received'`` (added 2026-09-29 — see
+    module docstring's THIRD deliberate exclusion note: that entry has no
+    cash leg at all, unlike every other entry touching COGS/
+    INVENTORY_DEPOSITS).
     """
     codes = list(_CASH_FLOW_CODE_TO_KEY) + ["CONSIGNOR_PAYABLE"]
     return conn.execute(
@@ -458,6 +506,7 @@ def _cash_flow_source_lines(conn: Connection, period_month: _dt.date):
         .where(account_types.c.code.in_(codes))
         .where(journal_entries.c.period_month == period_month)
         .where(journal_entries.c.source_type != "opening_balance")
+        .where(journal_entries.c.source_type != "inventory_deposit_received")
     ).all()
 
 

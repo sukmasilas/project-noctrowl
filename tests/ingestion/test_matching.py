@@ -3203,3 +3203,217 @@ def test_cogs_refund_unsupported_scope_fails_cleanly_without_blocking_batch(ipro
     assert bad_row.match_status == "needs_review"
     assert bad_row.posting_error_reason is not None
     assert "cogs_refund" in bad_row.posting_error_reason
+
+
+# ---------------------------------------------------------------------------
+# 'inventory_deposit' (added 2026-09-29) — the INITIAL down-payment/deposit
+# paid toward inventory not yet received (real trigger: a Master Account
+# bank line, "TRSF E-BANKING DB ... / DP Box op / FARIZ PRADANA",
+# -Rp 9,840,000, confirmed by the user as a deposit for goods not yet
+# received). Same shape as 'cogs_refund'/'employee_loan_disbursement' tests
+# above: outflow-only, requires a real deposit reference, Master-Account
+# -only scope. Synthetic amount/description — the real backlog row is
+# deliberately left untouched (out of scope).
+# ---------------------------------------------------------------------------
+
+
+def test_manually_labeled_inventory_deposit_row_debits_inventory_deposits_not_cogs(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)  # Master Account — same scope as COGS itself
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 20),
+                raw_description="TRSF E-BANKING DB ... / DP Box op / FARIZ PRADANA",
+                amount_idr=Decimal("-9840000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="inventory_deposit",
+            consignor_item_ref="DP Box op — Fariz — 2026-08-20",
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+
+    deposits_id = get_account_id(conn, "INVENTORY_DEPOSITS")
+    assert deposits_id is not None  # the account instance genuinely exists (not just the catalog row)
+    assert "INVENTORY_DEPOSITS" in lines
+    assert lines["INVENTORY_DEPOSITS"][0].debit_amount_idr == Decimal("9840000")
+    assert "COGS" not in lines  # nothing has been received yet — must NOT expense as COGS
+    assert lines["BCA_MAIN"][0].credit_amount_idr == Decimal("9840000")
+    assert_balanced(conn, entry_id)
+
+    # Idempotent: a second sync run must not double-post the same row.
+    post_result2 = post_pending_rows(conn)
+    assert post_result2.posted == 0
+
+
+def test_inventory_deposit_sign_mismatch_is_flagged_not_posted(iprototype):
+    """An 'inventory_deposit' is inherently an outflow (a deposit payment) —
+    a positive-amount row wrongly labeled this way must never post.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 20),
+                raw_description="Mislabeled — actually an inflow",
+                amount_idr=Decimal("9840000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="inventory_deposit",
+            consignor_item_ref="DP Box op",
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_sign_mismatch == 1
+
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status, review_queue.c.sign_mismatch_reason)
+        .where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is None
+    assert row.match_status == "needs_review"
+    assert row.sign_mismatch_reason is not None
+    assert "inventory_deposit" in row.sign_mismatch_reason
+
+
+def test_inventory_deposit_with_blank_reference_never_posts(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 20),
+                raw_description="no deposit reference given",
+                amount_idr=Decimal("-9840000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="inventory_deposit", consignor_item_ref=None, labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 0
+    assert post_result.skipped_missing_employee_ref == 1
+    assert conn.execute(select(journal_entries.c.id)).all() == []  # nothing posted
+
+    row = conn.execute(
+        select(review_queue.c.match_status, review_queue.c.missing_reference_reason).where(review_queue.c.id == row_id)
+    ).first()
+    assert row.match_status == "needs_review"
+    assert row.missing_reference_reason is not None
+
+
+def test_inventory_deposit_unsupported_scope_fails_cleanly_without_blocking_batch(iprototype):
+    """post_inventory_deposit() is hardcoded to BCA_MAIN (same shape as
+    post_cogs_purchase/post_cogs_refund) — an 'inventory_deposit' row that's
+    actually scoped to a wallet-group must fail cleanly rather than silently
+    debit BCA_MAIN for money that didn't land there, and must never take the
+    rest of the batch down.
+    """
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 20),
+                raw_description="A Bridging Account line mislabeled inventory_deposit",
+                amount_idr=Decimal("-9840000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    bad_row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(
+            category="inventory_deposit",
+            consignor_item_ref="DP Box op",
+            labeled_at=_dt.datetime.now(_dt.timezone.utc),
+        )
+        .where(review_queue.c.id == bad_row_id)
+    )
+
+    master_src = _make_bank_source(conn)
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=master_src,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 8, 20),
+                raw_description="Unrelated, valid opex",
+                amount_idr=Decimal("-50000"),
+                occurrence_index=1,
+            )
+        ],
+    )
+    valid_row_id = conn.execute(
+        select(review_queue.c.id).where(review_queue.c.id != bad_row_id)
+    ).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category="operating_expense", labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == valid_row_id)
+    )
+
+    post_result = post_pending_rows(conn)
+    assert post_result.posted == 1
+    assert post_result.failed_to_post == 1
+
+    valid_row = conn.execute(
+        select(review_queue.c.posted_at).where(review_queue.c.id == valid_row_id)
+    ).one()
+    assert valid_row.posted_at is not None
+
+    bad_row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status, review_queue.c.posting_error_reason)
+        .where(review_queue.c.id == bad_row_id)
+    ).one()
+    assert bad_row.posted_at is None
+    assert bad_row.match_status == "needs_review"
+    assert bad_row.posting_error_reason is not None
+    assert "inventory_deposit" in bad_row.posting_error_reason

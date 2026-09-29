@@ -478,13 +478,23 @@ review_queue = Table(
     # the new ledger.posting.post_cogs_refund() — a genuinely different
     # account/direction from 'customer_refund' above (COGS/expense-side, not
     # revenue-side), so deliberately NOT the same posting function.
+    # 'inventory_deposit' added 2026-09-29 — the INITIAL down-payment/deposit
+    # paid toward inventory not yet received (see ledger/chart_of_accounts.py's
+    # INVENTORY_DEPOSITS note; real trigger: a Master Account bank line, "DP
+    # Box op / FARIZ PRADANA", -Rp 9,840,000). Posts via the new
+    # ledger.posting.post_inventory_deposit() — debits the new
+    # INVENTORY_DEPOSITS asset account, never COGS directly (nothing has been
+    # received yet). The LATER conversion-to-COGS event
+    # (post_inventory_deposit_received) is deliberately NOT a review-queue
+    # category — see webapp/inventory_deposits_bp.py's module docstring for
+    # why (that event has no bank line of its own to attach a category to).
     CheckConstraint(
         "category IS NULL OR category IN ('revenue_settlement','cogs_purchase','consignment_payout',"
         "'internal_transfer','internal_transfer_landing','operating_expense','owners_draw',"
         "'owners_contribution','interest_income','contract_labor','shipping_cost','payroll',"
         "'employee_loan_disbursement','item_purchase','inbound_shipping',"
         "'item_purchase_and_inbound_shipping','packaging_supplies','staff_meals_welfare',"
-        "'customer_refund','cogs_refund','other')",
+        "'customer_refund','cogs_refund','inventory_deposit','other')",
         name="ck_review_queue_category",
     ),
     # The idempotency invariant from CLAUDE.md rule 6, structural: a row can
