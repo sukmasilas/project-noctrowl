@@ -5,10 +5,16 @@ polish.
 from __future__ import annotations
 
 import datetime as _dt
+import re
+from decimal import Decimal
 
 from sqlalchemy import select
 
+from ingestion.kurs_pajak import seed_kurs_pajak_rate
+from ingestion.matching import post_pending_rows
 from ingestion.schema import review_queue
+from ledger.seed import seed_full_topology
+from tests.helpers import lines_by_code
 from tests.webapp.conftest import make_review_queue_row, make_source_document
 from webapp.review_queue_bp import CATEGORY_OPTIONS
 
@@ -909,3 +915,308 @@ def test_shipping_portion_field_disabled_in_markup_for_non_cogs_category(client,
     editor_match = re.search(rf'id="rq-editor-{row_id}".*?</tr>', html, re.DOTALL)
     assert editor_match is not None
     assert re.search(r'name="shipping_portion_idr"[^>]*disabled', editor_match.group(0))
+
+
+# ---------------------------------------------------------------------------
+# Manual eBay Account override for 'revenue_settlement' rows (2026-09-30).
+# See CLAUDE.md's Prototype scope (a shared-Payoneer wallet-group's export
+# can contain a settlement line for a not-yet-onboarded eBay account) and
+# the real incident this closes: a Payoneer CSV row (Rp 242,408 / $14.79,
+# Aug 24 2026) manually labeled 'revenue_settlement' with no ebay_account_id
+# failed to post and required a one-off database script to unblock — this
+# makes that fixable entirely through the Review Queue UI.
+# ---------------------------------------------------------------------------
+
+
+def test_ebay_account_dropdown_renders_with_real_active_accounts(client, wconn):
+    """The new eBay Account override field must be populated from the same
+    live list of active eBay accounts as the page's own top-of-page account
+    filter (webapp.scoping.list_ebay_accounts) — never a hardcoded
+    assumption about how many eBay accounts exist. Exercised against the
+    real 2-shared/1-independent topology (see CLAUDE.md's Business model),
+    not just the single-account prototype shape, so this is meaningfully
+    tested with more than one option in the dropdown.
+    """
+    conn = wconn
+    topo = seed_full_topology(conn)
+    src_id = make_source_document(
+        conn,
+        document_type="bank_statement_wallet_group",
+        period_month=PERIOD,
+        wallet_group_id=topo["wallet_groups"]["shared"],
+    )
+    row_id = make_review_queue_row(
+        conn,
+        source_document_id=src_id,
+        transaction_date=DAY,
+        amount_idr=Decimal("242408"),
+        source_type="payoneer_csv",
+        wallet_group_id=topo["wallet_groups"]["shared"],
+        category="revenue_settlement",
+    )
+    conn.commit()
+
+    resp = client.get(f"/review-queue/?period={PERIOD.isoformat()[:7]}")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    editor_match = re.search(rf'id="rq-editor-{row_id}".*?</tr>', html, re.DOTALL)
+    assert editor_match is not None
+    editor_html = editor_match.group(0)
+    assert 'name="ebay_account_id"' in editor_html
+    assert "eBay Account 1" in editor_html
+    assert "eBay Account 2" in editor_html
+    assert "eBay Account 3" in editor_html
+    # Already labeled 'revenue_settlement' but with no real ebay_account_id
+    # yet — the select must be enabled, not disabled.
+    assert not re.search(r'name="ebay_account_id"[^>]*disabled', editor_html)
+
+
+def test_ebay_account_field_disabled_in_markup_for_non_revenue_settlement_category(client, wtopology):
+    """Mirrors the loan-repayment/shipping-portion disabled-by-default
+    pattern — the eBay Account override only ever applies to
+    'revenue_settlement' and must start disabled for any row not already
+    labeled that way."""
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    resp = client.get(f"/review-queue/?period={PERIOD.isoformat()[:7]}")
+    html = resp.data.decode()
+    editor_match = re.search(rf'id="rq-editor-{row_id}".*?</tr>', html, re.DOTALL)
+    assert editor_match is not None
+    assert re.search(r'name="ebay_account_id"[^>]*disabled', editor_match.group(0))
+
+
+def test_saving_revenue_settlement_with_selected_ebay_account_sets_it(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(
+        conn,
+        document_type="bank_statement_wallet_group",
+        period_month=PERIOD,
+        wallet_group_id=topo["wallet_group_id"],
+    )
+    row_id = make_review_queue_row(
+        conn,
+        source_document_id=src_id,
+        transaction_date=DAY,
+        amount_idr=Decimal("242408"),
+        amount_usd_ref=Decimal("14.79"),
+        source_type="payoneer_csv",
+        wallet_group_id=topo["wallet_group_id"],
+    )
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "revenue_settlement",
+            "ebay_account_id": str(topo["ebay_account_id"]),
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "revenue_settlement"
+    assert row.ebay_account_id == topo["ebay_account_id"]
+    assert row.posted_at is None  # saving a label never posts by itself
+
+
+def test_blank_ebay_account_selection_never_overwrites_an_already_set_value(client, wtopology):
+    """A row whose ebay_account_id was already correctly resolved (e.g. by
+    auto-matching) must never have it silently cleared or changed by a
+    save that leaves the new field blank — the "never silently guess or
+    overwrite" rule from CLAUDE.md applies here too."""
+    conn, topo = wtopology
+    src_id = make_source_document(
+        conn,
+        document_type="bank_statement_wallet_group",
+        period_month=PERIOD,
+        wallet_group_id=topo["wallet_group_id"],
+    )
+    row_id = make_review_queue_row(
+        conn,
+        source_document_id=src_id,
+        transaction_date=DAY,
+        amount_idr=Decimal("242408"),
+        source_type="payoneer_csv",
+        wallet_group_id=topo["wallet_group_id"],
+        category="revenue_settlement",
+        ebay_account_id=topo["ebay_account_id"],
+    )
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "revenue_settlement",
+            "consignor_item_ref": "some unrelated note",
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.ebay_account_id == topo["ebay_account_id"]  # untouched by the blank submission
+    assert row.consignor_item_ref == "some unrelated note"  # the rest of the save still went through
+
+
+def test_revenue_settlement_can_save_without_selecting_an_ebay_account(client, wtopology):
+    """Saving 'revenue_settlement' with no account chosen must NOT be
+    blocked at save time — it should simply fail later, at posting time,
+    exactly as it does today (see PostResult.failed_to_post)."""
+    conn, topo = wtopology
+    src_id = make_source_document(
+        conn,
+        document_type="bank_statement_wallet_group",
+        period_month=PERIOD,
+        wallet_group_id=topo["wallet_group_id"],
+    )
+    row_id = make_review_queue_row(
+        conn,
+        source_document_id=src_id,
+        transaction_date=DAY,
+        amount_idr=Decimal("242408"),
+        source_type="payoneer_csv",
+        wallet_group_id=topo["wallet_group_id"],
+    )
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={"category": "revenue_settlement", "period": PERIOD.isoformat()},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["success"] is True
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category == "revenue_settlement"
+    assert row.ebay_account_id is None
+    assert row.posted_at is None
+
+
+def test_ebay_account_selection_rejected_for_non_revenue_settlement_category(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(conn, document_type="bank_statement_master", period_month=PERIOD)
+    row_id = make_review_queue_row(conn, source_document_id=src_id, transaction_date=DAY)
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "operating_expense",
+            "ebay_account_id": str(topo["ebay_account_id"]),
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None  # rejected entirely, never silently saved with the wrong category
+
+
+def test_ebay_account_selection_rejects_unknown_account_id(client, wtopology):
+    conn, topo = wtopology
+    src_id = make_source_document(
+        conn,
+        document_type="bank_statement_wallet_group",
+        period_month=PERIOD,
+        wallet_group_id=topo["wallet_group_id"],
+    )
+    row_id = make_review_queue_row(
+        conn,
+        source_document_id=src_id,
+        transaction_date=DAY,
+        amount_idr=Decimal("242408"),
+        source_type="payoneer_csv",
+        wallet_group_id=topo["wallet_group_id"],
+    )
+    conn.commit()
+
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "revenue_settlement",
+            "ebay_account_id": "999999",
+            "period": PERIOD.isoformat(),
+        },
+    )
+    assert resp.status_code in (301, 302)
+
+    row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert row.category is None  # rejected entirely — never a category set alongside a bogus account
+
+
+def test_setting_ebay_account_then_syncing_posts_the_revenue_settlement(client, wtopology):
+    """End-to-end reproduction of the real incident and its fix: a Payoneer
+    CSV row (Rp 242,408 / $14.79, shaped like the real Aug 24 2026 case)
+    manually labeled 'revenue_settlement' with no ebay_account_id fails to
+    post via post_pending_rows' existing per-row failure isolation — then,
+    once a human sets the eBay account through this new field, the very
+    next sync posts it correctly. No direct database access required, unlike
+    the real one-off unblock this closes.
+    """
+    conn, topo = wtopology
+    src_id = make_source_document(
+        conn,
+        document_type="bank_statement_wallet_group",
+        period_month=PERIOD,
+        wallet_group_id=topo["wallet_group_id"],
+    )
+    row_id = make_review_queue_row(
+        conn,
+        source_document_id=src_id,
+        transaction_date=DAY,
+        amount_idr=Decimal("242408"),
+        amount_usd_ref=Decimal("14.79"),
+        source_type="payoneer_csv",
+        wallet_group_id=topo["wallet_group_id"],
+        raw_description="Payment from eBay (Additional Description: '', no matching expected payout)",
+        category="revenue_settlement",
+    )
+    conn.commit()
+
+    # Step 1: reproduce the real failure — no ebay_account_id yet, so the
+    # row is structurally not postable.
+    first_result = post_pending_rows(conn)
+    conn.commit()
+    assert first_result.failed_to_post == 1
+    assert first_result.posted == 0
+    failed_row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert failed_row.posted_at is None
+    assert failed_row.posting_error_reason is not None
+    assert failed_row.match_status == "needs_review"
+
+    # Step 2: a human fixes it through the new UI field.
+    resp = client.post(
+        f"/review-queue/{row_id}",
+        data={
+            "category": "revenue_settlement",
+            "ebay_account_id": str(topo["ebay_account_id"]),
+            "period": PERIOD.isoformat(),
+        },
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["success"] is True
+
+    # Step 3: the next sync now posts it correctly.
+    second_result = post_pending_rows(conn)
+    conn.commit()
+    assert second_result.posted == 1
+    assert second_result.failed_to_post == 0
+
+    posted_row = conn.execute(select(review_queue).where(review_queue.c.id == row_id)).first()
+    assert posted_row.posted_at is not None
+    assert posted_row.ebay_account_id == topo["ebay_account_id"]
+    assert posted_row.match_status == "matched"
+    assert posted_row.posting_error_reason is None
+
+    lines = lines_by_code(conn, posted_row.posted_journal_entry_id)
+    assert "EBAY_WALLET" in lines
+    assert "PAYONEER_WALLET" in lines
+    assert lines["EBAY_WALLET"][0].credit_amount_idr == Decimal("242408")
+    assert lines["PAYONEER_WALLET"][0].debit_amount_idr == Decimal("242408")

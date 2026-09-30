@@ -91,6 +91,21 @@
                 {% endfor %}
               </select>
             </label>
+            <label>eBay Account (Revenue Settlement only)
+              <select name="ebay_account_id" {% if row.category != 'revenue_settlement' %}disabled{% endif %}>
+                <option value="">
+                  {%- if row.ebay_account_id -%}
+                    — leave unchanged (currently: {{ ebay_account_names.get(row.ebay_account_id, row.ebay_account_id) }}) —
+                  {%- else -%}
+                    — choose —
+                  {%- endif -%}
+                </option>
+                {% for a in accounts %}
+                  <option value="{{ a.id }}">{{ a.name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <span class="small">Only needed when this row's eBay account couldn't be auto-determined (e.g. a Revenue Settlement from a Payoneer wallet-group shared by more than one eBay account). Leave on "leave unchanged"/"choose" unless you're deliberately setting or correcting this row's eBay account — an already-set value is never overwritten unless you explicitly pick an account here.</span>
             <label><span class="rq-ref-label-text">{% if row.category == 'payroll' %}Consignor/Item Ref (employee's name, if this payroll includes a loan repayment){% else %}Consignor/Item Ref{% endif %}</span>
               <input type="text" name="consignor_item_ref" value="{{ row.consignor_item_ref or '' }}">
             </label>
@@ -138,8 +153,22 @@ function rqCategoryChanged(rowId) {
   var category = editor.querySelector('select[name="category"]');
   var loanInput = editor.querySelector('input[name="loan_repayment_amount_idr"]');
   var shippingPortionInput = editor.querySelector('input[name="shipping_portion_idr"]');
+  var ebayAccountSelect = editor.querySelector('select[name="ebay_account_id"]');
   var refLabel = editor.querySelector('.rq-ref-label-text');
   var isPayroll = category && category.value === 'payroll';
+  // 2026-09-30: the eBay Account override field only ever applies to
+  // 'revenue_settlement' (see webapp/review_queue_bp.py's label_row
+  // validation) — mirrors the loan/shipping-portion toggle pattern above.
+  // Reset to blank ("leave unchanged") when disabled, same reasoning as
+  // loanInput/shippingPortionInput below: a stale selection must never
+  // linger and get submitted after flipping categories back and forth.
+  var isRevenueSettlement = category && category.value === 'revenue_settlement';
+  if (ebayAccountSelect) {
+    ebayAccountSelect.disabled = !isRevenueSettlement;
+    if (!isRevenueSettlement) {
+      ebayAccountSelect.value = '';
+    }
+  }
   // 2026-09-29: the Outbound Shipping portion split only applies to a plain
   // item purchase with no shipping already implied — NOT 'inbound_shipping'/
   // 'item_purchase_and_inbound_shipping', which already represent a

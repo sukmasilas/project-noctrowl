@@ -207,6 +207,11 @@ def index():
     return render_template(
         "review_queue.html",
         accounts=accounts,
+        # Added 2026-09-30, alongside the new eBay Account editor field
+        # (see label_row) — lets the row editor show "(currently: <name>)"
+        # for a row that already has a real ebay_account_id, without
+        # pre-selecting it in the dropdown itself (see review_queue.html).
+        ebay_account_names={a.id: a.name for a in accounts},
         selected_account_id=account_id,
         period_month=period_month,
         status_filter=status_filter,
@@ -250,6 +255,36 @@ def _fail(message: str, status: int = 400):
 def label_row(row_id: int):
     conn = get_db()
     category = request.form.get("category") or None
+    # Added 2026-09-30 — a human-set eBay account for a 'revenue_settlement'
+    # row whose auto-matching couldn't determine one (see
+    # ingestion/matching.py's 'revenue_settlement' branch, which needs a real
+    # ebay_account_id to know which eBay account's wallet to debit, and
+    # CLAUDE.md's Prototype scope note about a shared-Payoneer wallet-group's
+    # export containing a settlement line for a not-yet-onboarded account).
+    # review_queue.ebay_account_id already exists and is already nullable —
+    # this is the first time it's exposed as something a human can fill in
+    # directly, not a new column.
+    #
+    # Deliberately validated and staged here, but only merged into
+    # update_values below if a real selection was made (see that comment) —
+    # never included in the UPDATE at all when left blank, so a blank
+    # submission can NEVER null out or silently overwrite an already-correct
+    # ebay_account_id (e.g. one auto-matched by rule (a)). This is the
+    # "safer option" CLAUDE.md's own posture ("never silently guess or
+    # overwrite") calls for: correcting/setting the value always requires an
+    # explicit, visible selection by a human, not a default.
+    raw_ebay_account_id = (request.form.get("ebay_account_id") or "").strip()
+    ebay_account_id_override: int | None = None
+    if raw_ebay_account_id:
+        if category != "revenue_settlement":
+            return _fail("eBay Account only applies to the Revenue Settlement category.")
+        try:
+            ebay_account_id_override = int(raw_ebay_account_id)
+        except ValueError:
+            return _fail("eBay Account must be a valid selection.")
+        valid_ebay_account_ids = {a.id for a in list_ebay_accounts(conn)}
+        if ebay_account_id_override not in valid_ebay_account_ids:
+            return _fail("Please choose a valid eBay account.")
     # QA-found gap (2026-09-10): stripped, same as loan_repayment_amount_idr
     # below — a whitespace-only submission ("   ") is truthy and previously
     # passed every "if not consignor_item_ref" check here unstripped,
@@ -347,6 +382,41 @@ def label_row(row_id: int):
             "Deposit — it's needed to identify and later resolve this specific deposit."
         )
 
+    # Added 2026-09-30 — see the ebay_account_id_override comment above: the
+    # key is only present in this dict (and therefore only touched by the
+    # UPDATE at all) when a human explicitly picked a real account. A blank
+    # submission leaves review_queue.ebay_account_id completely untouched —
+    # whether it was already NULL (still unresolved, unchanged) or already a
+    # real value (already-correct, never silently cleared/overwritten).
+    update_values = {
+        "category": category,
+        "consignor_item_ref": consignor_item_ref,
+        "loan_repayment_amount_idr": loan_repayment_amount_idr,
+        "shipping_portion_idr": shipping_portion_idr,
+        "labeled_at": _dt.datetime.now(_dt.timezone.utc),
+        # 2026-09-29 (AJAX Posted-cell fix): a row can reach this route a
+        # second time already carrying a stale sign_mismatch_reason /
+        # missing_reference_reason / posting_error_reason from an earlier
+        # failed post_pending_rows attempt (see ingestion/matching.py —
+        # that's exactly what flips it back to needs_review with a reason
+        # set, and not posted_at, so the editor here is reachable again).
+        # Without clearing these, a freshly-relabeled row would still
+        # show its OLD red "Not posted — ..." reason (review_queue.html's
+        # Posted-column chain checks these before labeled_at) even though
+        # nothing has attempted to re-post it yet under the new label.
+        # Cleared here so a successful label_row response always means
+        # exactly "labeled, not posted, no error reason" — the same
+        # clearing post_pending_rows itself already does on an actual
+        # successful post (see its own sign_mismatch_reason=None etc.) —
+        # the next sync re-validates and will re-set these if the new
+        # label still doesn't work.
+        "sign_mismatch_reason": None,
+        "missing_reference_reason": None,
+        "posting_error_reason": None,
+    }
+    if ebay_account_id_override is not None:
+        update_values["ebay_account_id"] = ebay_account_id_override
+
     # The posted_at IS NULL guard is a deliberate, explicit match to
     # CLAUDE.md's "corrections to an already-posted row are out of scope"
     # rule (and the DB's own ck_review_queue_no_post_without_category /
@@ -356,32 +426,7 @@ def label_row(row_id: int):
         update(review_queue)
         .where(review_queue.c.id == row_id)
         .where(review_queue.c.posted_at.is_(None))
-        .values(
-            category=category,
-            consignor_item_ref=consignor_item_ref,
-            loan_repayment_amount_idr=loan_repayment_amount_idr,
-            shipping_portion_idr=shipping_portion_idr,
-            labeled_at=_dt.datetime.now(_dt.timezone.utc),
-            # 2026-09-29 (AJAX Posted-cell fix): a row can reach this route a
-            # second time already carrying a stale sign_mismatch_reason /
-            # missing_reference_reason / posting_error_reason from an earlier
-            # failed post_pending_rows attempt (see ingestion/matching.py —
-            # that's exactly what flips it back to needs_review with a reason
-            # set, and not posted_at, so the editor here is reachable again).
-            # Without clearing these, a freshly-relabeled row would still
-            # show its OLD red "Not posted — ..." reason (review_queue.html's
-            # Posted-column chain checks these before labeled_at) even though
-            # nothing has attempted to re-post it yet under the new label.
-            # Cleared here so a successful label_row response always means
-            # exactly "labeled, not posted, no error reason" — the same
-            # clearing post_pending_rows itself already does on an actual
-            # successful post (see its own sign_mismatch_reason=None etc.) —
-            # the next sync re-validates and will re-set these if the new
-            # label still doesn't work.
-            sign_mismatch_reason=None,
-            missing_reference_reason=None,
-            posting_error_reason=None,
-        )
+        .values(**update_values)
     )
     if result.rowcount == 0:
         existing = conn.execute(
