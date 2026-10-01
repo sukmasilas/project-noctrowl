@@ -148,7 +148,14 @@ _CONFIRMATION_FIELD_PATTERNS = {
     "date_time": re.compile(r"Date/Time\s+(\d{1,2}/\d{1,2}/\d{4})\s+(\d{2}:\d{2})"),
     "amount_withdrawn": re.compile(r"Amount withdrawn\s+([\d,]+\.\d{2})\s*USD"),
     "fee": re.compile(r"Fee\s+([\d,]+\.\d{2})\s*USD"),
-    "exchange_rate": re.compile(r"Exchange rate \(excluding fee\)\s+1\.00\s*USD\s*=\s*([\d,]+\.\d{2,4})\s*IDR"),
+    # 2-6 decimal digits, not 2-4: a real confirmation (Transfer ID
+    # 4366185363529719, one of the Jan-Apr 2026 withdrawals) states its rate
+    # to 5 decimal places ("1.00 USD = 16,643.35632 IDR") — found 2026-09-30
+    # while backfilling Jan-Apr 2026 real data. The other 20 real
+    # confirmations on file state 2-4 decimals, so this widens tolerance
+    # rather than assuming a fixed precision Payoneer doesn't actually
+    # guarantee. See test_parse_five_decimal_exchange_rate_confirmation_pdf.
+    "exchange_rate": re.compile(r"Exchange rate \(excluding fee\)\s+1\.00\s*USD\s*=\s*([\d,]+\.\d{2,6})\s*IDR"),
     "amount_sent": re.compile(r"Amount sent\s+([\d,]+\.\d{2})\s*IDR"),
     "beneficiary_bank": re.compile(r"Beneficiary bank\s+(.+)"),
 }

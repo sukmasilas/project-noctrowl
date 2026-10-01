@@ -59,6 +59,30 @@ pytestmark = pytest.mark.skipif(
     reason="Real sample-documents/ fixtures not present in this environment (gitignored, local-only).",
 )
 
+# Real Jan-Apr 2026 samples were added into these SAME folders 2026-09-30
+# (see CLAUDE.md's Jan-Apr 2026 backfill entry) -- this file's scope is
+# deliberately still just the ORIGINAL real 4 months (May-Aug 2026) it was
+# built and hardcoded against; every real total/count assertion below was
+# derived from exactly those 4 months' data, not 8. Filtering the new files
+# out here (rather than silently letting a plain glob pick them up and
+# quietly change every downstream total) keeps this file's existing,
+# already-verified assertions meaningful -- the Jan-Apr data gets its own
+# equivalent real-data coverage in tests/ingestion/test_payoneer.py instead.
+_ORIGINAL_4_MONTHS_BRIDGING_TOKENS = ("Mei", "Jun", "Jul", "Agu")
+_ORIGINAL_4_MONTHS_MAIN_TOKENS = ("MAY", "JUN", "JUL", "AUG")
+
+
+def _original_4_months_bridging_pdfs() -> list[Path]:
+    return sorted(f for f in BRIDGING_DIR.glob("*.pdf") if any(t in f.name for t in _ORIGINAL_4_MONTHS_BRIDGING_TOKENS))
+
+
+def _original_4_months_main_pdfs() -> list[Path]:
+    return sorted(f for f in MAIN_DIR.glob("*.pdf") if any(t in f.name for t in _ORIGINAL_4_MONTHS_MAIN_TOKENS))
+
+
+def _original_11_confirmation_pdfs() -> list[Path]:
+    return sorted(f for f in CONFIRMATIONS_DIR.rglob("*.pdf") if "Jan-Apr" not in str(f.relative_to(CONFIRMATIONS_DIR)))
+
 
 def _make_source_document(conn, *, document_type: str, period_month: _dt.date, **scope) -> int:
     result = conn.execute(
@@ -78,7 +102,7 @@ def _load_and_post_real_withdrawals(conn, wallet_group_id: int) -> dict[int, pay
     split's own correctness is covered elsewhere, e.g. tests/test_fx.py —
     not the concern of this file).
     """
-    confirmations = [payoneer_mod.parse_confirmation_pdf(f) for f in sorted(CONFIRMATIONS_DIR.rglob("*.pdf"))]
+    confirmations = [payoneer_mod.parse_confirmation_pdf(f) for f in _original_11_confirmation_pdfs()]
     assert len(confirmations) == 11  # pin the real fixture's known shape
 
     entries: dict[int, payoneer_mod.WithdrawalConfirmation] = {}
@@ -98,7 +122,7 @@ def _load_and_post_real_withdrawals(conn, wallet_group_id: int) -> dict[int, pay
 
 def _stage_all_bridging_lines(conn, wallet_group_id: int) -> int:
     total = 0
-    for f in sorted(BRIDGING_DIR.glob("*.pdf")):
+    for f in _original_4_months_bridging_pdfs():
         parsed = mandiri_statement.parse_mandiri_statement(f)
         assert parsed.reconciles, f"{f.name} did not reconcile against its own printed totals"
         src_id = _make_source_document(
@@ -125,7 +149,7 @@ def _stage_all_bridging_lines(conn, wallet_group_id: int) -> int:
 
 def _stage_all_main_lines(conn) -> int:
     total = 0
-    for f in sorted(MAIN_DIR.glob("*.pdf")):
+    for f in _original_4_months_main_pdfs():
         pages_text = bank_statement.extract_pdf_text_per_page(f)
         parsed = bank_statement.parse_bca_statement_text(pages_text)
         assert parsed.reconciles, f"{f.name} did not reconcile against its own printed CR/DB totals"
@@ -458,7 +482,7 @@ def test_real_data_manual_label_of_out_of_sample_sweep_before_its_pair_does_not_
     conn, topo = iprototype
     wg = topo["wallet_group_id"]
 
-    may_bridging = next(f for f in BRIDGING_DIR.glob("*.pdf") if "Mei" in f.name)
+    may_bridging = next(f for f in _original_4_months_bridging_pdfs() if "Mei" in f.name)
     parsed = mandiri_statement.parse_mandiri_statement(may_bridging)
     src_id = _make_source_document(
         conn, document_type="bank_statement_wallet_group", period_month=parsed.period_month, wallet_group_id=wg
