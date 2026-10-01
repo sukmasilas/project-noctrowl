@@ -151,9 +151,30 @@ from ledger.entities import get_account_id  # noqa: E402
 from ledger.posting import post_opening_balance, post_reversal_entry, round_idr  # noqa: E402
 from ledger.schema import journal_entries, opening_balances  # noqa: E402
 from webapp.reporting import balance_sheet_report, equity_report, pnl_report  # noqa: E402
-from webapp.scoping import list_ebay_accounts  # noqa: E402
+from webapp.scoping import EbayAccountOption, list_ebay_accounts  # noqa: E402
 
 MASTER_FOLDER_NAME = "Master Account"
+
+# The one real, specific eBay account this script's Jan-Apr 2026 documents
+# belong to -- exact Drive folder name, matched EXACTLY (not a loose
+# substring check) against ebay_accounts.drive_folder_name. Found 2026-10-01:
+# production now has a SECOND active eBay account ("eBay Account 2" /
+# "eBay Account - 2 (ricky-garage)", onboarded separately via
+# scripts/onboard_ebay_account.py) that joined the SAME wallet_group_id=1 as
+# Account 1 (see tests/test_onboard_ebay_account.py's own docstring: "eBay
+# Account 2 joins that SAME wallet-group, sharing its existing Payoneer
+# Wallet / BCA Bridging Account") -- so wallet_group_id==1 alone does NOT
+# disambiguate between the two accounts; it matches both. The account's own
+# Drive folder name is the one genuinely distinguishing identifier here
+# (assigned once, at onboarding, never shared between accounts), so that's
+# the primary selector -- wallet_group_id==1 is then used as a SECOND,
+# independent cross-check (this script's other 2 corrections --
+# BCA_BRIDGING and PAYONEER_WALLET -- are already hardcoded to
+# wallet_group_id==1 elsewhere below; if the folder-matched account's own
+# wallet_group_id ever disagreed with that, something structural would be
+# wrong and this script should refuse to guess, not silently proceed).
+TARGET_EBAY_ACCOUNT_DRIVE_FOLDER_NAME = "eBay Account - 1 (ricky-game)"
+TARGET_WALLET_GROUP_ID = 1
 OLD_ENTRY_DATE = _dt.date(2026, 5, 1)
 NEW_ENTRY_DATE = _dt.date(2026, 1, 1)
 
@@ -193,6 +214,48 @@ class _StateMismatch(Exception):
     to find -- refuses to proceed rather than guessing or touching the wrong
     data. Every account this script touches is resolved live and
     cross-checked against an expected amount before anything is written."""
+
+
+def _resolve_target_ebay_account(accounts: list[EbayAccountOption]) -> EbayAccountOption:
+    """Selects, from every active eBay account, the ONE this script's real
+    Jan-Apr 2026 documents belong to -- by exact Drive-folder-name match
+    (TARGET_EBAY_ACCOUNT_DRIVE_FOLDER_NAME), cross-checked against
+    TARGET_WALLET_GROUP_ID. Does NOT assume "exactly one active account
+    exists" (that broke for real 2026-10-01, once a second account was
+    onboarded into the SAME wallet-group as the first -- see this module's
+    top-of-file comment on TARGET_EBAY_ACCOUNT_DRIVE_FOLDER_NAME for why
+    wallet_group_id alone can't disambiguate here). Raises _StateMismatch
+    (never guesses) if zero, more than one, or a wallet-group-mismatched
+    account matches.
+    """
+    matches = [
+        a for a in accounts if a.ebay_account_drive_folder_name_resolved == TARGET_EBAY_ACCOUNT_DRIVE_FOLDER_NAME
+    ]
+    if len(matches) == 0:
+        raise _StateMismatch(
+            f"No active eBay account has Drive folder name {TARGET_EBAY_ACCOUNT_DRIVE_FOLDER_NAME!r} -- "
+            f"found {len(accounts)} active account(s) total: "
+            f"{[(a.id, a.name, a.ebay_account_drive_folder_name_resolved) for a in accounts]}. "
+            "This script doesn't know which one to target -- investigate/update "
+            "TARGET_EBAY_ACCOUNT_DRIVE_FOLDER_NAME deliberately rather than guessing."
+        )
+    if len(matches) > 1:
+        raise _StateMismatch(
+            f"More than one active eBay account has Drive folder name "
+            f"{TARGET_EBAY_ACCOUNT_DRIVE_FOLDER_NAME!r}: {[(a.id, a.name) for a in matches]}. This should "
+            "never happen (Drive folder names are supposed to be unique per account) -- investigate "
+            "rather than guessing which one is the real target."
+        )
+    target = matches[0]
+    if target.wallet_group_id != TARGET_WALLET_GROUP_ID:
+        raise _StateMismatch(
+            f"Matched eBay account {target.name!r} (id={target.id}) by Drive folder name, but its "
+            f"wallet_group_id={target.wallet_group_id} does not match the expected "
+            f"TARGET_WALLET_GROUP_ID={TARGET_WALLET_GROUP_ID}. This script's BCA Bridging / Payoneer "
+            "Wallet corrections are hardcoded to that wallet-group -- refusing to proceed against an "
+            "inconsistent structural assumption rather than guessing which one is stale."
+        )
+    return target
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +422,41 @@ def _ensure_jan1_opening_balance(
     return {"reversal_id": reversal_id, "new_entry_id": new_entry_id}
 
 
+def _confirm_database_identity(engine) -> bool:
+    """Forces an explicit, checkable confirmation of which real database is
+    about to be committed to -- independent of the Drive preflight check
+    above (STEP 0). QA's finding, 2026-10-01: Drive-readiness and DB-target
+    identity are two independent signals that can desync -- exactly what
+    happened in the real near-miss this guards against (a local
+    DATABASE_URL pointed at a disposable local snapshot while the real
+    Drive happened to already have real documents uploaded to it, and
+    nothing forced an explicit check of the DB target before the commit
+    proceeded).
+
+    Shows the real host (not hidden -- a bare hostname isn't a credential,
+    and it's the one piece of information that would have caught that
+    near-miss immediately: ``localhost`` vs. the real droplet).
+
+    Reads the confirmation via plain ``input()`` -- works identically for
+    an interactive terminal or a piped/non-interactive stdin (e.g. a remote
+    ``echo "dbname" | python3 scripts/backfill_jan_apr_2026.py`` over SSH).
+    Explicitly tested both ways, including a real OS-level pipe (not just a
+    mocked ``input``) -- see tests/test_backfill_jan_apr_2026.py.
+
+    Never raises: a closed/empty stdin (EOFError) is treated as a
+    non-match, same as any other wrong answer -- always returns a plain
+    bool, never guesses in either direction.
+    """
+    db_name = engine.url.database
+    print(f"About to COMMIT real changes to database {db_name!r} on host {engine.url.host!r}.")
+    try:
+        confirm = input(f"Type the database name ({db_name!r}) to confirm this is the intended target: ")
+    except EOFError:
+        print("No confirmation received (stdin closed/empty) -- treating this as a non-match.")
+        return False
+    return confirm.strip() == db_name
+
+
 def _ensure_placeholder_kurs_rate(conn) -> None:
     existing = conn.execute(
         select(kurs_pajak_rates.c.rate_idr).where(kurs_pajak_rates.c.effective_date == PLACEHOLDER_KURS_EFFECTIVE_DATE)
@@ -418,19 +516,17 @@ def main() -> int:
     engine = get_engine()
     print(f"Connecting to database: {engine.url.database!r} (host hidden)\n")
 
-    # --- Resolve the one active eBay account dynamically (never hardcode
-    # its id/name -- see this script's module docstring on why). ----------
+    # --- Resolve the one specific target eBay account dynamically (never a
+    # bare hardcoded id/an assumption that exactly one account exists --
+    # see _resolve_target_ebay_account and TARGET_EBAY_ACCOUNT_DRIVE_FOLDER_
+    # NAME above for why). -------------------------------------------------
     with engine.connect() as probe_conn:
         accounts = list_ebay_accounts(probe_conn)
-    if len(accounts) != 1:
-        print(
-            f"ABORT: expected exactly 1 active eBay account (this is a Prototype-scope, single-account "
-            f"script), found {len(accounts)}: {[(a.id, a.name) for a in accounts]}. This script doesn't "
-            "know which one to target -- investigate/update it deliberately rather than guessing.",
-            file=sys.stderr,
-        )
+    try:
+        ebay_account = _resolve_target_ebay_account(accounts)
+    except _StateMismatch as exc:
+        print(f"ABORT: {exc}", file=sys.stderr)
         return 1
-    ebay_account = accounts[0]
     print(f"Target eBay account: id={ebay_account.id} name={ebay_account.name!r} "
           f"wallet_group_id={ebay_account.wallet_group_id} "
           f"(Drive folders: {ebay_account.ebay_account_drive_folder_name_resolved!r} / "
@@ -448,6 +544,17 @@ def main() -> int:
             print(f"  - {p}")
         return 1
     print("  All 4 fixed-expectation document types found for all 4 periods (Jan-Apr 2026). Proceeding.\n")
+
+    # --- DB identity confirmation -- independent of the Drive preflight
+    # above (see _confirm_database_identity's own docstring for why this
+    # exists as its own separate checkpoint, added 2026-10-01 per QA).
+    print("=" * 100)
+    print("DB IDENTITY CHECK -- independent of the Drive preflight above")
+    print("=" * 100)
+    if not _confirm_database_identity(engine):
+        print("\nABORT: database identity was not confirmed -- nothing has been touched.", file=sys.stderr)
+        return 1
+    print()
 
     with engine.begin() as conn:
         print("=" * 100)
