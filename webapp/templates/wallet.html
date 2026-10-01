@@ -75,6 +75,7 @@
         <td>{{ t.category_label }}</td>
         <td>
           {% if t.status == 'posted' %}<span class="badge green">Posted</span>
+          {% elif t.status == 'resolved_duplicate' %}<span class="badge blue">Resolved — duplicate</span>
           {% elif t.status == 'needs_review' %}<span class="badge amber">Needs Review</span>
           {% elif t.status == 'matched_pending_post' %}<span class="badge amber">Queued</span>
           {% elif t.status == 'awaiting_confirmation' %}<span class="badge amber">Awaiting Confirmation</span>

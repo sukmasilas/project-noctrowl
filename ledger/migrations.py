@@ -847,6 +847,80 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
         ),
     ),
     MigrationStep(
+        id="review_queue_duplicate_of_journal_entry_id",
+        description=(
+            "review_queue.duplicate_of_journal_entry_id (nullable FK to "
+            "journal_entries) — 2026-10-01 incident fix, backs resolving an "
+            "orphaned 'no matching expected payout' review_queue row (see "
+            "ingestion/payoneer.py's _process_ebay_payment_row) once the real "
+            "underlying eBay-payout transaction is later found to have "
+            "already posted correctly via a DIFFERENT, direct posting path. "
+            "Deliberately separate from posted_journal_entry_id (which means "
+            "'this row caused this entry' — not true for a duplicate)."
+        ),
+        table="review_queue",
+        already_applied_check=(
+            "SELECT 1 FROM information_schema.columns WHERE table_name="
+            "'review_queue' AND column_name='duplicate_of_journal_entry_id'"
+        ),
+        apply_sql=(
+            "ALTER TABLE review_queue ADD COLUMN IF NOT EXISTS "
+            "duplicate_of_journal_entry_id INTEGER REFERENCES journal_entries(id)",
+        ),
+    ),
+    MigrationStep(
+        id="review_queue_resolution_note",
+        description=(
+            "review_queue.resolution_note (nullable) — 2026-10-01 incident "
+            "fix, a human-readable explanation accompanying "
+            "duplicate_of_journal_entry_id above."
+        ),
+        table="review_queue",
+        already_applied_check=(
+            "SELECT 1 FROM information_schema.columns WHERE table_name="
+            "'review_queue' AND column_name='resolution_note'"
+        ),
+        apply_sql=(
+            "ALTER TABLE review_queue ADD COLUMN IF NOT EXISTS "
+            "resolution_note TEXT",
+        ),
+    ),
+    MigrationStep(
+        id="review_queue_match_status_check_widen",
+        description=(
+            "ck_review_queue_match_status widened to add 'resolved_duplicate' "
+            "(2026-10-01 incident fix) — a third, terminal status for a row "
+            "whose underlying transaction already posted correctly via a "
+            "different path (see duplicate_of_journal_entry_id above). "
+            "DROP+ADD unconditionally re-run, same idempotency pattern as "
+            "the other CHECK-constraint-widening steps above."
+        ),
+        table="review_queue",
+        apply_sql=(
+            "ALTER TABLE review_queue DROP CONSTRAINT IF EXISTS ck_review_queue_match_status",
+            "ALTER TABLE review_queue ADD CONSTRAINT ck_review_queue_match_status CHECK "
+            "(match_status IN ('matched','needs_review','resolved_duplicate'))",
+        ),
+    ),
+    MigrationStep(
+        id="review_queue_duplicate_link_requires_resolved_status_check",
+        description=(
+            "ck_review_queue_duplicate_link_requires_resolved_status "
+            "(2026-10-01 incident fix) — duplicate_of_journal_entry_id can "
+            "only be set on a row whose match_status is 'resolved_duplicate'. "
+            "DROP+ADD unconditionally re-run, same pattern as above."
+        ),
+        table="review_queue",
+        apply_sql=(
+            "ALTER TABLE review_queue DROP CONSTRAINT IF EXISTS "
+            "ck_review_queue_duplicate_link_requires_resolved_status",
+            "ALTER TABLE review_queue ADD CONSTRAINT "
+            "ck_review_queue_duplicate_link_requires_resolved_status CHECK "
+            "(duplicate_of_journal_entry_id IS NULL OR match_status = "
+            "'resolved_duplicate')",
+        ),
+    ),
+    MigrationStep(
         id="bank_keyword_rules_category_check_widen",
         description=(
             "ck_bank_keyword_rules_category widened to add 'interest_income' "

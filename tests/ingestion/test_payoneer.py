@@ -423,6 +423,205 @@ def test_withdrawal_row_without_confirmation_never_posts_and_warns(iprototype):
     assert conn.execute(select(journal_entries.c.id)).all() == []
 
 
+def test_cross_period_reprocessing_resolves_orphaned_duplicate_not_a_double_post(iprototype):
+    """INCIDENT REGRESSION TEST (2026-10-01) — reproduces the real root cause
+    found during the Jan-Apr 2026 backfill: the SAME combined multi-month
+    Payoneer CSV uploaded into every month's Drive folder gets reprocessed in
+    full on EVERY period's sync pass. A "Payment from eBay" row for a LATER
+    month, processed during an EARLIER period's pass (before that later
+    month's own eBay CSV `Payout` row has been ingested), used to create a
+    permanent orphaned Needs-Review review_queue row and then, once the real
+    match became available on a later pass, post the real transfer WITHOUT
+    ever resolving that earlier orphan — leaving a stale duplicate artifact
+    with a real risk of a human double-posting it later.
+
+    Simulates exactly that ordering:
+    1. "January's pass" processes this payment row before the matching
+       ebay_expected_payouts row exists -> falls to generic Needs-Review
+       staging (no post).
+    2. The matching eBay CSV Payout row is ingested (simulating April's own
+       sync pass reaching the point where its eBay sales CSV is processed).
+    3. "April's pass" reprocesses the SAME full Payoneer CSV (same txn_id)
+       -> this time it matches and posts the real transfer, AND must resolve
+       the January-pass orphan rather than leaving it stuck or creating a
+       second posting for the same money.
+    """
+    conn, topo = iprototype
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 4, 25), rate_idr=Decimal("16400"))
+
+    payment_row = {
+        "Transaction Date": "04/28/2026",
+        "Description": "Payment from eBay",
+        "Credit Amount": "2376.64",
+        "Debit Amount": "",
+        "Status": "Completed",
+        "Reference ID": "",
+        "Additional Description": "",  # real "Reports & Statements" shape: no payout-id text at all
+        "Transaction ID": "txn-orphan-1",
+    }
+
+    # Step 1: "January's pass" — no expected payout known yet.
+    src_id_jan = make_source_document(
+        conn, document_type="payoneer_csv", period_month=_dt.date(2026, 1, 1), wallet_group_id=topo["wallet_group_id"]
+    )
+    result_jan = process_payoneer_rows(
+        conn,
+        wallet_group_id=topo["wallet_group_id"],
+        source_document_id=src_id_jan,
+        rows=[payment_row],
+        confirmations=[],
+        booking_rate_lookup=lookup_most_recent_rate_as_of,
+    )
+    assert result_jan.revenue_settlements_posted == 0
+    assert result_jan.staged_for_review == 1
+    assert result_jan.orphaned_duplicates_resolved == 0
+
+    orphan = conn.execute(
+        select(review_queue.c.id, review_queue.c.match_status, review_queue.c.category, review_queue.c.posted_at).where(
+            review_queue.c.external_ref == "txn-orphan-1"
+        )
+    ).one()
+    assert orphan.match_status == "needs_review"
+    assert orphan.category is None
+    assert orphan.posted_at is None
+
+    # Step 2: April's own eBay sales CSV Payout row is now ingested.
+    conn.execute(
+        ebay_expected_payouts.insert().values(
+            ebay_account_id=topo["ebay_account_id"],
+            ebay_payout_id="7474334928",
+            payout_date=_dt.date(2026, 4, 28),
+            net_amount_usd=Decimal("2376.64"),
+        )
+    )
+
+    # Step 3: "April's pass" reprocesses the SAME full combined CSV, same row.
+    src_id_apr = make_source_document(
+        conn, document_type="payoneer_csv", period_month=_dt.date(2026, 4, 1), wallet_group_id=topo["wallet_group_id"]
+    )
+    result_apr = process_payoneer_rows(
+        conn,
+        wallet_group_id=topo["wallet_group_id"],
+        source_document_id=src_id_apr,
+        rows=[payment_row],
+        confirmations=[],
+        booking_rate_lookup=lookup_most_recent_rate_as_of,
+    )
+    assert result_apr.revenue_settlements_posted == 1
+    assert result_apr.staged_for_review == 0
+    assert result_apr.orphaned_duplicates_resolved == 1
+
+    # Exactly ONE journal entry for this money — not two.
+    entries = conn.execute(select(journal_entries.c.id, journal_entries.c.source_type)).all()
+    assert len(entries) == 1
+    assert entries[0].source_type == "inter_account_transfer"
+    real_entry_id = entries[0].id
+
+    # The January-pass orphan is now resolved, not posted, not deleted.
+    resolved = conn.execute(
+        select(
+            review_queue.c.match_status,
+            review_queue.c.category,
+            review_queue.c.posted_at,
+            review_queue.c.posted_journal_entry_id,
+            review_queue.c.duplicate_of_journal_entry_id,
+            review_queue.c.resolution_note,
+        ).where(review_queue.c.id == orphan.id)
+    ).one()
+    assert resolved.match_status == "resolved_duplicate"
+    assert resolved.category == "revenue_settlement"
+    assert resolved.posted_at is not None
+    assert resolved.posted_journal_entry_id is None  # this row itself never posted anything
+    assert resolved.duplicate_of_journal_entry_id == real_entry_id
+    assert resolved.resolution_note and str(real_entry_id) in resolved.resolution_note
+
+    # Step 4: a THIRD, later pass reprocesses the same CSV again (e.g. May
+    # re-uploading the same combined file) — must be a complete no-op: no
+    # second posting, no re-touching of the already-resolved orphan.
+    src_id_may = make_source_document(
+        conn, document_type="payoneer_csv", period_month=_dt.date(2026, 5, 1), wallet_group_id=topo["wallet_group_id"]
+    )
+    result_may = process_payoneer_rows(
+        conn,
+        wallet_group_id=topo["wallet_group_id"],
+        source_document_id=src_id_may,
+        rows=[payment_row],
+        confirmations=[],
+        booking_rate_lookup=lookup_most_recent_rate_as_of,
+    )
+    assert result_may.revenue_settlements_posted == 0
+    assert result_may.staged_for_review == 0
+    assert result_may.orphaned_duplicates_resolved == 0
+    assert len(conn.execute(select(journal_entries.c.id)).all()) == 1  # still just the one real entry
+
+
+def test_resolve_orphaned_duplicate_never_touches_an_already_labeled_row(iprototype):
+    """If a human already labeled/acted on the orphan row before the later
+    pass's successful match runs (category already set), the resolver must
+    NOT silently rewrite it — that could mask a genuine double-post needing
+    human attention. Only an untouched (category IS NULL, posted_at IS NULL)
+    orphan is ever auto-resolved.
+    """
+    conn, topo = iprototype
+    seed_kurs_pajak_rate(conn, effective_date=_dt.date(2026, 4, 25), rate_idr=Decimal("16400"))
+
+    payment_row = {
+        "Transaction Date": "04/28/2026",
+        "Description": "Payment from eBay",
+        "Credit Amount": "2376.64",
+        "Debit Amount": "",
+        "Status": "Completed",
+        "Reference ID": "",
+        "Additional Description": "",
+        "Transaction ID": "txn-orphan-2",
+    }
+    src_id_jan = make_source_document(
+        conn, document_type="payoneer_csv", period_month=_dt.date(2026, 1, 1), wallet_group_id=topo["wallet_group_id"]
+    )
+    process_payoneer_rows(
+        conn,
+        wallet_group_id=topo["wallet_group_id"],
+        source_document_id=src_id_jan,
+        rows=[payment_row],
+        confirmations=[],
+        booking_rate_lookup=lookup_most_recent_rate_as_of,
+    )
+    orphan_id = conn.execute(select(review_queue.c.id).where(review_queue.c.external_ref == "txn-orphan-2")).scalar_one()
+
+    # A human labels it (e.g. incorrectly, as 'other') BEFORE the later pass runs.
+    from sqlalchemy import update as _update
+
+    conn.execute(_update(review_queue).where(review_queue.c.id == orphan_id).values(category="other", match_status="matched"))
+
+    conn.execute(
+        ebay_expected_payouts.insert().values(
+            ebay_account_id=topo["ebay_account_id"],
+            ebay_payout_id="7474334928",
+            payout_date=_dt.date(2026, 4, 28),
+            net_amount_usd=Decimal("2376.64"),
+        )
+    )
+    src_id_apr = make_source_document(
+        conn, document_type="payoneer_csv", period_month=_dt.date(2026, 4, 1), wallet_group_id=topo["wallet_group_id"]
+    )
+    result_apr = process_payoneer_rows(
+        conn,
+        wallet_group_id=topo["wallet_group_id"],
+        source_document_id=src_id_apr,
+        rows=[payment_row],
+        confirmations=[],
+        booking_rate_lookup=lookup_most_recent_rate_as_of,
+    )
+    assert result_apr.revenue_settlements_posted == 1
+    assert result_apr.orphaned_duplicates_resolved == 0  # not auto-touched — already human-labeled
+
+    untouched = conn.execute(
+        select(review_queue.c.category, review_queue.c.match_status).where(review_queue.c.id == orphan_id)
+    ).one()
+    assert untouched.category == "other"
+    assert untouched.match_status == "matched"
+
+
 def test_real_august_card_charge_rows_stage_for_review_not_a_crash(iprototype):
     """The real August report introduces a new real Description shape never
     seen before ('Card charge (OPENAI *CHATGPT SUBSCR)', etc. — the

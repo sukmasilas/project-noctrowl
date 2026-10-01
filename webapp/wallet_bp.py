@@ -74,7 +74,7 @@ class WalletTransaction:
     amount_usd: Decimal | None
     category_or_type: str
     category_label: str
-    status: str  # 'posted' | 'matched_pending_post' | 'needs_review' | 'not_posted' | 'awaiting_confirmation'
+    status: str  # 'posted' | 'matched_pending_post' | 'needs_review' | 'not_posted' | 'awaiting_confirmation' | 'resolved_duplicate'
     status_detail: str | None
     journal_entry_id: int | None
     source: str  # 'ebay_csv' | 'review_queue'
@@ -249,12 +249,30 @@ def _bank_or_payoneer_register(
 
     out: list[WalletTransaction] = []
     for r in rows:
-        if r.posted_at is not None:
-            status, detail = "posted", None
+        # 'resolved_duplicate' (2026-10-01 incident fix) checked FIRST: such
+        # a row always has posted_at set (so post_pending_rows never re-picks
+        # it up — see ingestion/schema.py's column docstring), but it would
+        # otherwise be misreported as a plain "Posted" row with no journal
+        # entry of its own (posted_journal_entry_id stays NULL for these —
+        # the row itself never posted anything). journal_entry_id below
+        # points at the REAL entry this row's transaction is duplicated by,
+        # for genuine traceability, not at a journal entry this row caused.
+        if r.match_status == "resolved_duplicate":
+            status, detail, journal_entry_id = (
+                "resolved_duplicate",
+                r.resolution_note or f"Already accounted for — duplicate of journal_entry_id={r.duplicate_of_journal_entry_id}.",
+                r.duplicate_of_journal_entry_id,
+            )
+        elif r.posted_at is not None:
+            status, detail, journal_entry_id = "posted", None, r.posted_journal_entry_id
         elif r.match_status == "needs_review":
-            status, detail = "needs_review", r.sign_mismatch_reason or None
+            status, detail, journal_entry_id = "needs_review", r.sign_mismatch_reason or None, r.posted_journal_entry_id
         else:
-            status, detail = "matched_pending_post", "Matched — queued for the next sync."
+            status, detail, journal_entry_id = (
+                "matched_pending_post",
+                "Matched — queued for the next sync.",
+                r.posted_journal_entry_id,
+            )
         out.append(
             WalletTransaction(
                 transaction_date=r.transaction_date,
@@ -265,7 +283,7 @@ def _bank_or_payoneer_register(
                 category_label=_CATEGORY_LABELS.get(r.category, r.category or "Uncategorized"),
                 status=status,
                 status_detail=detail,
-                journal_entry_id=r.posted_journal_entry_id,
+                journal_entry_id=journal_entry_id,
                 source="review_queue",
             )
         )

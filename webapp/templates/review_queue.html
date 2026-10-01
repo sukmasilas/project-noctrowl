@@ -49,11 +49,13 @@
         <td>{{ row.source_type }}</td>
         <td>
           {% if row.match_status == 'matched' %}<span class="badge green">Matched</span>
+          {% elif row.match_status == 'resolved_duplicate' %}<span class="badge blue">Resolved — duplicate</span>
           {% else %}<span class="badge amber">Needs Review</span>{% endif %}
         </td>
         <td id="rq-category-{{ row.id }}">{{ row.category or '—' }}</td>
         <td id="rq-posted-{{ row.id }}">
-          {% if row.posted_at %}<span class="badge green">✓ {{ row.posted_at.strftime('%Y-%m-%d %H:%M') }}</span>
+          {% if row.match_status == 'resolved_duplicate' %}<span class="badge blue" title="{{ row.resolution_note }}">Already accounted for — journal entry #{{ row.duplicate_of_journal_entry_id }}</span>
+          {% elif row.posted_at %}<span class="badge green">✓ {{ row.posted_at.strftime('%Y-%m-%d %H:%M') }}</span>
           {% elif row.sign_mismatch_reason %}<span class="badge red" title="{{ row.sign_mismatch_reason }}">⚠ Not posted — sign/category mismatch</span>
           {% elif row.missing_reference_reason %}<span class="badge red" title="{{ row.missing_reference_reason }}">⚠ Not posted — missing employee reference</span>
           {% elif row.posting_error_reason %}<span class="badge red" title="{{ row.posting_error_reason }}">⚠ Not posted — posting error</span>

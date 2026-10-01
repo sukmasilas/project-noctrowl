@@ -428,6 +428,30 @@ review_queue = Table(
     # overwhelming majority. Cleared on a later successful post, same as the
     # two reason columns above.
     Column("posting_error_reason", Text, nullable=True),
+    # Added 2026-10-01 (incident fix — see Main-agent's "orphaned Payoneer
+    # eBay-payment review_queue rows" brief): when a generic "no matching
+    # expected payout" review_queue row (staged by
+    # ingestion.payoneer._process_ebay_payment_row when a period's own eBay
+    # CSV `Payout` row hasn't been ingested yet) is later found, on a
+    # subsequent sync pass, to actually correspond to a real eBay payout that
+    # posted successfully via the DIRECT posting path (never touching
+    # review_queue at all — see that module's docstring), the orphaned row is
+    # resolved here rather than left permanently stuck on Needs Review OR
+    # silently re-posted a second time. ``duplicate_of_journal_entry_id``
+    # points at the REAL journal entry this row's underlying transaction is
+    # already fully accounted for by — deliberately a SEPARATE column from
+    # ``posted_journal_entry_id`` (which specifically means "this row itself
+    # caused this journal entry to be posted" — not true here, this row never
+    # posted anything). See ``match_status='resolved_duplicate'`` below and
+    # ``ingestion.matching._resolve_orphaned_review_queue_duplicate`` /
+    # ``ingestion.payoneer._resolve_orphaned_review_queue_duplicate``.
+    Column("duplicate_of_journal_entry_id", Integer, ForeignKey("journal_entries.id"), nullable=True),
+    # Added 2026-10-01, alongside duplicate_of_journal_entry_id above — a
+    # human-readable explanation of why this row was resolved as a duplicate
+    # (which real journal entry it duplicates and how/when that was
+    # determined), shown in the Review Queue / Wallet screens instead of the
+    # misleading "Needs Review" default a human might otherwise see forever.
+    Column("resolution_note", Text, nullable=True),
     Column("labeled_at", DateTime(timezone=True), nullable=True),
     Column("posted_at", DateTime(timezone=True), nullable=True),
     Column("posted_journal_entry_id", Integer, ForeignKey("journal_entries.id"), nullable=True),
@@ -436,7 +460,19 @@ review_queue = Table(
         "source_type IN ('payoneer_csv','bank_statement','ebay_sales_csv')",
         name="ck_review_queue_source_type",
     ),
-    CheckConstraint("match_status IN ('matched','needs_review')", name="ck_review_queue_match_status"),
+    # 'resolved_duplicate' added 2026-10-01 (incident fix, see
+    # duplicate_of_journal_entry_id above) — a third, terminal status distinct
+    # from both 'matched' (will post / already posted via THIS row) and
+    # 'needs_review' (outstanding, needs a human). A resolved_duplicate row is
+    # deliberately given posted_at (so post_pending_rows' `WHERE posted_at IS
+    # NULL` selection never picks it up and re-attempts posting it) but
+    # NEVER posted_journal_entry_id (it never caused a posting of its own —
+    # see ck_review_queue_no_journal_without_posted_at below, which still
+    # holds: posted_journal_entry_id stays NULL while posted_at is set).
+    CheckConstraint(
+        "match_status IN ('matched','needs_review','resolved_duplicate')",
+        name="ck_review_queue_match_status",
+    ),
     # 'internal_transfer_landing' added 2026-09-01 (Fix — see CLAUDE.md's
     # Bridging Account correction): distinct from 'internal_transfer', which
     # now means ONLY the genuine, separate Bridging -> Main sweep (see
@@ -546,6 +582,15 @@ review_queue = Table(
     CheckConstraint(
         "posted_journal_entry_id IS NULL OR posted_at IS NOT NULL",
         name="ck_review_queue_no_journal_without_posted_at",
+    ),
+    # Added 2026-10-01, alongside duplicate_of_journal_entry_id/
+    # 'resolved_duplicate' above — keeps the two tightly coupled: a row can
+    # only carry a duplicate-of link when it's actually in the
+    # resolved-duplicate status (never a leftover/stale link on a row that's
+    # since been reclassified some other way).
+    CheckConstraint(
+        "duplicate_of_journal_entry_id IS NULL OR match_status = 'resolved_duplicate'",
+        name="ck_review_queue_duplicate_link_requires_resolved_status",
     ),
     CheckConstraint(
         "loan_repayment_amount_idr IS NULL OR loan_repayment_amount_idr > 0",

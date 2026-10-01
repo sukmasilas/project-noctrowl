@@ -22,6 +22,44 @@ PERIOD = _dt.date(2026, 7, 1)
 DAY = _dt.date(2026, 7, 5)
 
 
+def test_review_queue_page_renders_resolved_duplicate_row_without_crashing(client, wtopology):
+    """INCIDENT FIX (2026-10-01) regression test: a 'resolved_duplicate' row
+    must render its own distinct badge (not the misleading default "Needs
+    Review" the template's old binary matched/else check would have shown),
+    and must NOT be clickable to open the inline labeling editor — this row
+    is terminal, never meant to be relabeled/posted through the normal flow.
+    """
+    conn, topo = wtopology
+    src_id = make_source_document(
+        conn, document_type="payoneer_csv", period_month=PERIOD, wallet_group_id=topo["wallet_group_id"]
+    )
+    make_review_queue_row(
+        conn,
+        source_document_id=src_id,
+        transaction_date=DAY,
+        amount_idr=Decimal("1640000"),
+        amount_usd_ref=Decimal("100.00"),
+        source_type="payoneer_csv",
+        wallet_group_id=topo["wallet_group_id"],
+        raw_description="Payment from eBay",
+        match_status="resolved_duplicate",
+        category="revenue_settlement",
+        posted_at=_dt.datetime.now(_dt.timezone.utc),
+        resolution_note="Resolved automatically: duplicate artifact, kept for traceability.",
+    )
+    conn.commit()
+
+    resp = client.get(f"/review-queue/?period={PERIOD.isoformat()[:7]}")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "Resolved" in body
+    # Must not fall into the template's amber "Needs Review" badge default —
+    # the summary card/filter dropdown legitimately say "Needs Review"
+    # elsewhere on the page, so check the specific row-status badge markup,
+    # not a blanket page-wide substring.
+    assert '<span class="badge amber">Needs Review</span>' not in body
+
+
 def test_labeling_a_needs_review_row_saves_but_does_not_post(client, wtopology):
     conn, topo = wtopology
     src_id = make_source_document(conn, document_type="bank_statement_wallet_group", period_month=PERIOD, wallet_group_id=topo["wallet_group_id"])

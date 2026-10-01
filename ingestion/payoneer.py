@@ -14,11 +14,11 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
 from ingestion.matching import RawLine, stage_raw_lines
-from ingestion.schema import ebay_expected_payouts, payoneer_csv_posted_transactions
+from ingestion.schema import ebay_expected_payouts, payoneer_csv_posted_transactions, review_queue
 from ledger import posting
 
 _PAYOUT_ID_RE = re.compile(r"P\s*(\d+)")
@@ -204,6 +204,15 @@ class PayoneerIngestResult:
     withdrawals_posted: int = 0
     staged_for_review: int = 0
     parse_warnings: list[str] = field(default_factory=list)
+    # Added 2026-10-01 (incident fix) — see
+    # _resolve_orphaned_review_queue_duplicate below. Counts a genuinely
+    # different outcome from staged_for_review/revenue_settlements_posted:
+    # an EARLIER sync pass staged this same "Payment from eBay" row as a
+    # generic Needs-Review line (no expected payout known yet at the time),
+    # and THIS pass's successful direct-posting match just resolved that
+    # now-orphaned row rather than leaving it stuck forever or re-posting the
+    # same money a second time.
+    orphaned_duplicates_resolved: int = 0
 
 
 def process_payoneer_rows(
@@ -340,6 +349,113 @@ def process_payoneer_rows(
     return result
 
 
+def _resolve_orphaned_review_queue_duplicate(
+    conn: Connection,
+    *,
+    wallet_group_id: int,
+    txn_id: str | None,
+    journal_entry_id: int,
+) -> int | None:
+    """INCIDENT FIX (2026-10-01): closes a real orphaned-review_queue-row gap
+    found during the real Jan-Apr 2026 backfill — see Main-agent's brief for
+    the full root-cause diagnosis. Summary: the same combined multi-month
+    Payoneer CSV, present in every month's Drive folder, gets reprocessed in
+    full on EVERY period's sync pass (``ingestion.sync.run_sync_for_period``
+    runs sequentially, Jan -> Feb -> Mar -> Apr). A given "Payment from eBay"
+    row for a LATER month can get processed during an EARLIER month's pass —
+    at that point its matching ``ebay_expected_payouts`` row (populated from
+    that LATER month's own eBay sales CSV `Payout` row) doesn't exist yet, so
+    ``_process_ebay_payment_row`` falls through to generic Needs-Review
+    staging (see its ``expected is None`` branch) and creates a real
+    ``review_queue`` row for it, keyed by this row's own Payoneer Transaction
+    ID (``external_ref``).
+
+    Once the real month's OWN pass later runs, its eBay CSV IS ingested, so
+    the SAME Payoneer CSV row (reprocessed again in that pass, since the
+    identical full file sits in every month's folder) now finds a match and
+    posts correctly via the DIRECT path (``post_inter_account_transfer``,
+    never touching review_queue for the success case at all — see this
+    module's docstring). Before this fix, nothing ever went back to resolve
+    the EARLIER pass's now-stale orphaned row — the real transaction posted
+    exactly once, correctly, but a permanent, un-postable, un-resolvable
+    "Needs Review" artifact was left behind for it, with a live risk that a
+    human manually posting it through the normal Review Queue flow would
+    double-post the same money a second time.
+
+    Called from the SUCCESS branch of ``_process_ebay_payment_row`` (after
+    the real transfer is posted) — looks for a pre-existing, UNTOUCHED
+    orphan row (``category IS NULL AND posted_at IS NULL`` — i.e. nothing a
+    human or any other process has already acted on) with the same
+    ``(source_type='payoneer_csv', external_ref=txn_id)`` key the row-
+    creation idempotency in ``ingestion.matching.stage_raw_lines`` already
+    uses, and resolves it: ``match_status='resolved_duplicate'``,
+    ``duplicate_of_journal_entry_id`` pointing at the REAL entry,
+    ``posted_at`` set (so ``post_pending_rows``' ``WHERE posted_at IS NULL``
+    selection never picks this row up again), but deliberately
+    ``posted_journal_entry_id`` left NULL — this row itself never posted
+    anything; see ingestion/schema.py's column docstring for why that
+    distinction matters. ``category`` is set to 'revenue_settlement' (an
+    honest, accurate label for what the underlying transaction actually was)
+    — safe to set alongside ``posted_at`` specifically because
+    ``post_pending_rows`` only ever considers ``posted_at IS NULL`` rows, so
+    a non-NULL category here can never trigger a second posting attempt.
+
+    Returns the resolved row's id, or None if no untouched orphan exists for
+    this transaction (the overwhelmingly common case — most "Payment from
+    eBay" rows match on their very first processing pass and never create a
+    review_queue row at all).
+
+    Deliberately does NOT touch a row that already has a category or
+    posted_at set (i.e. a human or some other process already acted on it
+    before this fix shipped, or in some other unanticipated ordering) —
+    silently "fixing" that would risk masking a genuine double-post that
+    needs human eyes, not an automatic rewrite. See
+    scripts/resolve_orphaned_payoneer_duplicates.py for the one-off,
+    state-verifying cleanup of the specific rows already affected in
+    production before this fix existed.
+    """
+    if txn_id is None:
+        return None
+    row = conn.execute(
+        select(review_queue.c.id).where(
+            review_queue.c.source_type == "payoneer_csv",
+            review_queue.c.external_ref == txn_id,
+            review_queue.c.wallet_group_id == wallet_group_id,
+            review_queue.c.category.is_(None),
+            review_queue.c.posted_at.is_(None),
+        )
+    ).first()
+    if row is None:
+        return None
+
+    conn.execute(
+        update(review_queue)
+        .where(review_queue.c.id == row.id)
+        .values(
+            match_status="resolved_duplicate",
+            category="revenue_settlement",
+            posted_at=_dt.datetime.now(_dt.timezone.utc),
+            duplicate_of_journal_entry_id=journal_entry_id,
+            resolution_note=(
+                "Resolved automatically (2026-10-01 incident fix): this row was originally "
+                "staged as a generic Needs-Review line because no matching expected eBay "
+                "payout existed yet when this period's Payoneer CSV was first processed — a "
+                "known cross-period re-processing gap (see CLAUDE.md / the Jan-Apr 2026 "
+                "backfill incident). The real underlying transaction has already posted "
+                f"correctly, exactly once, as journal_entry_id={journal_entry_id} (an "
+                "inter-account transfer from the eBay Wallet to the Payoneer Wallet), once "
+                "the matching eBay Payout row was ingested in a later sync pass. This row "
+                "itself was never posted and never will be — it is a duplicate artifact only, "
+                "kept here, unposted, for traceability."
+            ),
+            sign_mismatch_reason=None,
+            missing_reference_reason=None,
+            posting_error_reason=None,
+        )
+    )
+    return row.id
+
+
 def _process_ebay_payment_row(
     conn: Connection,
     *,
@@ -433,4 +549,13 @@ def _process_ebay_payment_row(
     )
     if txn_id is not None:
         _mark_payoneer_row_posted(conn, wallet_group_id, txn_id, entry_id)
+    # INCIDENT FIX (2026-10-01): resolve any earlier-pass orphaned
+    # Needs-Review row for this exact transaction now that it's confirmed to
+    # have posted correctly here — see
+    # _resolve_orphaned_review_queue_duplicate's docstring for the full
+    # cross-period scenario this closes.
+    if _resolve_orphaned_review_queue_duplicate(
+        conn, wallet_group_id=wallet_group_id, txn_id=txn_id, journal_entry_id=entry_id
+    ) is not None:
+        result.orphaned_duplicates_resolved += 1
     result.revenue_settlements_posted += 1

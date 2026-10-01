@@ -140,10 +140,6 @@ class AutoMatchResult:
     needs_review: int = 0
 
 
-def _within_tolerance(a: Decimal, b: Decimal, date_a: _dt.date, date_b: _dt.date) -> bool:
-    return abs(a - b) <= AMOUNT_TOLERANCE_IDR and abs((date_a - date_b).days) <= DATE_TOLERANCE_DAYS
-
-
 def _try_rule_a_expected_payout(conn: Connection, row) -> tuple[str, str, dict] | None:
     """(a) match an expected eBay payout. Applies to inflow lines only.
     Scoped to the row's wallet_group (via its eBay accounts) if set, else
@@ -165,9 +161,26 @@ def _try_rule_a_expected_payout(conn: Connection, row) -> tuple[str, str, dict] 
         return None
 
     for candidate in conn.execute(query).all():
-        if abs(candidate.net_amount_usd - row.amount_usd_ref) <= Decimal("0.01") and _within_tolerance(
-            row.amount_idr, row.amount_idr, row.transaction_date, candidate.payout_date
-        ):
+        # BUG FIX (2026-10-01, found by Main-agent during the orphaned-
+        # review_queue-row investigation): this used to call
+        # ``_within_tolerance(row.amount_idr, row.amount_idr, ...)`` —
+        # comparing row.amount_idr to ITSELF, which is always trivially true
+        # (0 <= AMOUNT_TOLERANCE_IDR) and made the amount-in-IDR portion of
+        # this check a complete no-op; only the date portion (comparing the
+        # two REAL dates, row.transaction_date vs candidate.payout_date) was
+        # ever genuinely checked. This never caused an incorrect match in
+        # practice, since the USD-amount check immediately above already
+        # does the real amount validation (and is the authoritative one —
+        # ``row.amount_idr`` is itself DERIVED from ``row.amount_usd_ref`` at
+        # a booking-date FX rate, per ingestion/payoneer.py's generic-line
+        # staging, so re-checking it in IDR would be redundant with the USD
+        # check even if it weren't self-compared). Replaced with a plain,
+        # direct date-tolerance check — correct and no longer redundant/
+        # no-op, using the same DATE_TOLERANCE_DAYS constant every other
+        # rule in this module already shares.
+        if abs(candidate.net_amount_usd - row.amount_usd_ref) <= Decimal("0.01") and abs(
+            (row.transaction_date - candidate.payout_date).days
+        ) <= DATE_TOLERANCE_DAYS:
             return "revenue_settlement", "a", {"expected_payout_id": candidate.id, "ebay_account_id": candidate.ebay_account_id}
     return None
 

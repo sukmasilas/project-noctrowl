@@ -249,6 +249,57 @@ def test_rule_a_no_match_falls_to_needs_review_safely(iprototype):
     assert row.category is None
 
 
+def test_rule_a_respects_real_date_tolerance_not_a_self_compare_noop(iprototype):
+    """BUG FIX REGRESSION TEST (2026-10-01): ``_try_rule_a_expected_payout``
+    used to compare ``row.amount_idr`` to ITSELF (always trivially true),
+    making the amount-in-IDR portion of its tolerance check a complete
+    no-op — only the date portion was ever genuinely enforced, and only by
+    accident of the old helper's signature. This never produced a wrong
+    MATCH in practice (the real USD-amount check a few lines above already
+    validates amount correctly), but confirms the fix still correctly
+    REJECTS a candidate outside the real date tolerance (DATE_TOLERANCE_DAYS
+    = 3), proving the date check is a genuine, deliberate comparison now
+    (``row.transaction_date`` vs ``candidate.payout_date``), not a
+    coincidental side effect of a self-compare.
+    """
+    conn, topo = iprototype
+    conn.execute(
+        ebay_expected_payouts.insert().values(
+            ebay_account_id=topo["ebay_account_id"],
+            ebay_payout_id="PAYOUT-DATE-1",
+            payout_date=_dt.date(2026, 5, 4),
+            net_amount_usd=Decimal("100.00"),
+        )
+    )
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    stage_raw_lines(
+        conn,
+        source_type="payoneer_csv",
+        source_document_id=src_id,
+        wallet_group_id=topo["wallet_group_id"],
+        lines=[
+            RawLine(
+                # 5 days after the candidate's payout_date — same USD amount,
+                # but OUTSIDE the ±3-day tolerance. Must NOT match.
+                transaction_date=_dt.date(2026, 5, 9),
+                raw_description="Payment from eBay",
+                amount_idr=Decimal("1631000"),
+                amount_usd_ref=Decimal("100.00"),
+                external_ref="txn-date-tolerance-1",
+            )
+        ],
+    )
+    result = run_auto_match(conn)
+    assert result.matched == 0
+    assert result.needs_review == 1
+    row = conn.execute(select(review_queue.c.match_status, review_queue.c.category)).one()
+    assert row.match_status == "needs_review"
+    assert row.category is None
+    # The candidate must remain unconsumed — a rejected match must never
+    # claim ebay_expected_payouts.matched_at.
+    assert conn.execute(select(ebay_expected_payouts.c.matched_at)).scalar_one() is None
+
+
 # ---------------------------------------------------------------------------
 # rule (b) — invoice match, including the invoice_journal_links traceability
 # write (QA fix A, 2026-09).
