@@ -107,16 +107,16 @@ AMOUNT_USD_TOLERANCE = Decimal("0.01")
 # module's docstring). Re-verified live against the real database by THIS
 # script before anything is touched — never trusted blindly, per the brief.
 ORPHANED_ROWS = [
-    {"review_queue_id": 1709, "expected_duplicate_journal_entry_id": 1822},
-    {"review_queue_id": 1710, "expected_duplicate_journal_entry_id": 1820},
-    {"review_queue_id": 1711, "expected_duplicate_journal_entry_id": 2012},
-    {"review_queue_id": 1712, "expected_duplicate_journal_entry_id": 2010},
-    {"review_queue_id": 1713, "expected_duplicate_journal_entry_id": 2008},
-    {"review_queue_id": 1714, "expected_duplicate_journal_entry_id": 2007},
-    {"review_queue_id": 1715, "expected_duplicate_journal_entry_id": 2168},
-    {"review_queue_id": 1716, "expected_duplicate_journal_entry_id": 2166},
-    {"review_queue_id": 1717, "expected_duplicate_journal_entry_id": 2165},
-    {"review_queue_id": 1718, "expected_duplicate_journal_entry_id": 2164},
+    {"review_queue_id": 1709, "expected_duplicate_journal_entry_id": 2164},  # 2026-04-28
+    {"review_queue_id": 1710, "expected_duplicate_journal_entry_id": 2165},  # 2026-04-21
+    {"review_queue_id": 1711, "expected_duplicate_journal_entry_id": 2166},  # 2026-04-14
+    {"review_queue_id": 1712, "expected_duplicate_journal_entry_id": 2168},  # 2026-04-07
+    {"review_queue_id": 1713, "expected_duplicate_journal_entry_id": 2007},  # 2026-03-31
+    {"review_queue_id": 1714, "expected_duplicate_journal_entry_id": 2008},  # 2026-03-24
+    {"review_queue_id": 1715, "expected_duplicate_journal_entry_id": 2010},  # 2026-03-17
+    {"review_queue_id": 1716, "expected_duplicate_journal_entry_id": 2012},  # 2026-03-10
+    {"review_queue_id": 1717, "expected_duplicate_journal_entry_id": 1820},  # 2026-02-24
+    {"review_queue_id": 1718, "expected_duplicate_journal_entry_id": 1822},  # 2026-02-10
 ]
 
 
