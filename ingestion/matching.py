@@ -611,6 +611,10 @@ _DIRECTIONAL_CATEGORY_SIGNS: dict[str, str] = {
     # ingestion.matching._post_customer_refund and
     # ledger.posting.post_refund.
     "customer_refund": "outflow",
+    # Added 2026-10-03 — eBay returning money after the seller wins a buyer
+    # dispute: the inflow mirror of 'customer_refund'. See
+    # _post_ebay_dispute_won / ledger.posting.post_refund_reversal.
+    "ebay_dispute_won": "inflow",
     # Added 2026-09-29 — money coming BACK to reduce a previously-recorded
     # COGS purchase is always an inflow (confirmed against both real
     # examples: an employee's Rp 415,000 unspent cash-advance excess
@@ -1006,6 +1010,38 @@ def _post_customer_refund(conn: Connection, row) -> int:
     )
 
 
+def _post_ebay_dispute_won(conn: Connection, row) -> int:
+    """'ebay_dispute_won' (added 2026-10-03) — inflow mirror of
+    'customer_refund': eBay returns money after the seller wins a buyer
+    dispute. Same stage/scope rules as ``_post_customer_refund`` (eBay
+    Wallet stage needs ``ebay_account_id``; Payoneer stage needs a
+    payoneer_csv-sourced ``wallet_group_id``); anything else (Master Account,
+    Bridging) raises, caught by ``post_pending_rows``' per-row isolation.
+    """
+    usd_kwargs = _usd_reference_kwargs(row)
+    common = dict(
+        entry_date=row.transaction_date,
+        amount_idr=abs(row.amount_idr),
+        usd_amount=usd_kwargs["amount_usd_ref"],
+        kurs_pajak_rate=usd_kwargs["fx_rate_used"],
+        memo=row.raw_description,
+    )
+    if row.ebay_account_id is not None:
+        return posting.post_refund_reversal(
+            conn, stage="ebay_wallet", ebay_account_id=row.ebay_account_id, **common
+        )
+    if row.wallet_group_id is not None and row.source_type == "payoneer_csv":
+        return posting.post_refund_reversal(
+            conn, stage="payoneer", wallet_group_id=row.wallet_group_id, **common
+        )
+    raise ValueError(
+        "Category 'ebay_dispute_won' requires this line to be scoped to a specific eBay account "
+        "(eBay Wallet stage) or to be a Payoneer-CSV-sourced, wallet-group-scoped line (Payoneer "
+        "stage) — there is no consolidated (Master Account) or Bridging-Account stage to reverse a "
+        "refund against. Not posted — please re-check the classification or scope of this row."
+    )
+
+
 def _post_one_row(conn: Connection, row) -> int | None:
     """Returns the journal_entry_id this row should link to, or None if
     it's classified but genuinely not ready to post yet (see
@@ -1191,6 +1227,9 @@ def _post_one_row(conn: Connection, row) -> int | None:
 
     if row.category == "customer_refund":
         return _post_customer_refund(conn, row)
+
+    if row.category == "ebay_dispute_won":
+        return _post_ebay_dispute_won(conn, row)
 
     if row.category == "operating_expense":
         if row.linked_invoice_id is not None:

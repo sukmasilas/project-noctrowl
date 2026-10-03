@@ -26,6 +26,9 @@ CATEGORY_OPTIONS = [
     # Revenue), previously only reachable via the eBay-CSV Refund path.
     # Placed next to Revenue Settlement — same revenue side of the P&L.
     ("customer_refund", "Customer Refund"),
+    # Added 2026-10-03 — inflow mirror of Customer Refund: eBay returns money
+    # after the seller wins a buyer dispute. Manual only, no keyword rule.
+    ("ebay_dispute_won", "eBay Dispute Won (refund reversed)"),
     ("cogs_purchase", "COGS"),
     # Added 2026-09-10 — more specific COGS sub-labels (see CLAUDE.md and
     # ledger/chart_of_accounts.py's COGS account). All three post to the

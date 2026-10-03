@@ -379,6 +379,9 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "new INVENTORY_DEPOSITS asset account (a down-payment/deposit "
             "paid toward inventory not yet received — see ledger/chart_of_"
             "accounts.py and ledger.posting.post_inventory_deposit); "
+            "'ebay_dispute_won', added 2026-10-03 (eBay returning money after "
+            "the seller wins a buyer dispute — inflow mirror of 'customer_refund', "
+            "see ledger.posting.post_refund_reversal); "
             "and 'shipping_cost_refund', added 2026-10-03 (a shipping "
             "provider's refund for an outbound shipping charge — a credit "
             "reducing the existing SHIPPING_COST account, see ledger.posting."
@@ -397,8 +400,8 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "'interest_income','contract_labor','shipping_cost','payroll',"
             "'employee_loan_disbursement','item_purchase','inbound_shipping',"
             "'item_purchase_and_inbound_shipping','packaging_supplies',"
-            "'staff_meals_welfare','customer_refund','cogs_refund',"
-            "'shipping_cost_refund','inventory_deposit','other'))",
+            "'staff_meals_welfare','customer_refund','ebay_dispute_won',"
+            "'cogs_refund','shipping_cost_refund','inventory_deposit','other'))",
         ),
     ),
     MigrationStep(

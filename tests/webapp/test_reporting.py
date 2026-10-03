@@ -377,6 +377,49 @@ def test_shipping_cost_refund_pnl_cashflow_and_drilldown(prototype):
     assert cf.difference_idr == Decimal("0")
 
 
+def test_customer_refund_then_dispute_won_nets_sales_returns_to_zero(prototype):
+    """2026-10-03: a refund in one period followed by an equal
+    'ebay_dispute_won' reversal in the next nets Sales Returns to zero across
+    both, with Cash Flow difference_idr == 0 and the revenue drill-down tied
+    out to the P&L's own contra-revenue line.
+    """
+    from webapp.reports_bp import _DRILLDOWN_CODES
+
+    conn, topo = prototype
+    march, april = _dt.date(2026, 3, 27), _dt.date(2026, 4, 16)
+    amt = Decimal("9951000")
+    posting.post_ebay_sale(
+        conn, ebay_account_id=topo["ebay_account_id"], entry_date=march, gross_sale_price_usd=Decimal("620"),
+        ebay_fee_usd=Decimal("0"), kurs_pajak_rate=Decimal("16050"), ebay_order_ref="13-14249-26663",
+    )
+    posting.post_refund(
+        conn, entry_date=march, amount_idr=amt, stage="ebay_wallet", ebay_account_id=topo["ebay_account_id"],
+    )
+    posting.post_refund_reversal(
+        conn, entry_date=april, amount_idr=amt, stage="ebay_wallet", ebay_account_id=topo["ebay_account_id"],
+    )
+
+    mar_rev = reporting.revenue_report(conn, period_month=_dt.date(2026, 3, 1))
+    apr_rev = reporting.revenue_report(conn, period_month=_dt.date(2026, 4, 1))
+    assert mar_rev.returns_allowances_idr == amt
+    assert apr_rev.returns_allowances_idr == -amt
+    assert mar_rev.returns_allowances_idr + apr_rev.returns_allowances_idr == Decimal("0")
+    # Per-account attribution works for the reversal too (via its EBAY_WALLET line).
+    apr_acct = reporting.revenue_report(
+        conn, period_month=_dt.date(2026, 4, 1), ebay_account_id=topo["ebay_account_id"]
+    )
+    assert apr_acct.returns_allowances_idr == -amt
+
+    for period in (_dt.date(2026, 3, 1), _dt.date(2026, 4, 1)):
+        assert reporting.cash_flow_statement(conn, period_month=period).difference_idr == Decimal("0")
+        pnl = reporting.pnl_report(conn, period_month=period)
+        pnl_ret = next(l for l in pnl.revenue_lines if l.code == "SALES_RETURNS_ALLOWANCES")
+        codes, _c = _DRILLDOWN_CODES["returns_allowances"]
+        lines = reporting.drilldown(conn, account_type_codes=codes, period_month=period)
+        # Contra-revenue is shown net on the P&L (credit-normal sign: negative for a refund).
+        assert sum((l.credit_idr - l.debit_idr for l in lines), Decimal("0")) == pnl_ret.amount_idr
+
+
 def test_cash_flow_customer_refund_via_payoneer_reduces_customer_receipts(prototype):
     """2026-09-29: the new 'customer_refund' review-queue category posts via
     the existing posting.post_refund() at the Payoneer stage — same light

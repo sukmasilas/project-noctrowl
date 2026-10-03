@@ -428,6 +428,7 @@ def test_category_options_follow_pl_statement_order():
     expected_order = [
         "revenue_settlement",
         "customer_refund",
+        "ebay_dispute_won",
         "cogs_purchase",
         "item_purchase",
         "inbound_shipping",

@@ -3086,6 +3086,104 @@ def test_customer_refund_unsupported_scope_fails_cleanly_without_blocking_batch(
 
 
 # ---------------------------------------------------------------------------
+# 'ebay_dispute_won' (added 2026-10-03) — inflow mirror of 'customer_refund'.
+# ---------------------------------------------------------------------------
+
+
+def _stage_and_label_dispute(conn, topo, *, scope, amount, category="ebay_dispute_won"):
+    if scope == "ebay":
+        src_id = make_source_document(
+            conn, document_type="ebay_sales_csv", period_month=_dt.date(2026, 4, 1),
+            ebay_account_id=topo["ebay_account_id"],
+        )
+        kwargs = dict(source_type="ebay_sales_csv", ebay_account_id=topo["ebay_account_id"])
+    elif scope == "payoneer":
+        src_id = make_source_document(
+            conn, document_type="payoneer_csv", period_month=_dt.date(2026, 4, 1),
+            wallet_group_id=topo["wallet_group_id"],
+        )
+        kwargs = dict(source_type="payoneer_csv", wallet_group_id=topo["wallet_group_id"])
+    else:
+        src_id = _make_bank_source(conn)
+        kwargs = dict(source_type="bank_statement")
+    stage_raw_lines(
+        conn,
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 4, 16),
+                raw_description="Claim: dispute won",
+                amount_idr=amount,
+                occurrence_index=1,
+            )
+        ],
+        **kwargs,
+    )
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category=category, labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+    return row_id
+
+
+def test_ebay_dispute_won_via_ebay_wallet_posts_balanced_and_is_idempotent(iprototype):
+    conn, topo = iprototype
+    row_id = _stage_and_label_dispute(conn, topo, scope="ebay", amount=Decimal("9951000"))
+    assert post_pending_rows(conn).posted == 1
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+    assert lines["EBAY_WALLET"][0].debit_amount_idr == Decimal("9951000")
+    assert lines["SALES_RETURNS_ALLOWANCES"][0].credit_amount_idr == Decimal("9951000")
+    assert_balanced(conn, entry_id)
+    assert post_pending_rows(conn).posted == 0
+
+
+def test_ebay_dispute_won_via_payoneer_posts_against_payoneer_wallet(iprototype):
+    conn, topo = iprototype
+    row_id = _stage_and_label_dispute(conn, topo, scope="payoneer", amount=Decimal("1899765"))
+    assert post_pending_rows(conn).posted == 1
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+    assert lines["PAYONEER_WALLET"][0].debit_amount_idr == Decimal("1899765")
+    assert lines["SALES_RETURNS_ALLOWANCES"][0].credit_amount_idr == Decimal("1899765")
+    assert_balanced(conn, entry_id)
+
+
+def test_ebay_dispute_won_outflow_is_flagged_not_posted(iprototype):
+    conn, topo = iprototype
+    row_id = _stage_and_label_dispute(conn, topo, scope="ebay", amount=Decimal("-9951000"))
+    result = post_pending_rows(conn)
+    assert result.posted == 0
+    assert result.skipped_sign_mismatch == 1
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status, review_queue.c.sign_mismatch_reason)
+        .where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is None
+    assert row.match_status == "needs_review"
+    assert "ebay_dispute_won" in row.sign_mismatch_reason
+
+
+def test_ebay_dispute_won_master_account_scope_fails_cleanly(iprototype):
+    conn, topo = iprototype
+    row_id = _stage_and_label_dispute(conn, topo, scope="master", amount=Decimal("9951000"))
+    result = post_pending_rows(conn)
+    assert result.posted == 0
+    assert result.failed_to_post == 1
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.posting_error_reason).where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is None
+    assert "ebay_dispute_won" in row.posting_error_reason
+
+
+# ---------------------------------------------------------------------------
 # 'cogs_refund' (added 2026-09-29) — money returned that reduces a
 # previously-recorded COGS purchase (an employee's cash-advance excess
 # refunded back, or a supplier refund for undelivered inventory — one

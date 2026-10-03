@@ -738,6 +738,62 @@ def post_refund(
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="ebay_refund", lines=lines, memo=memo)
 
 
+def post_refund_reversal(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    stage: str,  # 'ebay_wallet' | 'payoneer'
+    ebay_account_id: int | None = None,
+    wallet_group_id: int | None = None,
+    usd_amount: Decimal | None = None,
+    kurs_pajak_rate: Decimal | None = None,
+    ebay_order_ref: str | None = None,
+    memo: str | None = None,
+) -> int:
+    """Money eBay returns to the seller after the seller wins a buyer dispute
+    (added 2026-10-03; review-queue category 'ebay_dispute_won'). The exact
+    inflow mirror of ``post_refund``: debit the same wallet the refund came
+    out of (eBay Wallet or Payoneer Wallet), credit SALES_RETURNS_ALLOWANCES,
+    so a refund followed by a won dispute nets Sales Returns to zero. Kept as
+    its own function (not a direction flag on ``post_refund``) so
+    ``post_refund``'s behavior for existing callers is untouched. Uses the
+    same ``source_type='ebay_refund'``.
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_idr <= 0:
+        raise ValueError("amount_idr must be > 0 — a reversal is a real, positive amount received back.")
+    if stage == "ebay_wallet":
+        if ebay_account_id is None:
+            raise ValueError("stage='ebay_wallet' requires ebay_account_id")
+        cash_account_id = get_account_id(conn, "EBAY_WALLET", ebay_account_id=ebay_account_id)
+    elif stage == "payoneer":
+        if wallet_group_id is None:
+            raise ValueError("stage='payoneer' requires wallet_group_id")
+        cash_account_id = get_account_id(conn, "PAYONEER_WALLET", wallet_group_id=wallet_group_id)
+    else:
+        raise ValueError(f"stage must be 'ebay_wallet' or 'payoneer' (got {stage!r})")
+
+    returns_id = _singleton(conn, "SALES_RETURNS_ALLOWANCES")
+    lines = [
+        debit(
+            cash_account_id,
+            amount_idr,
+            amount_usd_ref=usd_amount,
+            fx_rate_used=kurs_pajak_rate,
+            ebay_order_ref=ebay_order_ref,
+        ),
+        credit(
+            returns_id,
+            amount_idr,
+            amount_usd_ref=usd_amount,
+            fx_rate_used=kurs_pajak_rate,
+            ebay_order_ref=ebay_order_ref,
+        ),
+    ]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="ebay_refund", lines=lines, memo=memo)
+
+
 # ---------------------------------------------------------------------------
 # Inter-account transfer — a distinct, non-P&L transaction type.
 # ---------------------------------------------------------------------------
