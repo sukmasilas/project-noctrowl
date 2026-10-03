@@ -365,6 +365,31 @@ def post_cogs_refund(
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
 
 
+def post_shipping_cost_refund(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    memo: str | None = None,
+) -> int:
+    """A shipping provider refunding an outbound shipping charge (added
+    2026-10-03; real trigger: Master Account line, +Rp 1,300,000, "Refund
+    claim / KRS GLOBAL JAYA PT"). A refund reduces the expense it refunds:
+    debit BCA_MAIN, credit SHIPPING_COST — the exact mirror of
+    ``post_cogs_refund``. Master Account (BCA_MAIN) scope only, no scope
+    parameter (see ingestion.matching._post_one_row's guard). Uses
+    ``source_type='bank_other'`` like ``post_cogs_refund``.
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_idr <= 0:
+        raise ValueError("amount_idr must be > 0 — a refund is a real, positive amount received back.")
+    shipping_id = _singleton(conn, "SHIPPING_COST")
+    bca_main_id = _singleton(conn, "BCA_MAIN")
+
+    lines = [debit(bca_main_id, amount_idr), credit(shipping_id, amount_idr)]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
+
+
 def post_shipping_cost_purchase(
     conn: Connection,
     *,

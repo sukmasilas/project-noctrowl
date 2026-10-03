@@ -436,6 +436,7 @@ def test_category_options_follow_pl_statement_order():
         "payroll",
         "operating_expense",
         "shipping_cost",
+        "shipping_cost_refund",
         "packaging_supplies",
         "contract_labor",
         "staff_meals_welfare",

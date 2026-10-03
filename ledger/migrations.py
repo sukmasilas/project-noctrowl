@@ -378,8 +378,12 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "inventory); and 'inventory_deposit', added 2026-09-29 for the "
             "new INVENTORY_DEPOSITS asset account (a down-payment/deposit "
             "paid toward inventory not yet received — see ledger/chart_of_"
-            "accounts.py and ledger.posting.post_inventory_deposit) — brings "
-            "the constraint to whatever the LATEST code defines in one step, "
+            "accounts.py and ledger.posting.post_inventory_deposit); "
+            "and 'shipping_cost_refund', added 2026-10-03 (a shipping "
+            "provider's refund for an outbound shipping charge — a credit "
+            "reducing the existing SHIPPING_COST account, see ledger.posting."
+            "post_shipping_cost_refund) — brings the constraint to whatever "
+            "the LATEST code defines in one step, "
             "regardless of which of those historical widenings a given "
             "database happens to be missing."
         ),
@@ -394,7 +398,7 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "'employee_loan_disbursement','item_purchase','inbound_shipping',"
             "'item_purchase_and_inbound_shipping','packaging_supplies',"
             "'staff_meals_welfare','customer_refund','cogs_refund',"
-            "'inventory_deposit','other'))",
+            "'shipping_cost_refund','inventory_deposit','other'))",
         ),
     ),
     MigrationStep(

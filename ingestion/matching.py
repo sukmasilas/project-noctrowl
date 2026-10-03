@@ -617,6 +617,11 @@ _DIRECTIONAL_CATEGORY_SIGNS: dict[str, str] = {
     # returned, and a supplier's refund for undelivered inventory). See
     # ledger.posting.post_cogs_refund.
     "cogs_refund": "inflow",
+    # Added 2026-10-03 — a shipping provider refunding an outbound shipping
+    # charge is always money coming BACK in (real trigger: Master Account
+    # line, +Rp 1,300,000, "Refund claim / KRS GLOBAL JAYA PT"). See
+    # ledger.posting.post_shipping_cost_refund.
+    "shipping_cost_refund": "inflow",
     # Added 2026-09-29 (new INVENTORY_DEPOSITS asset account — see
     # ledger/chart_of_accounts.py). A deposit PAYMENT is always an outflow
     # (real trigger: a Master Account bank line, "DP Box op / FARIZ
@@ -1132,6 +1137,23 @@ def _post_one_row(conn: Connection, row) -> int | None:
                 "re-check the classification or scope of this row."
             )
         return posting.post_cogs_refund(conn, entry_date=entry_date, amount_idr=abs(row.amount_idr), memo=row.raw_description)
+
+    if row.category == "shipping_cost_refund":
+        # Added 2026-10-03 — mirror of 'cogs_refund' above for SHIPPING_COST.
+        # post_shipping_cost_refund is hardcoded to BCA_MAIN (no scope
+        # parameter), so a row scoped to a wallet-group/eBay account fails
+        # cleanly instead of debiting BCA_MAIN for money that landed elsewhere.
+        if row.wallet_group_id is not None or row.ebay_account_id is not None:
+            raise ValueError(
+                "Category 'shipping_cost_refund' only supports a Master Account (consolidated) bank line — "
+                "SHIPPING_COST is a plain consolidated singleton account (see "
+                "ledger.posting.post_shipping_cost_refund) and this row is scoped to a "
+                "wallet-group/eBay account instead. Not posted — please re-check the "
+                "classification or scope of this row."
+            )
+        return posting.post_shipping_cost_refund(
+            conn, entry_date=entry_date, amount_idr=abs(row.amount_idr), memo=row.raw_description
+        )
 
     if row.category == "inventory_deposit":
         # Added 2026-09-29 — the INITIAL down-payment/deposit paid toward

@@ -84,6 +84,9 @@ CATEGORY_OPTIONS = [
     # a reclassification. Kurasi (and this category generally) is confirmed
     # genuinely outbound (to customers) — never touched by this change.
     ("shipping_cost", "Outbound Shipping (to Customer)"),
+    # Added 2026-10-03 — shipping provider refunds an outbound shipping charge
+    # (credit reducing SHIPPING_COST). Manual only, no keyword rule.
+    ("shipping_cost_refund", "Shipping Cost Refund"),
     # Added 2026-09-10 — some real Shopee/Tokopedia (and possibly other
     # vendor) purchases are for packaging supplies (boxes, bubble wrap, poly
     # mailers, etc.), not inventory items, and need their own category for

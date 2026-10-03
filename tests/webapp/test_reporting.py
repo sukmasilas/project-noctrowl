@@ -353,6 +353,30 @@ def test_cash_flow_cogs_refund_nets_against_cogs_purchases_bucket(prototype):
     assert report.difference_idr == Decimal("0")
 
 
+def test_shipping_cost_refund_pnl_cashflow_and_drilldown(prototype):
+    """2026-10-03: post_shipping_cost_refund() credits the existing
+    SHIPPING_COST account. Checks the two known whitelist spots: P&L shows
+    Shipping Cost net of the refund, the opex drill-down sums to the same
+    headline, and the Cash Flow identity (difference_idr) stays 0.
+    """
+    from webapp.reports_bp import _DRILLDOWN_CODES
+
+    conn, topo = prototype
+    posting.post_shipping_cost_purchase(conn, entry_date=DAY, amount_idr=Decimal("2000000"))
+    posting.post_shipping_cost_refund(conn, entry_date=DAY, amount_idr=Decimal("1300000"))
+
+    pnl = reporting.pnl_report(conn, period_month=PERIOD)
+    ship = [l for l in pnl.opex_lines if l.code == "SHIPPING_COST"]
+    assert len(ship) == 1 and ship[0].amount_idr == Decimal("700000")
+
+    codes, _cumulative = _DRILLDOWN_CODES["opex"]
+    lines = reporting.drilldown(conn, account_type_codes=codes, period_month=PERIOD)
+    assert sum((l.debit_idr - l.credit_idr for l in lines), Decimal("0")) == pnl.total_opex_idr
+
+    cf = reporting.cash_flow_statement(conn, period_month=PERIOD)
+    assert cf.difference_idr == Decimal("0")
+
+
 def test_cash_flow_customer_refund_via_payoneer_reduces_customer_receipts(prototype):
     """2026-09-29: the new 'customer_refund' review-queue category posts via
     the existing posting.post_refund() at the Payoneer stage — same light

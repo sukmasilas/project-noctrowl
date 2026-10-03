@@ -3256,6 +3256,84 @@ def test_cogs_refund_unsupported_scope_fails_cleanly_without_blocking_batch(ipro
     assert "cogs_refund" in bad_row.posting_error_reason
 
 
+def _label_one(conn, category):
+    row_id = conn.execute(select(review_queue.c.id)).scalar_one()
+    conn.execute(
+        update(review_queue)
+        .values(category=category, labeled_at=_dt.datetime.now(_dt.timezone.utc))
+        .where(review_queue.c.id == row_id)
+    )
+    return row_id
+
+
+def _stage_one(conn, src_id, amount, wallet_group_id=None):
+    kwargs = {"wallet_group_id": wallet_group_id} if wallet_group_id else {}
+    stage_raw_lines(
+        conn,
+        source_type="bank_statement",
+        source_document_id=src_id,
+        lines=[
+            RawLine(
+                transaction_date=_dt.date(2026, 3, 2),
+                raw_description="Refund claim / KRS GLOBAL JAYA PT",
+                amount_idr=Decimal(amount),
+                occurrence_index=1,
+            )
+        ],
+        **kwargs,
+    )
+
+
+def test_manually_labeled_shipping_cost_refund_posts_credit_to_shipping_cost(iprototype):
+    conn, topo = iprototype
+    _stage_one(conn, _make_bank_source(conn), "1300000")
+    row_id = _label_one(conn, "shipping_cost_refund")
+
+    assert post_pending_rows(conn).posted == 1
+    entry_id = conn.execute(
+        select(review_queue.c.posted_journal_entry_id).where(review_queue.c.id == row_id)
+    ).scalar_one()
+    lines = lines_by_code(conn, entry_id)
+    assert lines["SHIPPING_COST"][0].credit_amount_idr == Decimal("1300000")
+    assert lines["SHIPPING_COST"][0].debit_amount_idr == Decimal("0")
+    assert lines["BCA_MAIN"][0].debit_amount_idr == Decimal("1300000")
+    assert_balanced(conn, entry_id)
+    assert post_pending_rows(conn).posted == 0  # idempotent
+
+
+def test_shipping_cost_refund_sign_mismatch_is_flagged_not_posted(iprototype):
+    conn, topo = iprototype
+    _stage_one(conn, _make_bank_source(conn), "-1300000")
+    row_id = _label_one(conn, "shipping_cost_refund")
+
+    result = post_pending_rows(conn)
+    assert result.posted == 0
+    assert result.skipped_sign_mismatch == 1
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.match_status, review_queue.c.sign_mismatch_reason)
+        .where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is None
+    assert row.match_status == "needs_review"
+    assert "shipping_cost_refund" in row.sign_mismatch_reason
+
+
+def test_shipping_cost_refund_unsupported_scope_fails_cleanly(iprototype):
+    conn, topo = iprototype
+    src_id = _make_bank_source(conn, wallet_group_id=topo["wallet_group_id"])
+    _stage_one(conn, src_id, "1300000", wallet_group_id=topo["wallet_group_id"])
+    row_id = _label_one(conn, "shipping_cost_refund")
+
+    result = post_pending_rows(conn)
+    assert result.posted == 0
+    assert result.failed_to_post == 1
+    row = conn.execute(
+        select(review_queue.c.posted_at, review_queue.c.posting_error_reason).where(review_queue.c.id == row_id)
+    ).one()
+    assert row.posted_at is None
+    assert "shipping_cost_refund" in row.posting_error_reason
+
+
 # ---------------------------------------------------------------------------
 # 'inventory_deposit' (added 2026-09-29) — the INITIAL down-payment/deposit
 # paid toward inventory not yet received (real trigger: a Master Account
