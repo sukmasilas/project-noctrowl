@@ -570,7 +570,7 @@ review_queue = Table(
         "'owners_contribution','interest_income','contract_labor','shipping_cost','payroll',"
         "'employee_loan_disbursement','item_purchase','inbound_shipping',"
         "'item_purchase_and_inbound_shipping','packaging_supplies','staff_meals_welfare',"
-        "'customer_refund','ebay_dispute_won','cogs_refund','shipping_cost_refund','inventory_deposit','other')",
+        "'customer_refund','ebay_dispute_won','legacy_ebay_account_payout','cogs_refund','shipping_cost_refund','inventory_deposit','other')",
         name="ck_review_queue_category",
     ),
     # The idempotency invariant from CLAUDE.md rule 6, structural: a row can

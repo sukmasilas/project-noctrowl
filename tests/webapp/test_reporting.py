@@ -953,3 +953,27 @@ def test_pnl_cogs_shipping_split_reduces_gross_profit_and_shows_shipping_opex(pr
     shipping_line = next(l for l in report.opex_lines if l.code == "SHIPPING_COST")
     assert shipping_line.amount_idr == Decimal("2000000")
     assert report.total_opex_idr == Decimal("2000000")
+
+
+def test_legacy_ebay_account_payout_flows_through_reports_and_cash_flow(prototype):
+    """2026-10-03: Dr BCA_MAIN / Cr SALES_REVENUE (system-only legacy payout)
+    shows in P&L revenue, the sales_revenue drill-down ties to the P&L line,
+    Cash Flow counts it as cash from customers, and difference_idr stays 0.
+    """
+    from webapp.reports_bp import _DRILLDOWN_CODES
+
+    conn, topo = prototype
+    amt = Decimal("48643836")
+    posting.post_legacy_ebay_account_payout(conn, entry_date=_dt.date(2026, 2, 19), amount_idr=amt)
+    period = _dt.date(2026, 2, 1)
+
+    pnl = reporting.pnl_report(conn, period_month=period)
+    rev = next(l for l in pnl.revenue_lines if l.code == "SALES_REVENUE")
+    assert rev.amount_idr == amt
+    codes, _c = _DRILLDOWN_CODES["sales_revenue"]
+    lines = reporting.drilldown(conn, account_type_codes=codes, period_month=period)
+    assert sum((l.credit_idr - l.debit_idr for l in lines), Decimal("0")) == amt
+
+    cf = reporting.cash_flow_statement(conn, period_month=period)
+    assert cf.difference_idr == Decimal("0")
+    assert cf.ending_cash_idr - cf.beginning_cash_idr == amt

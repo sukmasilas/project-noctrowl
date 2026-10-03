@@ -52,7 +52,7 @@
           {% elif row.match_status == 'resolved_duplicate' %}<span class="badge blue">Resolved — duplicate</span>
           {% else %}<span class="badge amber">Needs Review</span>{% endif %}
         </td>
-        <td id="rq-category-{{ row.id }}">{{ row.category or '—' }}</td>
+        <td id="rq-category-{{ row.id }}">{{ system_category_labels.get(row.category, row.category) or '—' }}</td>
         <td id="rq-posted-{{ row.id }}">
           {% if row.match_status == 'resolved_duplicate' %}<span class="badge blue" title="{{ row.resolution_note }}">Already accounted for — journal entry #{{ row.duplicate_of_journal_entry_id }}</span>
           {% elif row.posted_at %}<span class="badge green">✓ {{ row.posted_at.strftime('%Y-%m-%d %H:%M') }}</span>

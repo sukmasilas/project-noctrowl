@@ -615,6 +615,10 @@ _DIRECTIONAL_CATEGORY_SIGNS: dict[str, str] = {
     # dispute: the inflow mirror of 'customer_refund'. See
     # _post_ebay_dispute_won / ledger.posting.post_refund_reversal.
     "ebay_dispute_won": "inflow",
+    # Added 2026-10-03 — SYSTEM-ONLY (never a human-selectable label): a
+    # retired eBay account's Payoneer payout landing in BCA Main, always an
+    # inflow. See _post_legacy_ebay_account_payout.
+    "legacy_ebay_account_payout": "inflow",
     # Added 2026-09-29 — money coming BACK to reduce a previously-recorded
     # COGS purchase is always an inflow (confirmed against both real
     # examples: an employee's Rp 415,000 unspent cash-advance excess
@@ -1042,6 +1046,27 @@ def _post_ebay_dispute_won(conn: Connection, row) -> int:
     )
 
 
+def _post_legacy_ebay_account_payout(conn: Connection, row) -> int:
+    """'legacy_ebay_account_payout' (added 2026-10-03) — SYSTEM-ONLY category,
+    applied only by scripts/post_legacy_ebay_account_payouts.py (never in the
+    Review Queue dropdown, never assigned by run_auto_match / any keyword
+    rule). Master Account (BCA Main bank-statement) lines only: anything
+    scoped to an eBay account / wallet group, or not a bank_statement line,
+    raises (caught per-row by ``post_pending_rows``) rather than posting.
+    """
+    if row.source_type != "bank_statement" or row.ebay_account_id is not None or row.wallet_group_id is not None:
+        raise ValueError(
+            "Category 'legacy_ebay_account_payout' is only valid for an unscoped Master Account "
+            "(BCA Main) bank-statement line. Not posted."
+        )
+    return posting.post_legacy_ebay_account_payout(
+        conn,
+        entry_date=row.transaction_date,
+        amount_idr=abs(row.amount_idr),
+        memo=row.raw_description,
+    )
+
+
 def _post_one_row(conn: Connection, row) -> int | None:
     """Returns the journal_entry_id this row should link to, or None if
     it's classified but genuinely not ready to post yet (see
@@ -1230,6 +1255,9 @@ def _post_one_row(conn: Connection, row) -> int | None:
 
     if row.category == "ebay_dispute_won":
         return _post_ebay_dispute_won(conn, row)
+
+    if row.category == "legacy_ebay_account_payout":
+        return _post_legacy_ebay_account_payout(conn, row)
 
     if row.category == "operating_expense":
         if row.linked_invoice_id is not None:

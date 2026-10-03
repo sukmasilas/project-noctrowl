@@ -47,12 +47,12 @@ from ledger.balances import account_balance_before, account_balance_through
 from ledger.schema import account_types, accounts, consignment_sales, ebay_accounts, wallet_groups
 from webapp.db import get_db
 from webapp.documents_bp import list_untraceable_invoices
-from webapp.review_queue_bp import CATEGORY_OPTIONS
+from webapp.review_queue_bp import CATEGORY_OPTIONS, SYSTEM_CATEGORY_LABELS
 from webapp.scoping import list_ebay_accounts, parse_period
 
 bp = Blueprint("wallet", __name__, url_prefix="/wallet")
 
-_CATEGORY_LABELS = dict(CATEGORY_OPTIONS)
+_CATEGORY_LABELS = {**dict(CATEGORY_OPTIONS), **SYSTEM_CATEGORY_LABELS}
 
 # The 4 wallet account_types, in CLAUDE.md's Chart of accounts order.
 _WALLET_ACCOUNT_TYPE_CODES = ["EBAY_WALLET", "PAYONEER_WALLET", "BCA_BRIDGING", "BCA_MAIN"]

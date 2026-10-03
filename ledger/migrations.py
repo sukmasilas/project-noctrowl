@@ -379,6 +379,9 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "new INVENTORY_DEPOSITS asset account (a down-payment/deposit "
             "paid toward inventory not yet received — see ledger/chart_of_"
             "accounts.py and ledger.posting.post_inventory_deposit); "
+            "'legacy_ebay_account_payout', added 2026-10-03 (SYSTEM-ONLY, never "
+            "human-selectable: net revenue from a retired eBay account's Payoneer "
+            "payouts landing in BCA Main, see ledger.posting.post_legacy_ebay_account_payout); "
             "'ebay_dispute_won', added 2026-10-03 (eBay returning money after "
             "the seller wins a buyer dispute — inflow mirror of 'customer_refund', "
             "see ledger.posting.post_refund_reversal); "
@@ -401,7 +404,7 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "'employee_loan_disbursement','item_purchase','inbound_shipping',"
             "'item_purchase_and_inbound_shipping','packaging_supplies',"
             "'staff_meals_welfare','customer_refund','ebay_dispute_won',"
-            "'cogs_refund','shipping_cost_refund','inventory_deposit','other'))",
+            "'legacy_ebay_account_payout','cogs_refund','shipping_cost_refund','inventory_deposit','other'))",
         ),
     ),
     MigrationStep(

@@ -169,6 +169,15 @@ CATEGORY_OPTIONS = [
 # <select>, just addressable by code without re-walking the list.
 CATEGORY_LABELS = dict(CATEGORY_OPTIONS)
 
+# Display-only labels for SYSTEM-ONLY categories: valid in the DB CHECK and
+# renderable on screens, but deliberately NOT in CATEGORY_OPTIONS, so a human
+# can never select them (label_row validates against CATEGORY_OPTIONS only).
+# 'legacy_ebay_account_payout' (added 2026-10-03) is applied solely by
+# scripts/post_legacy_ebay_account_payouts.py.
+SYSTEM_CATEGORY_LABELS = {
+    "legacy_ebay_account_payout": "Legacy eBay Account Payout (system-applied)",
+}
+
 
 @bp.route("/")
 def index():
@@ -226,6 +235,7 @@ def index():
         matched_count=summary_counts.get("matched", 0),
         needs_review_count=summary_counts.get("needs_review", 0),
         category_options=CATEGORY_OPTIONS,
+        system_category_labels=SYSTEM_CATEGORY_LABELS,
     )
 
 
@@ -300,6 +310,8 @@ def label_row(row_id: int):
     # next sync re-flagged it).
     consignor_item_ref = (request.form.get("consignor_item_ref") or "").strip() or None
     valid_categories = {c for c, _ in CATEGORY_OPTIONS}
+    # System-only categories (SYSTEM_CATEGORY_LABELS) are never in
+    # CATEGORY_OPTIONS, so a crafted POST naming one is rejected right here.
     if category not in valid_categories:
         return _fail("Please choose a valid category.")
 

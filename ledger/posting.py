@@ -310,6 +310,51 @@ def post_cogs_purchase(
     return _insert_journal_entry(conn, entry_date=entry_date, source_type="cogs_purchase", lines=lines, memo=memo)
 
 
+LEGACY_EBAY_ACCOUNT_PAYOUT_MEMO_CAVEAT = (
+    "Documented approximation: revenue is recognized NET of the retired eBay account's own "
+    "eBay fees, Payoneer fee and FX (they cannot be separated without that account's data, "
+    "which this system does not hold), and is recognized when the cash arrived in BCA Main, "
+    "not when the underlying sale happened."
+)
+
+
+def post_legacy_ebay_account_payout(
+    conn: Connection,
+    *,
+    entry_date: _dt.date,
+    amount_idr: Decimal,
+    memo: str | None = None,
+) -> int:
+    """A Payoneer payout from an old, retired eBay account (one this system
+    has no eBay/Payoneer data for and never will) landing directly in BCA
+    Main. Debit BCA_MAIN, credit SALES_REVENUE at the IDR actually received.
+
+    SYSTEM-ONLY (review-queue category 'legacy_ebay_account_payout' — never a
+    human-selectable label; see scripts/post_legacy_ebay_account_payouts.py).
+    Master Account scope only, so no ebay_account_id/wallet_group_id
+    parameters. No USD reference exists (``amount_usd_ref`` stays NULL).
+
+    Uses ``source_type='bank_other'`` — the generic catch-all for
+    bank-statement-originated entries with no dedicated source_type. NOT
+    'ebay_sale' (that value implies an eBay-CSV-sourced sale with gross/fee
+    split and an order ref, which this entry does not have) and no new enum
+    value is needed.
+
+    The memo ALWAYS carries the net-of-fees / cash-basis approximation
+    caveat (appended if the caller's own memo doesn't already include it).
+    """
+    _require_decimal(amount_idr, "amount_idr")
+    if amount_idr <= 0:
+        raise ValueError("amount_idr must be > 0 — a legacy payout is a real, positive amount received.")
+    memo = (memo or "Legacy eBay account payout").strip()
+    if LEGACY_EBAY_ACCOUNT_PAYOUT_MEMO_CAVEAT not in memo:
+        memo = f"{memo} | {LEGACY_EBAY_ACCOUNT_PAYOUT_MEMO_CAVEAT}"
+    bca_main_id = _singleton(conn, "BCA_MAIN")
+    revenue_id = _singleton(conn, "SALES_REVENUE")
+    lines = [debit(bca_main_id, amount_idr), credit(revenue_id, amount_idr)]
+    return _insert_journal_entry(conn, entry_date=entry_date, source_type="bank_other", lines=lines, memo=memo)
+
+
 def post_cogs_refund(
     conn: Connection,
     *,
